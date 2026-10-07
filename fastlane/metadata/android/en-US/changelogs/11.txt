@@ -1,0 +1,7 @@
+Failover done right: switching to a backup provider is now session-scoped only - your saved primary provider is never overwritten, comes back the moment the task ends, and a provider you picked manually mid-task is kept. A Stop press or a newer retry now cancels any stale delayed restart, so overlapping duplicate sessions can no longer start.
+
+Smarter failure detection: sessions only react to explicit provider error shapes (API Error: 4xx, HTTP/1.1 429, payment required...). Loose words like "quota" or "expired" in your code, logs or diagnostics no longer kill tasks, and a 429 rate limit never silently switches your saved API key anymore.
+
+Changes tab fixed on retry: files modified by a failed attempt (before the provider switched) now show up in the review list instead of silently disappearing.
+
+Stability: the native launcher's fd cleanup is fork-safe (no more rare hangs before exec), fully frees its memory on every failure path, and never leaves an orphaned child behind.

@@ -148,8 +148,19 @@ class AntigravityRuntimeBridge(
     private val finished = ConcurrentHashMap.newKeySet<String>()
     @Volatile private var activeProcess: Process? = null
     @Volatile private var activeSessionId: String? = null
-    @Volatile private var userStopRequested = false
     @Volatile private var foregroundResultPosted = false
+
+    /**
+     * Stop intent is per-session: a new prompt right after Stop can start a
+     * session while the previous session's process is still dying, and a
+     * bridge-level flag would let the old tail suppress the new session's
+     * completion notification or clear its stop request.
+     */
+    private class AntigravitySessionState {
+        @Volatile var userStopRequested: Boolean = false
+    }
+
+    private val sessionStates = ConcurrentHashMap<String, AntigravitySessionState>()
 
     fun configureProjectRoot(projectId: String, rootPath: String) = checkpoints.configureProjectRoot(projectId, rootPath)
 
@@ -268,18 +279,23 @@ class AntigravityRuntimeBridge(
     ): String = withContext(Dispatchers.IO + NonCancellable) {
         val sessionId = UUID.randomUUID().toString()
         activeSessionId = sessionId
-        userStopRequested = false
         foregroundResultPosted = false
         finished.remove(sessionId)
+        val state = AntigravitySessionState().also { sessionStates[sessionId] = it }
         eventBus.emit(RuntimeEvent.SessionStarted(sessionId))
         if (!installer.isAgentInstalled(com.jarves.mh.model.AgentKind.ANTIGRAVITY)) {
             emitFailure(sessionId, "Antigravity CLI is not installed. Open Settings → Coding agent to install it.")
+            sessionStates.remove(sessionId)
             return@withContext sessionId
         }
 
+        // Kept so a failed attempt can still persist the files it changed
+        // before dying (see the onFailure handler below).
+        var attemptWorkspace: File? = null
+        var attemptBaseline: Map<String, String>? = null
         runCatching {
             RuntimeTaskController.stopAction = {
-                userStopRequested = true
+                state.userStopRequested = true
                 activeProcess?.destroy()
             }
             startForegroundRuntime(projectSlug)
@@ -287,6 +303,8 @@ class AntigravityRuntimeBridge(
             val workspace = checkpoints.ensureWorkspace(projectId)
             checkpoints.createCheckpoint(projectId, workspace)
             val before = checkpoints.snapshot(workspace)
+            attemptWorkspace = workspace
+            attemptBaseline = before
             val command = antigravityCommand(model(), effort(), conversationId(projectId))
             val process = installer.process(
                 installed.proot,
@@ -298,7 +316,7 @@ class AntigravityRuntimeBridge(
                 emulateHardLinks = false,
             )
             activeProcess = process
-            if (userStopRequested) process.destroy()
+            if (state.userStopRequested) process.destroy()
             val request = JSONObject()
                 .put("event", "user")
                 .put("message", JSONObject().put("content", antigravityWorkspacePrompt(projectSlug, prompt)))
@@ -369,14 +387,39 @@ class AntigravityRuntimeBridge(
             emitCompleted(sessionId)
             finishForegroundRuntime(true, projectSlug, "Antigravity finished the task in $projectSlug.")
         }.onFailure {
-            val message = if (userStopRequested) "Stopped by user" else friendlyError(it.message.orEmpty())
+            // An exception mid-stream skips the success path's change
+            // computation. Persist the failed attempt's edits so the next
+            // checkpoint baseline cannot silently absorb them.
+            val failedWorkspace = attemptWorkspace
+            val failedBaseline = attemptBaseline
+            if (failedWorkspace != null && failedBaseline != null) {
+                runCatching {
+                    val failed = checkpoints.changedFiles(failedWorkspace, failedBaseline)
+                    if (failed.isNotEmpty()) {
+                        checkpoints.saveChangedPaths(projectId, failed)
+                        eventBus.emit(
+                            RuntimeEvent.FilesChanged(
+                                sessionId,
+                                checkpoints.buildChangeDetails(projectId, failedWorkspace, checkpoints.readChangedPaths(projectId)),
+                            ),
+                        )
+                    }
+                }
+            }
+            val stopped = state.userStopRequested
+            val message = if (stopped) "Stopped by user" else friendlyError(it.message.orEmpty())
             emitFailure(sessionId, message)
-            if (userStopRequested) cancelForegroundRuntime()
+            if (stopped) cancelForegroundRuntime()
             else finishForegroundRuntime(false, projectSlug, message)
         }
-        activeProcess = null
-        activeSessionId = null
-        RuntimeTaskController.stopAction = null
+        // A failover restart can begin a new session while this tail is still
+        // running; only tear down state that still belongs to this session.
+        if (activeSessionId == sessionId) {
+            activeProcess = null
+            activeSessionId = null
+            RuntimeTaskController.stopAction = null
+        }
+        sessionStates.remove(sessionId)
         sessionId
     }
 
@@ -388,7 +431,7 @@ class AntigravityRuntimeBridge(
 
     override suspend fun stopSession(sessionId: String) {
         if (activeSessionId == sessionId) {
-            userStopRequested = true
+            sessionStates[sessionId]?.userStopRequested = true
             activeProcess?.destroy()
             emitFailure(sessionId, "Stopped by user")
         }

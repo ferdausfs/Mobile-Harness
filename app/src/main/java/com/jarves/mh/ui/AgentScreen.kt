@@ -73,6 +73,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -222,6 +223,13 @@ fun AgentScreen(
     var antigravitySearch by rememberSaveable { mutableStateOf("") }
     var antigravityCode by rememberSaveable { mutableStateOf("") }
     var viewedAgent by rememberSaveable { mutableStateOf(state.agentKind) }
+
+    // Follow the active agent whenever it changes elsewhere (onboarding,
+    // Settings, or the switch after a successful install) so the highlighted
+    // tab and the configuration card below never go stale.
+    LaunchedEffect(state.agentKind) {
+        viewedAgent = state.agentKind
+    }
 
     val orderedAgents = remember(state.primaryAgentKind) {
         listOf(state.primaryAgentKind) + AgentKind.entries.filterNot { it == state.primaryAgentKind }
@@ -847,12 +855,25 @@ fun AgentScreen(
                                     modifier = Modifier
                                         .weight(1f)
                                         .clickable(enabled = state.agentInstalling == null) {
-                                            if (isInstalled) {
-                                                // Keep the viewed tab in sync with what actually
-                                                // became active; a rejected switch (task running)
-                                                // must not blank out the provider section.
-                                                if (!state.isRunning) viewedAgent = agent
-                                                onSelectAgent(agent)
+                                            when {
+                                                // Installed: switch right away. A rejected switch
+                                                // (task running) is reported by selectAgent() via
+                                                // toast; the viewed tab only moves when the switch
+                                                // can actually happen so the provider section never
+                                                // blanks out mid-task.
+                                                isInstalled -> {
+                                                    if (!state.isRunning) viewedAgent = agent
+                                                    onSelectAgent(agent)
+                                                }
+                                                // Not installed and idle: show this tab's install
+                                                // card and start the install with live progress.
+                                                // installAgent() switches to it once it succeeds.
+                                                !state.isRunning -> {
+                                                    viewedAgent = agent
+                                                    onInstallAgent(agent)
+                                                }
+                                                // Task running: installAgent() refuses with a toast.
+                                                else -> onInstallAgent(agent)
                                             }
                                         },
                                 ) {
@@ -961,6 +982,19 @@ fun AgentScreen(
                                     shape = RoundedCornerShape(12.dp),
                                 ) {
                                     Text("Install ${viewedAgent.title}", fontWeight = FontWeight.Bold)
+                                }
+                                // Surface the failure reason from a previous install
+                                // attempt; agentMessage is only cleared/replaced when the
+                                // next install starts, so it always refers to this card.
+                                val installFailure = state.agentMessage
+                                if (state.agentInstalling == null && installFailure != null) {
+                                    Spacer(Modifier.height(10.dp))
+                                    Text(
+                                        installFailure,
+                                        fontSize = 12.sp,
+                                        lineHeight = 16.sp,
+                                        color = MaterialTheme.colorScheme.error,
+                                    )
                                 }
                             }
                         }

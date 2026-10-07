@@ -310,6 +310,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var githubAuthJob: kotlinx.coroutines.Job? = null
     @Volatile private var lastOpenedAntigravityAuthUrl: String? = null
     private var activeRuntimeRequest: RuntimeRetryRequest? = null
+    /**
+     * The provider the user actually saved, captured before a failover switches
+     * the running session to a backup. Preferences are never overwritten by a
+     * failover, so this is only used to restore the UI state when the task ends.
+     */
+    private var failoverPrimaryProvider: ProviderProfile? = null
     private val failedApiKeyIds = mutableSetOf<String>()
     private val failedProviderKinds = mutableSetOf<String>()
     private val transcriptWrites = Channel<TranscriptWrite>(Channel.CONFLATED)
@@ -3245,8 +3251,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     hasSecret = { kind -> vault.contains(kind.name) },
                 )
                 if (candidate != null) {
+                    // Session-scoped switch only: the saved primary provider must
+                    // stay untouched so the next task starts on it again.
+                    if (failoverPrimaryProvider == null) failoverPrimaryProvider = state.value.provider
                     val profile = candidate.toProfile()
-                    preferences.saveProvider(profile, state.value.agentKind)
                     usageTracker.recordFailover(turnKind, candidate.kind, "Daily request limit reached")
                     _state.update {
                         it.copy(
@@ -3656,6 +3664,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             activeRuntimeRequest = null
             failedApiKeyIds.clear()
             failedProviderKinds.clear()
+            restoreFailoverPrimaryProvider()
         }
         if (event is RuntimeEvent.FilesChanged || event is RuntimeEvent.SessionCompleted) {
             _state.value.activeProject?.id?.let { touchProject(it) }
@@ -3679,6 +3688,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val next = credentials.firstOrNull { it.id !in failedApiKeyIds }
         if (next != null) {
             if (!vault.activate(request.provider.kind.name, next.id)) return false
+            // New identity: a restart already scheduled by the previous failure
+            // must observe activeRuntimeRequest !== its request and cancel itself.
+            val retryRequest = request.copy()
+            activeRuntimeRequest = retryRequest
             _state.update {
                 it.copy(
                     activeSessionId = null,
@@ -3690,6 +3703,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             viewModelScope.launch {
                 kotlinx.coroutines.delay(300)
+                // A Stop press or a newer retry must cancel this stale restart.
+                if (!_state.value.isRunning) return@launch
+                if (activeRuntimeRequest !== retryRequest) return@launch
                 request.runtime.startSession(
                     request.project.id,
                     request.project.slug,
@@ -3701,7 +3717,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             return true
         }
-        return retryWithNextProvider(event, request, current)
+        return retryWithNextProvider(event, request)
     }
 
     /**
@@ -3712,11 +3728,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun retryWithNextProvider(
         event: RuntimeEvent.SessionFailed,
         request: RuntimeRetryRequest,
-        current: AppUiState,
     ): Boolean {
         failedProviderKinds += request.provider.kind.name
         val candidate = nextFailoverCandidate(
-            chain = current.failoverProviders,
+            chain = _state.value.failoverProviders,
             currentKind = request.provider.kind,
             failedProviderNames = failedProviderKinds,
             hasSecret = { kind -> vault.contains(kind.name) },
@@ -3725,11 +3740,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val profile = candidate.toProfile()
         val activeKeyName = vault.list(profile.kind.name)
             .firstOrNull(ApiKeyInfo::isActive)?.name
-        preferences.saveProvider(profile, current.agentKind)
+        if (failoverPrimaryProvider == null) failoverPrimaryProvider = request.provider
         // Track the provider this session now runs on, otherwise the next
         // failure re-reads the ORIGINAL provider's credentials and the chain
         // ping-pongs between the same two providers forever.
-        activeRuntimeRequest = request.copy(provider = profile)
+        val retryRequest = request.copy(provider = profile)
+        activeRuntimeRequest = retryRequest
         failedApiKeyIds.clear()
         _state.update {
             it.copy(
@@ -3747,6 +3763,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         viewModelScope.launch {
             kotlinx.coroutines.delay(300)
+            // A Stop press or a newer retry must cancel this stale restart.
+            if (!_state.value.isRunning) return@launch
+            if (activeRuntimeRequest !== retryRequest) return@launch
             request.runtime.startSession(
                 request.project.id,
                 request.project.slug,
@@ -3759,12 +3778,71 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         return true
     }
 
+    /**
+     * A failover must never outlive the task it served: the saved primary
+     * provider comes back the moment the session completes, fails for good,
+     * or the user stops it.
+     */
+    private fun restoreFailoverPrimaryProvider() {
+        val original = failoverPrimaryProvider ?: return
+        failoverPrimaryProvider = null
+        if (_state.value.provider.kind == original.kind) return
+        _state.update {
+            it.copy(
+                provider = original,
+                activeApiKeyName = vault.list(original.kind.name).firstOrNull(ApiKeyInfo::isActive)?.name,
+            )
+        }
+    }
+
+    /**
+     * Matches only explicit provider error shapes. Session reasons frequently
+     * carry a raw runtime diagnostic (lastDiagnostic), so loose words such as
+     * "quota", "expired" or a bare status number must never trigger failover.
+     */
+    private fun isRateLimitFailure(reason: String): Boolean {
+        val value = reason.lowercase()
+        return explicitStatusShape(value, 429) ||
+            "rate_limit_error" in value ||
+            "rate limit exceeded" in value ||
+            "rate limit reached" in value ||
+            "rate limiting" in value ||
+            "too many requests" in value ||
+            "usage limit" in value
+    }
+
     private fun isApiKeyFailure(reason: String): Boolean {
         val value = reason.lowercase()
-        return "api key" in value || "authentication" in value || "user not found" in value ||
-            "http 401" in value || "http 403" in value || "http 429" in value ||
-            "http 402" in value || "expired" in value || "quota" in value || "rate limit" in value ||
-            "insufficient credit" in value || "insufficient funds" in value || "payment required" in value
+        if (isRateLimitFailure(value)) return true
+        return "user not found" in value ||
+            "authentication_failed" in value ||
+            "authentication failed" in value ||
+            "invalid api key" in value ||
+            "invalid_api_key" in value ||
+            "invalid x-api-key" in value ||
+            "provider rejected the saved api key" in value ||
+            "api key expired" in value ||
+            "token has expired" in value ||
+            "oauth token" in value && "expired" in value ||
+            "insufficient credit" in value ||
+            "insufficient funds" in value ||
+            "credit balance" in value ||
+            "payment required" in value ||
+            "quota exceeded" in value ||
+            explicitStatusShape(value, 401) ||
+            explicitStatusShape(value, 402) ||
+            explicitStatusShape(value, 403)
+    }
+
+    /** A status code only counts when an explicit error context precedes it:
+     *  "API Error: 429", "HTTP/1.1 401", "402 Payment Required". A bare number
+     *  (line numbers, durations, IDs) must never match. */
+    private fun explicitStatusShape(value: String, code: Int): Boolean {
+        if (Regex("api error[^0-9]{0,40}$code([^0-9]|$)").containsMatchIn(value)) return true
+        if (Regex("http[/ ]{0,2}$code([^0-9]|$)").containsMatchIn(value)) return true
+        if (Regex("http/1\.[01] $code([^0-9]|$)").containsMatchIn(value)) return true
+        if (Regex("status code[: ]+$code([^0-9]|$)").containsMatchIn(value)) return true
+        return Regex("(^|[^0-9])$code (unauthorized|forbidden|payment required|too many requests)").containsMatchIn(value)
     }
 
     private fun touchProject(projectId: String) {

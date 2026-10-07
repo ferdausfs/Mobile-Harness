@@ -1,0 +1,9 @@
+Reliability release: full stability scan found and fixed 23 bugs, big and small.
+
+Failover chain: no more infinite retry loop - the chain now walks past the first backup to the next one, and a daily-limit switch happens before a new task even starts. Out-of-credit (HTTP 402) providers now trigger failover too, and 429 rate limits show as "Limit" instead of "Key rejected" on the live card.
+
+False failures fixed: sessions no longer die just because your code or logs contain words like "rate limit" or "expired" - only real provider errors are acted on.
+
+Stability: unbounded memory growth fixed in terminal output and transcript saving, process/fd leaks plugged, hung guest commands are killed and reaped, key store failures no longer crash onboarding (you get a retry toast instead), and release builds refuse to ship unsigned so your updates keep installing over each other.
+
+Misc: "Refresh models" works for Ollama /api base URLs, OpenAI tool-call-only replies no longer inject a literal "null" text, OpenRouter double /v1 base URLs fixed, backup provider dialog no longer overwrites your active provider key, and several locale-format fixes.

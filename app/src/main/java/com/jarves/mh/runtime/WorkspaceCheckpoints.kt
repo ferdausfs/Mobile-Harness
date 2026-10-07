@@ -113,8 +113,12 @@ class WorkspaceCheckpoints(private val filesDir: File) {
                     ),
                 )
             }
-            val before = beforeFile?.readBytes() ?: ByteArray(0)
-            val after = afterFile?.readBytes() ?: ByteArray(0)
+            val before = beforeFile
+                ?.takeIf { !java.nio.file.Files.isSymbolicLink(it.toPath()) }
+                ?.readBytes() ?: ByteArray(0)
+            val after = afterFile
+                ?.takeIf { !java.nio.file.Files.isSymbolicLink(it.toPath()) }
+                ?.readBytes() ?: ByteArray(0)
             val binary = before.any { it == 0.toByte() } || after.any { it == 0.toByte() }
             val (additions, deletions) = lineChanges(before, after)
             ChangeItem(

@@ -45,7 +45,13 @@ class AppUpdater(
             val root = JSONObject(body)
             val versionCode = root.optLong("versionCode")
             if (versionCode <= BuildConfig.VERSION_CODE) return null
-            val artifact = root.optJSONObject("artifacts")?.optJSONObject(BuildConfig.APP_VARIANT)
+            // Fall back to the sibling "online" artifact when the running
+            // variant has none: both flavors share the applicationId, and
+            // verifyApk rejects anything that does not actually match.
+            val artifact = root.optJSONObject("artifacts")?.let { artifacts ->
+                artifacts.optJSONObject(BuildConfig.APP_VARIANT)
+                    ?: artifacts.optJSONObject("online")
+            }
                 ?: root.optJSONObject(BuildConfig.APP_VARIANT)
                 ?: root
             val url = artifact.optString("url").ifBlank { artifact.optString("apkUrl") }
@@ -91,14 +97,20 @@ class AppUpdater(
         } finally {
             connection.disconnect()
         }
-        if (info.sha256.isNotBlank()) {
-            val actual = sha256(partial)
-            check(actual.equals(info.sha256, ignoreCase = true)) { "Downloaded APK failed its SHA-256 verification" }
+        return try {
+            if (info.sha256.isNotBlank()) {
+                val actual = sha256(partial)
+                check(actual.equals(info.sha256, ignoreCase = true)) { "Downloaded APK failed its SHA-256 verification" }
+            }
+            verifyApk(partial, info.versionCode)
+            if (target.exists()) target.delete()
+            check(partial.renameTo(target)) { "Could not prepare the downloaded update" }
+            target
+        } catch (error: Throwable) {
+            // Do not strand a ~90 MB orphan when verification fails.
+            partial.delete()
+            throw error
         }
-        verifyApk(partial, info.versionCode)
-        if (target.exists()) target.delete()
-        check(partial.renameTo(target)) { "Could not prepare the downloaded update" }
-        return target
     }
 
     @Suppress("DEPRECATION")

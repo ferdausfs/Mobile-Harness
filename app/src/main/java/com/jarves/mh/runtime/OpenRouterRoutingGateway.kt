@@ -80,7 +80,9 @@ internal class OpenRouterRoutingGateway(
 
         runCatching {
             val routedBody = applyOpenRouterRouting(JSONObject(body.decodeToString()), profile).toString().toByteArray()
-            val endpoint = profile.resolvedBaseUrl.trimEnd('/') + path
+            // Claude Code always requests /v1/messages; a user base that already
+            // ends in /v1 must not produce a doubled /v1/v1 segment.
+            val endpoint = profile.resolvedBaseUrl.trimEnd('/').removeSuffix("/v1") + path
             val connection = URL(endpoint).openConnection() as HttpURLConnection
             try {
                 connection.requestMethod = "POST"

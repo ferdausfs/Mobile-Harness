@@ -142,4 +142,20 @@ class ProviderUsageTrackerTest {
         assertTrue(snapshot.remoteUsageJson!!.contains("credits"))
         assertTrue(snapshot.remoteUsageFetchedAtMillis > 0)
     }
+
+    @Test
+    fun `rate limit failure wording maps to limit state`() {
+        // Regression: the runtime detectors now emit this exact wording for 429;
+        // it must land on LIMIT (yellow), not AUTH_ERROR (red).
+        val tracker = trackerWith(FakePrefs())
+        tracker.recordSessionFailure(ProviderKind.OLLAMA_CLOUD, "The provider is rate limiting requests.")
+        assertEquals(ProviderLiveState.LIMIT, tracker.snapshot(ProviderKind.OLLAMA_CLOUD).state)
+    }
+
+    @Test
+    fun `credits failure wording maps to limit state`() {
+        val tracker = trackerWith(FakePrefs())
+        tracker.recordSessionFailure(ProviderKind.OLLAMA_CLOUD, "The provider reports insufficient credits or quota.")
+        assertEquals(ProviderLiveState.LIMIT, tracker.snapshot(ProviderKind.OLLAMA_CLOUD).state)
+    }
 }

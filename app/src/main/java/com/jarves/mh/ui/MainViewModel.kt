@@ -312,7 +312,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var activeRuntimeRequest: RuntimeRetryRequest? = null
     private val failedApiKeyIds = mutableSetOf<String>()
     private val failedProviderKinds = mutableSetOf<String>()
-    private val transcriptWrites = Channel<TranscriptWrite>(Channel.UNLIMITED)
+    private val transcriptWrites = Channel<TranscriptWrite>(Channel.CONFLATED)
     private val initialAgentKind = AgentKind.fromStored(preferences.agentKind)
     private val initialPrimaryAgentKind = preferences.primaryAgentKind
         .takeIf(String::isNotBlank)
@@ -510,10 +510,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         if (count > 0) {
                             offset += count
                             streamed.append(bytes.decodeToString(0, count))
-                            _terminalLiveOutput.value = sanitizeTerminalOutput(streamed.toString())
+                            // Keep only the tail; a verbose command must not
+                            // grow this buffer without bound.
+                            if (streamed.length > MAX_STREAMED_TERMINAL_OUTPUT) {
+                                streamed.delete(0, streamed.length - MAX_STREAMED_TERMINAL_OUTPUT)
+                            }
+                            val text = streamed.toString()
+                            _terminalLiveOutput.value = sanitizeTerminalOutput(text)
                                 .trimEnd()
                                 .takeLast(MAX_PROJECT_TERMINAL_OUTPUT)
-                            if (!autoConfirmed && shouldAutoConfirmPackageCommand(command, streamed.toString())) {
+                            if (!autoConfirmed && shouldAutoConfirmPackageCommand(command, text)) {
                                 proc.outputStream.write("y\n".toByteArray())
                                 proc.outputStream.flush()
                                 autoConfirmed = true
@@ -721,7 +727,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             if (count > 0) {
                 offset += count
                 output.append(bytes.decodeToString(0, count))
-                val visible = sanitizeTerminalOutput(output.toString().substringBefore(marker))
+                // Keep only the tail; a verbose command must not grow this
+                // buffer without bound.
+                if (output.length > MAX_STREAMED_TERMINAL_OUTPUT) {
+                    output.delete(0, output.length - MAX_STREAMED_TERMINAL_OUTPUT)
+                }
+                val captured = output.toString()
+                val visible = sanitizeTerminalOutput(captured.substringBefore(marker))
                     .takeLast(MAX_PROJECT_TERMINAL_OUTPUT)
                 if (!autoConfirmed && shouldAutoConfirmPackageCommand(command, visible)) {
                     process.outputStream.write("y\n".toByteArray())
@@ -980,7 +992,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun getSavedApiKeys(kind: ProviderKind): List<ApiKeyInfo> = vault.list(kind.name)
 
     fun addApiKey(kind: ProviderKind, name: String, secret: String): List<ApiKeyInfo> {
-        vault.add(kind.name, name, secret)
+        val entry = vault.add(kind.name, name, secret)
+        if (entry == null && secret.isNotBlank()) {
+            _state.update { it.copy(toastMessage = "Could not store the API key securely. Try again.") }
+        }
         val keys = vault.list(kind.name)
         refreshActiveApiKey(kind)
         return keys
@@ -1018,7 +1033,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     init {
         viewModelScope.launch { RuntimeSetupController.snapshot.collect(::onSetupSnapshot) }
-        viewModelScope.launch { claudeRuntime.events.collect(::onRuntimeEvent) }
+        viewModelScope.launch(backgroundGuard) { claudeRuntime.events.collect(::onRuntimeEvent) }
         viewModelScope.launch { bootstrap() }
     }
 
@@ -1310,9 +1325,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun finishOnboarding(profile: ProviderProfile, secret: String) {
-        vault.put(profile.kind.name, secret)
+        val stored = if (secret.isNotBlank()) vault.put(profile.kind.name, secret) else null
+        if (stored == false) {
+            _state.update { it.copy(toastMessage = "Could not store the API key securely. Re-save it from Agent → AI provider.") }
+        }
         var saved = profile.copy(
-            hasSecret = secret.isNotBlank() || vault.contains(profile.kind.name),
+            hasSecret = if (secret.isNotBlank()) stored == true else vault.contains(profile.kind.name),
         )
         if (profile.kind == ProviderKind.CUSTOM) {
             // A validation that auto-detected the wire format wins over the URL-shape guess.
@@ -1332,7 +1350,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /** Adds a backup provider to the automatic failover chain (optionally storing its API key). */
     fun addFailoverProvider(profile: ProviderProfile, secret: String) {
         val entry = FailoverProvider.fromProfile(profile)
-        if (secret.isNotBlank()) vault.put(profile.kind.name, secret)
+        if (secret.isNotBlank() && !vault.contains(profile.kind.name)) {
+            // The vault is per provider kind: overwriting an existing pool would
+            // silently swap the ACTIVE provider's key out from under it, so only
+            // seed a fresh pool here.
+            vault.put(profile.kind.name, secret)
+        }
         val updated = _state.value.failoverProviders + entry
         preferences.saveFailoverProviders(updated)
         _state.update {
@@ -1377,8 +1400,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
         if (_state.value.usageCheckInProgress != null) return
+        // Set synchronously so a double-tap cannot start two concurrent checks.
+        _state.update { it.copy(usageCheckInProgress = kind.name) }
         viewModelScope.launch(backgroundGuard + Dispatchers.IO) {
-            _state.update { it.copy(usageCheckInProgress = kind.name) }
             val result = OllamaUsageClient.fetch(vault.get(kind.name).orEmpty())
             if (result.ok) {
                 usageTracker.saveRemoteUsage(kind, result.body)
@@ -3209,7 +3233,41 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         failedApiKeyIds.clear()
         failedProviderKinds.clear()
-        usageTracker.recordTurnStart(state.value.provider.kind)
+        // Soft daily budget: when the active provider's locally tracked requests
+        // are exhausted, hand the turn to the failover chain before starting.
+        val turnKind = state.value.provider.kind
+        if (state.value.agentKind != AgentKind.ANTIGRAVITY) {
+            if (usageTracker.snapshot(turnKind).remainingToday == 0) {
+                val candidate = nextFailoverCandidate(
+                    chain = state.value.failoverProviders,
+                    currentKind = turnKind,
+                    failedProviderNames = emptySet(),
+                    hasSecret = { kind -> vault.contains(kind.name) },
+                )
+                if (candidate != null) {
+                    val profile = candidate.toProfile()
+                    preferences.saveProvider(profile, state.value.agentKind)
+                    usageTracker.recordFailover(turnKind, candidate.kind, "Daily request limit reached")
+                    _state.update {
+                        it.copy(
+                            provider = profile,
+                            activeApiKeyName = vault.list(profile.kind.name).firstOrNull(ApiKeyInfo::isActive)?.name,
+                            toastMessage = "${turnKind.title} daily limit reached. Switched to ${candidate.kind.title}.",
+                            liveProcess = it.liveProcess + ActivityItem(
+                                "Provider switched",
+                                "${turnKind.title} hit its daily request limit. Using ${candidate.kind.title} · ${candidate.model}",
+                                true,
+                            ),
+                        )
+                    }
+                } else {
+                    _state.update {
+                        it.copy(toastMessage = "${turnKind.title} daily limit reached, and no enabled backup provider is available.")
+                    }
+                }
+            }
+            usageTracker.recordTurnStart(state.value.provider.kind)
+        }
         activeRuntimeRequest = RuntimeRetryRequest(
             runtime = activeRuntime(),
             project = project,
@@ -3392,8 +3450,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             (event.reason.contains("sign-in", true) || event.reason.contains("authentication", true))) {
             antigravityAuthController.invalidateSession(event.reason)
         }
-        if (event is RuntimeEvent.SessionFailed) {
-            usageTracker.recordSessionFailure(_state.value.provider.kind, event.reason)
+        if (event is RuntimeEvent.SessionFailed && _state.value.agentKind != AgentKind.ANTIGRAVITY &&
+            !event.reason.equals("Stopped by user", ignoreCase = true)
+        ) {
+            usageTracker.recordSessionFailure(
+                activeRuntimeRequest?.provider?.kind ?: _state.value.provider.kind,
+                event.reason,
+            )
         }
         if (event is RuntimeEvent.SessionFailed && retryWithNextApiKey(event)) return
         _state.update { current ->
@@ -3584,8 +3647,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
         }
-        if (event is RuntimeEvent.SessionCompleted) {
-            usageTracker.recordSessionCompleted(_state.value.provider.kind)
+        if (event is RuntimeEvent.SessionCompleted && _state.value.agentKind != AgentKind.ANTIGRAVITY) {
+            usageTracker.recordSessionCompleted(
+                activeRuntimeRequest?.provider?.kind ?: _state.value.provider.kind,
+            )
         }
         if (event is RuntimeEvent.SessionCompleted || event is RuntimeEvent.SessionFailed) {
             activeRuntimeRequest = null
@@ -3618,6 +3683,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 it.copy(
                     activeSessionId = null,
                     activeApiKeyName = next.name,
+                    pendingApproval = null,
                     toastMessage = "${active.name} failed. Switched to ${next.name}.",
                     liveProcess = it.liveProcess + ActivityItem("API key switched", "Using ${next.name}", true),
                 )
@@ -3660,11 +3726,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val activeKeyName = vault.list(profile.kind.name)
             .firstOrNull(ApiKeyInfo::isActive)?.name
         preferences.saveProvider(profile, current.agentKind)
+        // Track the provider this session now runs on, otherwise the next
+        // failure re-reads the ORIGINAL provider's credentials and the chain
+        // ping-pongs between the same two providers forever.
+        activeRuntimeRequest = request.copy(provider = profile)
+        failedApiKeyIds.clear()
         _state.update {
             it.copy(
                 provider = profile,
                 activeSessionId = null,
                 activeApiKeyName = activeKeyName,
+                pendingApproval = null,
                 toastMessage = "${request.provider.kind.title} limit reached. Switched to ${candidate.kind.title}.",
                 liveProcess = it.liveProcess + ActivityItem(
                     "Provider switched",
@@ -3691,7 +3763,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val value = reason.lowercase()
         return "api key" in value || "authentication" in value || "user not found" in value ||
             "http 401" in value || "http 403" in value || "http 429" in value ||
-            "expired" in value || "quota" in value || "rate limit" in value
+            "http 402" in value || "expired" in value || "quota" in value || "rate limit" in value ||
+            "insufficient credit" in value || "insufficient funds" in value || "payment required" in value
     }
 
     private fun touchProject(projectId: String) {
@@ -3755,6 +3828,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         private const val MAX_VISIBLE_WORKSPACE_ENTRIES = 2_000
         private const val MAX_PROJECT_TERMINAL_HISTORY = 100
         private const val MAX_PROJECT_TERMINAL_OUTPUT = 200_000
+        /** Cap for the in-memory streamed terminal accumulator (tail-kept). */
+        private const val MAX_STREAMED_TERMINAL_OUTPUT = 1024 * 1024
         private const val MAX_ATTACHMENTS_PER_MESSAGE = 5
         private const val MAX_PROCESS_OUTPUT_BYTES = 512 * 1024
         private const val MAX_ATTACHMENT_BYTES = 25L * 1024L * 1024L

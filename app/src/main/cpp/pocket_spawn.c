@@ -1,5 +1,7 @@
 #define _GNU_SOURCE
 #include <jni.h>
+#include <ctype.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -13,6 +15,24 @@
 #include <unistd.h>
 
 static void close_pair(int pair[2]) { close(pair[0]); close(pair[1]); }
+
+/**
+ * The child is forked from the whole app process, so every descriptor the
+ * parent holds (sockets, files) would survive execve unless it is
+ * close-on-exec. Sweep /proc/self/fd so guest code cannot inherit or even
+ * reach the app's descriptors.
+ */
+static void close_inherited_fds(void) {
+    DIR *dir = opendir("/proc/self/fd");
+    if (!dir) return;
+    int dir_fd = dirfd(dir);
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        int fd = atoi(entry->d_name);
+        if (fd > STDERR_FILENO && fd != dir_fd) close(fd);
+    }
+    closedir(dir);
+}
 
 JNIEXPORT jintArray JNICALL
 Java_com_jarves_mh_runtime_NativeSpawn_spawn(JNIEnv *env, jobject self, jobjectArray java_argv,
@@ -59,7 +79,7 @@ Java_com_jarves_mh_runtime_NativeSpawn_spawn(JNIEnv *env, jobject self, jobjectA
         if (!name) { close(master_fd); return NULL; }
         slave_name = strdup(name);
         if (!slave_name) { close(master_fd); return NULL; }
-    } else if (pipe(in_pipe) != 0) {
+    } else if (pipe2(in_pipe, O_CLOEXEC) != 0) {
         return NULL;
     }
     pid_t pid = fork();
@@ -98,6 +118,7 @@ Java_com_jarves_mh_runtime_NativeSpawn_spawn(JNIEnv *env, jobject self, jobjectA
         }
         chdir(cwd);
         prctl(PR_SET_DUMPABLE, 1, 0, 0, 0);
+        close_inherited_fds();
         execve(argv[0], argv, envp);
         dprintf(STDERR_FILENO, "Pocket native exec failed: %s\n", strerror(errno));
         _exit(127);
@@ -112,7 +133,7 @@ Java_com_jarves_mh_runtime_NativeSpawn_spawn(JNIEnv *env, jobject self, jobjectA
         return NULL;
     }
     if (!use_pty) close(in_pipe[0]);
-    int input_fd = use_pty ? dup(master_fd) : in_pipe[1];
+    int input_fd = use_pty ? (int)fcntl(master_fd, F_DUPFD_CLOEXEC, 0) : in_pipe[1];
     if (input_fd < 0) {
         kill(pid, SIGKILL);
         if (use_pty) close(master_fd);

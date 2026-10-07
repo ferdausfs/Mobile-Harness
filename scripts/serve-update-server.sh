@@ -50,8 +50,11 @@ if [[ ! -f "$apk_src" ]]; then
 fi
 
 cp "$apk_src" "$serve_dir/$apk_name"
-sha="$(shasum -a 256 "$serve_dir/$apk_name" | awk '{print $1}')"
-size="$(stat -f%z "$serve_dir/$apk_name")"
+sha="$(sha256sum "$serve_dir/$apk_name" 2>/dev/null | awk '{print $1}')"
+if [[ -z "$sha" ]]; then
+    sha="$(shasum -a 256 "$serve_dir/$apk_name" | awk '{print $1}')"
+fi
+size="$(wc -c < "$serve_dir/$apk_name" | tr -d '[:space:]')"
 
 cat > "$serve_dir/mobile-harness-update.json" <<JSON
 {

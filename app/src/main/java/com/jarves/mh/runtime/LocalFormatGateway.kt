@@ -26,6 +26,12 @@ internal class LocalFormatGateway(
     private val server = ServerSocket(0, 8, InetAddress.getByName("127.0.0.1"))
     val url: String = "http://127.0.0.1:${server.localPort}"
 
+    private companion object {
+        const val MAX_REQUEST_BYTES = 32 * 1024 * 1024
+        const val MAX_HEADER_LINE_BYTES = 16 * 1024
+        const val MIN_LINE_CAPACITY = 128
+    }
+
     fun start(): LocalFormatGateway = apply {
         Thread({ acceptLoop() }, "mh-format-gateway").apply { isDaemon = true; start() }
     }
@@ -49,6 +55,11 @@ internal class LocalFormatGateway(
             if (split > 0) headers[line.substring(0, split).lowercase()] = line.substring(split + 1).trim()
         }
         val length = headers["content-length"]?.toIntOrNull() ?: 0
+        val output = BufferedOutputStream(socket.getOutputStream())
+        if (length !in 0..MAX_REQUEST_BYTES) {
+            writeJson(output, 413, errorJson("invalid_request_error", "Request is too large"))
+            return
+        }
         val bodyBytes = ByteArray(length)
         var offset = 0
         while (offset < length) {
@@ -57,7 +68,6 @@ internal class LocalFormatGateway(
             offset += count
         }
         val path = requestLine.split(' ').getOrNull(1).orEmpty().substringBefore('?')
-        val output = BufferedOutputStream(socket.getOutputStream())
         if (path.endsWith("/count_tokens")) {
             val approximate = bodyBytes.decodeToString().length / 4 + 1
             writeJson(output, 200, JSONObject().put("input_tokens", approximate).toString())
@@ -153,7 +163,9 @@ internal class LocalFormatGateway(
     private fun fromOpenAi(source: JSONObject, model: String): JSONObject {
         val message = source.optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("message") ?: JSONObject()
         val content = JSONArray()
-        val text = message.optString("content")
+        // Android's org.json returns the literal string "null" for JSON null
+        // values; tool-call-only responses must not leak a "null" text block.
+        val text = if (message.isNull("content")) "" else message.optString("content")
         if (text.isNotBlank()) content.put(JSONObject().put("type", "text").put("text", text))
         val calls = message.optJSONArray("tool_calls") ?: JSONArray()
         for (index in 0 until calls.length()) {
@@ -307,7 +319,7 @@ internal class LocalFormatGateway(
         val fallbackBase = openAiCompatibleBase(base)
         if (fallbackBase != null) {
             val (code, text) = postJson(fallbackBase + "/chat/completions", body)
-            if (code in 200..299) reportUsage(code, text)
+            reportUsage(code, text)
             return code to text
         }
         reportUsage(lastCode, lastBody)
@@ -337,7 +349,7 @@ internal class LocalFormatGateway(
         val fallbackBase = openAiCompatibleBase(base)
         if (fallbackBase != null) {
             val (code, text) = postJson(fallbackBase + "/responses", body)
-            if (code in 200..299) reportUsage(code, text)
+            reportUsage(code, text)
             return code to text
         }
         reportUsage(lastCode, lastBody)
@@ -413,12 +425,12 @@ internal class LocalFormatGateway(
     }
 
     private fun readLine(input: BufferedInputStream): String? {
-        val bytes = ArrayList<Byte>()
+        val bytes = ArrayList<Byte>(MIN_LINE_CAPACITY)
         while (true) {
             val value = input.read()
             if (value < 0) return if (bytes.isEmpty()) null else bytes.toByteArray().decodeToString()
             if (value == '\n'.code) return bytes.toByteArray().decodeToString().trimEnd('\r')
-            bytes += value.toByte()
+            if (bytes.size < MAX_HEADER_LINE_BYTES) bytes += value.toByte()
         }
     }
 

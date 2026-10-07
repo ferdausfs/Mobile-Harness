@@ -33,34 +33,52 @@ import org.json.JSONArray
 
 internal object ProviderRuntimeErrorDetector {
     fun detect(line: String): String? {
-        val json = runCatching { JSONObject(line) }.getOrNull()
-        val combined = buildString {
-            append(line)
-            json?.let {
-                append(' ')
-                append(it.optString("error"))
-                append(' ')
-                append(it.optString("message"))
-                append(' ')
-                append(it.optString("result"))
-            }
-        }.lowercase()
+        val trimmed = line.trim()
+        val json = runCatching { JSONObject(trimmed) }.getOrNull()
+        // Only error-shaped events may carry auth/quota signals. Tool results and
+        // assistant text are echoed verbatim in stream-json, so scanning their
+        // content would kill healthy sessions whenever the agent reads code or
+        // logs that merely mention "rate limit" or an expired token.
+        val combined: String = if (json != null) {
+            when {
+                json.optString("subtype") == "api_retry" ->
+                    "api_retry http ${json.optInt("error_status")} ${json.optString("message")}"
+                json.optString("type") == "result" && json.optBoolean("is_error") ->
+                    "${json.optString("subtype")} ${json.optString("result")} ${json.optString("error")} ${json.optString("message")}"
+                json.optString("type") == "result" -> return null
+                json.optString("type") == "system" ->
+                    "${json.optString("subtype")} ${json.optString("error")} ${json.optString("message")}"
+                else -> return null
+            }.lowercase()
+        } else {
+            // Non-JSON diagnostics (stderr-style lines merged into the output file).
+            trimmed.lowercase()
+        }
         return when {
             "user not found" in combined -> "User not found. Check the API key and provider account."
             "authentication_failed" in combined ||
                 "authentication failed" in combined ||
                 "invalid api key" in combined ||
                 "http 401" in combined ||
+                mentionsStatusCode(combined, 401) ||
                 "http 403" in combined ||
-                "http 429" in combined ||
+                mentionsStatusCode(combined, 403) ||
                 "expired" in combined ||
-                "quota" in combined ||
-                "rate limit" in combined ||
-                (json?.optString("subtype") == "api_retry" && json.optInt("error_status") in listOf(401, 403, 429)) ->
+                "quota" in combined ->
                 "The provider rejected the saved API key."
+            "http 429" in combined || "rate limit" in combined || mentionsStatusCode(combined, 429) ->
+                "The provider is rate limiting requests."
+            "http 402" in combined || mentionsStatusCode(combined, 402) ||
+                "insufficient credit" in combined || "insufficient funds" in combined || "payment required" in combined ->
+                "The provider reports insufficient credits or quota."
             else -> null
         }
     }
+
+    /** Matches a standalone HTTP status token like "API Error: 429" without
+     *  firing on longer numbers (1429) or hex-looking identifiers. */
+    private fun mentionsStatusCode(text: String, code: Int): Boolean =
+        Regex("(^|[^0-9])$code([^0-9]|$)").containsMatchIn(text)
 }
 
 class ClaudeRuntimeBridge(
@@ -283,9 +301,14 @@ class ClaudeRuntimeBridge(
         }
         formatGateway?.close()
         openRouterGateway?.close()
-        activeProcess = null
-        activeSessionId = null
-        RuntimeTaskController.stopAction = null
+        // A failover restart can begin a new session while this tail is still
+        // running; only tear down state that still belongs to this session.
+        if (activeSessionId == sessionId) {
+            activeProcess?.let { runCatching { it.outputStream.close() } }
+            activeProcess = null
+            activeSessionId = null
+            RuntimeTaskController.stopAction = null
+        }
         sessionId
     }
 

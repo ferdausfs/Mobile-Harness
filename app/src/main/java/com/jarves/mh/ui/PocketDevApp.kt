@@ -2278,7 +2278,7 @@ private fun ProviderSetupScreen(
             },
         )
     }
-    var apiKey by rememberSaveable { mutableStateOf("") }
+    var apiKey by remember { mutableStateOf("") }
     var showAgentPicker by rememberSaveable { mutableStateOf(false) }
 
     if (showAgentPicker) {

@@ -316,6 +316,8 @@ class AppPreferences(private val context: Context) : AppPreferencesBridge {
                 put("model", entry.model)
                 put("dshApi", entry.dshApi)
                 put("enabled", entry.enabled)
+                put("openRouterOrder", entry.openRouterProviderOrder)
+                put("openRouterFallbacks", entry.openRouterAllowFallbacks)
             })
         }
         preferences.edit().putString("failover_providers_json", arr.toString()).apply()
@@ -335,6 +337,8 @@ class AppPreferences(private val context: Context) : AppPreferencesBridge {
                 model = item.optString("model", kind.defaultModel),
                 dshApi = item.optString("dshApi", defaultDshApiForProvider(kind)),
                 enabled = item.optBoolean("enabled", true),
+                openRouterProviderOrder = item.optString("openRouterOrder", ""),
+                openRouterAllowFallbacks = item.optBoolean("openRouterFallbacks", true),
             )
         }
     }.getOrDefault(emptyList())

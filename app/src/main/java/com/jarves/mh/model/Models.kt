@@ -208,6 +208,9 @@ data class FailoverProvider(
     /** Wire format for CUSTOM entries: anthropic-messages | openai-completions | openai-responses. */
     val dshApi: String = defaultDshApiForProvider(kind),
     val enabled: Boolean = true,
+    /** Saved OpenRouter routing order (comma-separated slugs) so backups keep their explicit routing after failover. */
+    val openRouterProviderOrder: String = "",
+    val openRouterAllowFallbacks: Boolean = true,
 ) {
     /** Resolved effective base URL, mirroring [ProviderProfile.resolvedBaseUrl]. */
     val resolvedBaseUrl: String get() = if (kind.fixedBaseUrl) kind.defaultBaseUrl else baseUrl
@@ -218,6 +221,8 @@ data class FailoverProvider(
         model = model,
         hasSecret = true,
         dshApi = dshApi,
+        openRouterProviderOrder = openRouterProviderOrder,
+        openRouterAllowFallbacks = openRouterAllowFallbacks,
     )
 
     companion object {
@@ -226,6 +231,8 @@ data class FailoverProvider(
             baseUrl = profile.baseUrl,
             model = profile.model,
             dshApi = profile.dshApi,
+            openRouterProviderOrder = profile.openRouterProviderOrder,
+            openRouterAllowFallbacks = profile.openRouterAllowFallbacks,
         )
     }
 }

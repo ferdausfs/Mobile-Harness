@@ -77,8 +77,8 @@ android {
         targetSdk = if (playBuild) 36 else 28
         // Keep literal defaults so F-Droid's static manifest parser can detect
         // the tagged release. Gradle properties may still override Play builds.
-        versionCode = 9
-        versionName = "1.0.8"
+        versionCode = 10
+        versionName = "1.0.9"
         providers.gradleProperty("appVersionCode").orNull?.toIntOrNull()?.let { versionCode = it }
         providers.gradleProperty("appVersionName").orNull?.let { versionName = it }
 
@@ -180,6 +180,19 @@ tasks.register("playReadinessCheck") {
         }
         check(hasUploadSigning) {
             "Set MH_UPLOAD_STORE_FILE, MH_UPLOAD_STORE_PASSWORD, MH_UPLOAD_KEY_ALIAS, and MH_UPLOAD_KEY_PASSWORD."
+        }
+    }
+}
+
+// Fail the build instead of silently producing an unsigned release APK that
+// existing installs can never update over. Checked at execution time so
+// debug builds and unit tests do not require the signing secrets.
+tasks.matching { task ->
+    (task.name.startsWith("package") || task.name.startsWith("bundle")) && task.name.endsWith("Release")
+}.configureEach {
+    doFirst {
+        check(hasUploadSigning) {
+            "Release output would be unsigned. Export MH_UPLOAD_STORE_FILE, MH_UPLOAD_STORE_PASSWORD, MH_UPLOAD_KEY_ALIAS, and MH_UPLOAD_KEY_PASSWORD pointing at the release keystore before building."
         }
     }
 }

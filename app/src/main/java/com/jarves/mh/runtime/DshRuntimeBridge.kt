@@ -188,9 +188,13 @@ class DshRuntimeBridge(
             }
         }
         openRouterGateway?.close()
-        activeProcess = null
-        activeSessionId = null
-        RuntimeTaskController.stopAction = null
+        // A failover restart can begin a new session while this tail is still
+        // running; only tear down state that still belongs to this session.
+        if (activeSessionId == sessionId) {
+            activeProcess = null
+            activeSessionId = null
+            RuntimeTaskController.stopAction = null
+        }
         sessionId
     }
 
@@ -514,11 +518,20 @@ class DshRuntimeBridge(
                 message.contains("autherror", true) ||
                 message.contains("expired", true) ||
                 message.contains("quota", true) ||
-                message.contains("rate limit", true) ||
-                listOf("401", "403", "429").any { code ->
+                listOf("401", "403").any { code ->
                     message.contains(code) && (message.contains("auth", true) || message.contains("HTTP", true))
                 } ->
                 "The provider rejected the saved API key."
+            message.contains("rate limit", true) ||
+                listOf("429").any { code ->
+                    message.contains(code) && (message.contains("auth", true) || message.contains("HTTP", true))
+                } ->
+                "The provider is rate limiting requests."
+            message.contains("http 402", true) ||
+                message.contains("insufficient credit", true) ||
+                message.contains("insufficient funds", true) ||
+                message.contains("payment required", true) ->
+                "The provider reports insufficient credits or quota."
             message.contains("missing_credential", true) ->
                 "No API key reached DeepSeek Harness. Re-save the provider key in Settings."
             message.contains("not installed", true) -> message.take(300)

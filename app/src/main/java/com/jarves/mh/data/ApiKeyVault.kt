@@ -17,32 +17,43 @@ class ApiKeyVault(context: Context) {
     private val preferences = context.getSharedPreferences("pocket_secrets", Context.MODE_PRIVATE)
     private val alias = "pocket-provider-key"
 
+    /**
+     * Stores/replaces the active pool entry's secret. Returns false when the
+     * secret is blank or AndroidKeyStore fails — callers surface that instead
+     * of crashing mid-onboarding on flaky keystore devices.
+     */
     @Synchronized
-    fun put(providerId: String, secret: String) {
-        if (secret.isBlank()) return
-        val entries = ensurePool(providerId)
-        val active = entries.firstOrNull { it.id == activeId(providerId) } ?: entries.firstOrNull()
-        if (active == null) {
-            add(providerId, "Primary", secret)
-        } else {
-            putEncrypted(secretKey(providerId, active.id), secret)
-        }
+    fun put(providerId: String, secret: String): Boolean {
+        if (secret.isBlank()) return false
+        return runCatching {
+            val entries = ensurePool(providerId)
+            val active = entries.firstOrNull { it.id == activeId(providerId) } ?: entries.firstOrNull()
+            if (active == null) {
+                add(providerId, "Primary", secret) != null
+            } else {
+                putEncrypted(secretKey(providerId, active.id), secret)
+                true
+            }
+        }.getOrDefault(false)
     }
 
+    /** Returns null when the secret is blank or the key cannot be stored securely. */
     @Synchronized
-    fun add(providerId: String, name: String, secret: String): ApiKeyInfo {
-        require(secret.isNotBlank()) { "API key cannot be empty" }
-        val entries = ensurePool(providerId).toMutableList()
-        val entry = ApiKeyInfo(
-            id = UUID.randomUUID().toString(),
-            name = name.trim().ifBlank { "API key ${entries.size + 1}" }.take(60),
-            isActive = entries.isEmpty(),
-        )
-        putEncrypted(secretKey(providerId, entry.id), secret)
-        entries += entry.copy(isActive = false)
-        savePool(providerId, entries)
-        if (entries.size == 1) setActiveId(providerId, entry.id)
-        return entry.copy(isActive = entries.size == 1)
+    fun add(providerId: String, name: String, secret: String): ApiKeyInfo? {
+        if (secret.isBlank()) return null
+        return runCatching {
+            val entries = ensurePool(providerId).toMutableList()
+            val entry = ApiKeyInfo(
+                id = UUID.randomUUID().toString(),
+                name = name.trim().ifBlank { "API key ${entries.size + 1}" }.take(60),
+                isActive = entries.isEmpty(),
+            )
+            putEncrypted(secretKey(providerId, entry.id), secret)
+            entries += entry.copy(isActive = false)
+            savePool(providerId, entries)
+            if (entries.size == 1) setActiveId(providerId, entry.id)
+            entry.copy(isActive = entries.size == 1)
+        }.getOrNull()
     }
 
     @Synchronized

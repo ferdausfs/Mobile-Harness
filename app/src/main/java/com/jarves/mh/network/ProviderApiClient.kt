@@ -217,8 +217,9 @@ class ProviderApiClient {
         connectTimeoutMs: Int = 12_000,
         readTimeoutMs: Int = 20_000,
     ): HttpResult {
-        return runCatching {
-            val connection = (URL(endpoint).openConnection() as HttpURLConnection).apply {
+        val connection = URL(endpoint).openConnection() as HttpURLConnection
+        return try {
+            connection.apply {
                 requestMethod = method
                 connectTimeout = connectTimeoutMs
                 readTimeout = readTimeoutMs
@@ -242,9 +243,12 @@ class ProviderApiClient {
             val code = connection.responseCode
             val stream = if (code in 200..299) connection.inputStream else connection.errorStream
             val responseBody = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
-            connection.disconnect()
             HttpResult(code, responseBody)
-        }.getOrElse { HttpResult(0, "", it.message ?: "Network connection failed",) }
+        } catch (error: Exception) {
+            HttpResult(0, "", error.message ?: "Network connection failed")
+        } finally {
+            connection.disconnect()
+        }
     }
 
     private fun modelEndpoints(baseUrl: String, protocol: ProviderProtocol): List<String> {
@@ -255,6 +259,8 @@ class ProviderApiClient {
             ProviderProtocol.OPENAI_CHAT, ProviderProtocol.OPENAI_RESPONSES -> buildList {
                 add("$base/models")
                 if (!base.endsWith("/v1")) add("$base/v1/models")
+                // Ollama-style native /api bases expose the OpenAI catalog at /v1.
+                if (base.endsWith("/api")) add("${base.removeSuffix("/api")}/v1/models")
             }
             else -> listOf("$base/v1/models", "$base/models", "$withoutAnthropic/models", "$withoutAnthropic/v1/models")
         }

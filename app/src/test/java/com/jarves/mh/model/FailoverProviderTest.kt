@@ -107,4 +107,48 @@ class FailoverProviderTest {
         assertEquals(entry.model, profile.model)
         assertEquals(ProviderKind.CUSTOM, FailoverProvider.fromProfile(profile).kind)
     }
+
+    @Test
+    fun roundTripsOpenRouterRoutingThroughProfile() {
+        val entry = FailoverProvider(
+            kind = ProviderKind.LLM_ROUTER,
+            model = "openrouter/auto",
+            openRouterProviderOrder = "deepseek/deepseek-chat,anthropic/claude-3.5-sonnet",
+            openRouterAllowFallbacks = false,
+        )
+        val profile = entry.toProfile()
+
+        assertEquals(entry.openRouterProviderOrder, profile.openRouterProviderOrder)
+        assertEquals(entry.openRouterAllowFallbacks, profile.openRouterAllowFallbacks)
+        val restored = FailoverProvider.fromProfile(profile)
+        assertEquals(entry.openRouterProviderOrder, restored.openRouterProviderOrder)
+        assertEquals(entry.openRouterAllowFallbacks, restored.openRouterAllowFallbacks)
+    }
+
+    @Test
+    fun multiHopChainWalksPastTheFirstBackup() {
+        // Regression shape for the v1.0.8 failover loop: once the first backup
+        // (Ollama Cloud) has itself failed, the next candidate must be the
+        // second backup (DeepSeek), not the first backup again.
+        val chain = listOf(
+            FailoverProvider(kind = ProviderKind.OLLAMA_CLOUD),
+            FailoverProvider(kind = ProviderKind.DEEPSEEK),
+        )
+
+        val first = nextFailoverCandidate(
+            chain = chain,
+            currentKind = ProviderKind.ANTHROPIC,
+            failedProviderNames = setOf(ProviderKind.ANTHROPIC.name),
+            hasSecret = hasSecret,
+        )
+        assertEquals(ProviderKind.OLLAMA_CLOUD, first?.kind)
+
+        val second = nextFailoverCandidate(
+            chain = chain,
+            currentKind = ProviderKind.OLLAMA_CLOUD,
+            failedProviderNames = setOf(ProviderKind.ANTHROPIC.name, ProviderKind.OLLAMA_CLOUD.name),
+            hasSecret = hasSecret,
+        )
+        assertEquals(ProviderKind.DEEPSEEK, second?.kind)
+    }
 }

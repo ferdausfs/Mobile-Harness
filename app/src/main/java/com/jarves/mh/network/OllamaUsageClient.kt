@@ -2,6 +2,7 @@ package com.jarves.mh.network
 
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.Locale
 import org.json.JSONObject
 
 /**
@@ -31,8 +32,10 @@ object OllamaUsageClient {
         }
         val usage = request("$BASE/usage", "GET", apiKey, body = null)
         if (!usage.first.let { it in 200..299 }) {
-            val message = when (usage.first) {
-                401, 403 -> "Ollama rejected this API key."
+            val message = when {
+                usage.first == 401 || usage.first == 403 -> "Ollama rejected this API key."
+                usage.first == 0 -> usage.second.takeIf(String::isNotBlank)?.let { "Ollama usage check failed: $it" }
+                    ?: "Ollama usage endpoint is unreachable."
                 else -> "Ollama usage endpoint returned HTTP ${usage.first}."
             }
             return Result(ok = false, body = usage.second, httpCode = usage.first, error = message)
@@ -42,6 +45,16 @@ object OllamaUsageClient {
         val me = request("$BASE/me", "POST", apiKey, body = "{}")
         if (me.first in 200..299) {
             runCatching { combined.put("me", JSONObject(me.second)) }
+        }
+        if (combined.length() == 0) {
+            // Both payloads failed to parse — do not report success with an
+            // empty card.
+            return Result(
+                ok = false,
+                body = usage.second,
+                httpCode = usage.first,
+                error = "Ollama returned an unexpected usage payload.",
+            )
         }
         return Result(ok = true, body = combined.toString(), httpCode = usage.first)
     }
@@ -98,13 +111,13 @@ object OllamaUsageClient {
     private fun prettify(path: String): String = path
         .split('.')
         .joinToString(" · ") { segment ->
-            segment.replace(Regex("([a-z])([A-Z])"), "$1 $2").replace('_', ' ').lowercase()
+            segment.replace(Regex("([a-z])([A-Z])"), "$1 $2").replace('_', ' ').lowercase(Locale.ROOT)
         }
 
     private fun compact(value: Any?): String = when (value) {
         null, JSONObject.NULL -> "—"
         is String -> value.take(60)
-        is Double -> if (value == value.toLong().toDouble()) value.toLong().toString() else String.format("%.4g", value)
+        is Double -> if (value == value.toLong().toDouble()) value.toLong().toString() else String.format(Locale.US, "%.4g", value)
         else -> value.toString().take(60)
     }
 

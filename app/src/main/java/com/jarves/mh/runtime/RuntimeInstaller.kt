@@ -14,6 +14,7 @@ import java.security.MessageDigest
 import java.util.zip.ZipInputStream
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlin.coroutines.coroutineContext
 import com.jarves.mh.model.DevStack
@@ -1327,7 +1328,17 @@ class RuntimeInstaller(private val context: Context) {
                 }
             }
         } finally {
-            if (running.isAlive) running.destroy()
+            // Reap even when the caller's withTimeout cancelled us, and
+            // escalate to destroyForcibly so wedged children cannot linger.
+            withContext(kotlinx.coroutines.NonCancellable) {
+                if (running.isAlive) running.destroy()
+                if (running.isAlive) {
+                    delay(500)
+                    if (running.isAlive) running.destroyForcibly()
+                }
+                runCatching { running.waitFor() }
+                runCatching { running.outputStream.close() }
+            }
         }
         val exit = running.waitFor()
         onProgress(
@@ -1354,10 +1365,17 @@ class RuntimeInstaller(private val context: Context) {
             environment = emptyMap(),
             guestCommand = listOf("/usr/bin/env", "bash", "-lc", command),
         )
-        withTimeout(60_000L) {
-            while (verify.isAlive) delay(50)
+        try {
+            withTimeout(60_000L) {
+                while (verify.isAlive) delay(50)
+            }
+        } catch (error: Throwable) {
+            // A hung guest verification must not leak a live process.
+            verify.destroyForcibly()
+            throw error
         }
         val exit = verify.waitFor()
+        runCatching { verify.outputStream.close() }
         val output = (verify as? NativeSpawnProcess)?.outputFile
             ?.let(::readProcessOutputSafely)
             .orEmpty()

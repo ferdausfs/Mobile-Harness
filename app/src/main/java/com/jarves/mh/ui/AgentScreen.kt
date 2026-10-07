@@ -199,12 +199,12 @@ fun AgentScreen(
     var openRouterAllowFallbacks by rememberSaveable(state.provider.openRouterAllowFallbacks) {
         mutableStateOf(state.provider.openRouterAllowFallbacks)
     }
-    var apiKey by rememberSaveable(selectedKind) { mutableStateOf(getSavedApiKey(selectedKind)) }
+    var apiKey by remember(selectedKind) { mutableStateOf(getSavedApiKey(selectedKind)) }
     var savedKeys by remember(selectedKind, state.activeApiKeyName) {
         mutableStateOf(getSavedApiKeys(selectedKind))
     }
     var newKeyName by rememberSaveable(selectedKind) { mutableStateOf("") }
-    var newApiKey by rememberSaveable(selectedKind) { mutableStateOf("") }
+    var newApiKey by remember(selectedKind) { mutableStateOf("") }
     var newKeyVisible by rememberSaveable(selectedKind, savedKeys.isEmpty()) { mutableStateOf(savedKeys.isEmpty()) }
     var models by remember(selectedKind, baseUrl) { mutableStateOf(emptyList<DiscoveredModel>()) }
     var modelSearch by rememberSaveable(selectedKind) { mutableStateOf("") }
@@ -847,8 +847,13 @@ fun AgentScreen(
                                     modifier = Modifier
                                         .weight(1f)
                                         .clickable(enabled = state.agentInstalling == null) {
-                                            viewedAgent = agent
-                                            if (isInstalled) onSelectAgent(agent)
+                                            if (isInstalled) {
+                                                // Keep the viewed tab in sync with what actually
+                                                // became active; a rejected switch (task running)
+                                                // must not blank out the provider section.
+                                                if (!state.isRunning) viewedAgent = agent
+                                                onSelectAgent(agent)
+                                            }
                                         },
                                 ) {
                                     Box(
@@ -1077,7 +1082,13 @@ fun AgentScreen(
                         onValidate = {
                             scope.launch {
                                 isValidating = true
+                                // Validate the secret that will actually be sent: the text
+                                // field when the user typed one, otherwise the saved key.
+                                // Attribute the result to the pooled key only when the
+                                // field still holds that key's secret.
+                                val secret = apiKey.trim().ifBlank { getSavedApiKey(selectedKind) }
                                 val activeKeyId = savedKeys.firstOrNull { it.isActive }?.id
+                                    ?.takeIf { secret == getSavedApiKey(selectedKind) }
                                 if (activeKeyId != null) {
                                     keyConnectionStatuses = keyConnectionStatuses +
                                         (activeKeyId to KeyConnectionStatus("Checking connection…"))
@@ -1097,16 +1108,16 @@ fun AgentScreen(
                                     openRouterAllowFallbacks = openRouterAllowFallbacks,
                                 )
                                 if (kind == ProviderKind.CLAUDE) {
-                                    onSaveProvider(profile, apiKey.trim())
+                                    onSaveProvider(profile, secret)
                                     status = "Claude subscription token saved securely. Send a message to verify your subscription."
                                     statusOk = true
                                     activeKeyId?.let {
                                         keyConnectionStatuses = keyConnectionStatuses +
                                             (it to KeyConnectionStatus("Subscription token saved", true, label = "Saved"))
                                     }
-                                } else when (val result = onValidateProvider(profile, apiKey.trim(), models)) {
+                                } else when (val result = onValidateProvider(profile, secret, models)) {
                                     is ConnectionValidation.Success -> {
-                                        onSaveProvider(profile, apiKey.trim())
+                                        onSaveProvider(profile, secret)
                                         if (activeKeyId != null) {
                                             keyConnectionStatuses = keyConnectionStatuses +
                                                 (activeKeyId to KeyConnectionStatus(result.message, true, label = "Verified"))
@@ -2263,9 +2274,10 @@ private fun ProviderLimitDialog(
                 )
                 OutlinedTextField(
                     value = text,
-                    onValueChange = { input -> if (input.all(Char::isDigit)) text = input.take(6) },
+                    onValueChange = { input -> if (input.all(Char::isDigit)) text = input.take(5) },
                     label = { Text("Requests per day") },
                     placeholder = { Text("No limit") },
+                    supportingText = { Text("Up to 100000 requests per day") },
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                     modifier = Modifier.fillMaxWidth(),
@@ -2274,7 +2286,7 @@ private fun ProviderLimitDialog(
             }
         },
         confirmButton = {
-            TextButton(onClick = { onSave(text.toIntOrNull() ?: 0) }) { Text("Save") }
+            TextButton(onClick = { onSave((text.toIntOrNull() ?: 0).coerceAtMost(100_000)) }) { Text("Save") }
         },
         dismissButton = {
             TextButton(onClick = onDismiss) { Text("Cancel") }
@@ -2297,7 +2309,7 @@ private fun AddFailoverProviderDialog(
     var baseUrl by rememberSaveable(kind) { mutableStateOf(kind.defaultBaseUrl) }
     var model by rememberSaveable(kind) { mutableStateOf(kind.defaultModel) }
     var dshApi by rememberSaveable(kind) { mutableStateOf(defaultDshApiForProvider(kind)) }
-    var secret by rememberSaveable(kind) { mutableStateOf("") }
+    var secret by remember(kind) { mutableStateOf("") }
     var secretVisible by rememberSaveable { mutableStateOf(false) }
 
     AlertDialog(
@@ -2495,8 +2507,8 @@ private fun AgentUpdateBlock(
 }
 
 private fun formatAgentBytes(bytes: Long): String = when {
-    bytes >= 1_048_576L -> "%.1f MB".format(bytes / 1_048_576.0)
-    bytes >= 1_024L -> "%.1f KB".format(bytes / 1_024.0)
+    bytes >= 1_048_576L -> String.format(java.util.Locale.US, "%.1f MB", bytes / 1_048_576.0)
+    bytes >= 1_024L -> String.format(java.util.Locale.US, "%.1f KB", bytes / 1_024.0)
     else -> "$bytes B"
 }
 

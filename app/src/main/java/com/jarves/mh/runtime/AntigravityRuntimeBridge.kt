@@ -206,7 +206,8 @@ class AntigravityRuntimeBridge(
                     process.outputStream.flush()
                     process.outputStream.close()
                     var offset = 0L
-                    val pending = StringBuilder()
+                    val outputLines = Utf8LineAssembler()
+                    val recentOutput = StringBuilder()
                     var reply: String? = null
                     fun handleLine(line: String): Boolean {
                         when (val event = AntigravityEventParser.parse(line)) {
@@ -236,24 +237,26 @@ class AntigravityRuntimeBridge(
                         }
                         if (count <= 0) continue
                         offset += count
-                        pending.append(bytes.decodeToString(0, count))
-                        var newline = pending.indexOf("\n")
-                        while (newline >= 0) {
-                            val line = pending.substring(0, newline).trimEnd('\r')
-                            pending.delete(0, newline + 1)
+                        for (line in outputLines.append(bytes, count)) {
+                            recentOutput.appendLine(line)
                             if (handleLine(line)) {
                                 done = true
                                 break
                             }
-                            newline = pending.indexOf("\n")
+                        }
+                        if (recentOutput.length > 4_000) recentOutput.delete(0, recentOutput.length - 2_000)
+                    }
+                    if (!done) {
+                        outputLines.drain()?.takeIf(String::isNotEmpty)?.let { line ->
+                            recentOutput.appendLine(line)
+                            done = handleLine(line)
                         }
                     }
-                    pending.toString().trim().takeIf(String::isNotEmpty)?.let { if (!done) done = handleLine(it) }
                     // Drain process exit without hanging past the timeout.
                     withContext(NonCancellable) {
                         runCatching { process.waitFor() }
                     }
-                    check(done) { friendlyError(pending.toString().takeLast(500).ifBlank { "Antigravity exited without answering" }) }
+                    check(done) { friendlyError(recentOutput.toString().takeLast(500).ifBlank { "Antigravity exited without answering" }) }
                     reply?.trim().takeUnless { it.isNullOrEmpty() } ?: "ok"
                 } finally {
                     runCatching { process.destroy() }
@@ -327,7 +330,8 @@ class AntigravityRuntimeBridge(
 
             val native = process as? NativeSpawnProcess ?: error("Unsupported Antigravity process")
             var offset = 0L
-            val pending = StringBuilder()
+            val outputLines = Utf8LineAssembler()
+            val recentOutput = StringBuilder()
             var resultSeen = false
             var assistantTextSeen = false
             suspend fun handleLine(line: String) {
@@ -365,19 +369,19 @@ class AntigravityRuntimeBridge(
                 }
                 if (count <= 0) continue
                 offset += count
-                pending.append(bytes.decodeToString(0, count))
-                var newline = pending.indexOf("\n")
-                while (newline >= 0) {
-                    val line = pending.substring(0, newline).trimEnd('\r')
-                    pending.delete(0, newline + 1)
+                for (line in outputLines.append(bytes, count)) {
+                    recentOutput.appendLine(line)
                     handleLine(line)
-                    newline = pending.indexOf("\n")
                 }
+                if (recentOutput.length > 4_000) recentOutput.delete(0, recentOutput.length - 2_000)
             }
-            pending.toString().trim().takeIf(String::isNotEmpty)?.let { handleLine(it) }
+            outputLines.drain()?.takeIf(String::isNotEmpty)?.let { line ->
+                recentOutput.appendLine(line)
+                handleLine(line)
+            }
             val exit = process.waitFor()
             check(exit == 0 && resultSeen) {
-                friendlyError(pending.toString().takeLast(1_000).ifBlank { "Antigravity exited with code $exit" })
+                friendlyError(recentOutput.toString().takeLast(1_000).ifBlank { "Antigravity exited with code $exit" })
             }
             val paths = checkpoints.changedFiles(workspace, before)
             checkpoints.saveChangedPaths(projectId, paths)

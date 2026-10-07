@@ -253,7 +253,7 @@ class ClaudeRuntimeBridge(
             coroutineScope {
                 val permissionWatcher = launch { watchPermissionRequests(sessionId) }
                 var lastDiagnostic = ""
-                val pendingOutput = StringBuilder()
+                val outputLines = Utf8LineAssembler()
                 val nativeProcess = process as? NativeSpawnProcess
                     ?: error("Unsupported Android runtime process")
                 var outputOffset = 0L
@@ -270,29 +270,23 @@ class ClaudeRuntimeBridge(
                     }
                     if (count > 0) {
                         outputOffset += count
-                        pendingOutput.append(bytes.decodeToString(0, count))
-                        var newline = pendingOutput.indexOf("\n")
-                        while (newline >= 0) {
-                            val line = pendingOutput.substring(0, newline).trimEnd('\r')
-                            pendingOutput.delete(0, newline + 1)
-                            if (line.isNotBlank()) {
-                                Log.d("ClaudeBridge", "OUTPUT: $line")
-                                ProviderRuntimeErrorDetector.detect(line)?.let { reason ->
-                                    process.destroyForcibly()
-                                    throw ProviderSessionException(reason)
-                                }
-                                if (!consumeClaudeEvent(sessionId, line)) {
-                                    lastDiagnostic = line.takeLast(500)
-                                    terminalStatus(line)?.let { (title, detail) ->
-                                        eventBus.emit(RuntimeEvent.RuntimeLog(sessionId, title, detail))
-                                    }
+                        for (line in outputLines.append(bytes, count)) {
+                            if (line.isBlank()) continue
+                            Log.d("ClaudeBridge", "OUTPUT: $line")
+                            ProviderRuntimeErrorDetector.detect(line)?.let { reason ->
+                                process.destroyForcibly()
+                                throw ProviderSessionException(reason)
+                            }
+                            if (!consumeClaudeEvent(sessionId, line)) {
+                                lastDiagnostic = line.takeLast(500)
+                                terminalStatus(line)?.let { (title, detail) ->
+                                    eventBus.emit(RuntimeEvent.RuntimeLog(sessionId, title, detail))
                                 }
                             }
-                            newline = pendingOutput.indexOf("\n")
                         }
                     }
                 }
-                pendingOutput.toString().trim().takeIf(String::isNotBlank)?.let { line ->
+                outputLines.drain()?.takeIf(String::isNotBlank)?.let { line ->
                     Log.d("ClaudeBridge", "TRAILING OUTPUT: $line")
                     if (!consumeClaudeEvent(sessionId, line)) lastDiagnostic = line.takeLast(500)
                 }

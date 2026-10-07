@@ -250,7 +250,7 @@ class DshRuntimeBridge(
         val writer = process.outputStream.bufferedWriter()
         val parser = DshSdkProtocolParser(sessionId)
         var outputOffset = 0L
-        val pendingOutput = StringBuilder()
+        val outputLines = Utf8LineAssembler()
         var promptSent = false
         var sawRunning = false
         var completed = false
@@ -371,16 +371,11 @@ class DshRuntimeBridge(
             }
             if (count <= 0) continue
             outputOffset += count
-            pendingOutput.append(bytes.decodeToString(0, count))
-            var newline = pendingOutput.indexOf("\n")
-            while (newline >= 0) {
-                val line = pendingOutput.substring(0, newline).trimEnd('\r')
-                pendingOutput.delete(0, newline + 1)
+            for (line in outputLines.append(bytes, count)) {
                 if (line.isNotBlank()) handle(parser.parseLine(line))
-                newline = pendingOutput.indexOf("\n")
             }
         }
-        pendingOutput.toString().trim().takeIf(String::isNotBlank)?.let {
+        outputLines.drain()?.trim()?.takeIf(String::isNotBlank)?.let {
             handle(parser.parseLine(it))
         }
         closeInput()

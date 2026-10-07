@@ -1,12 +1,12 @@
 {
-  "versionCode": 6,
-  "versionName": "1.0.5",
-  "notes": "Custom API now supports every OpenAI-compatible endpoint (Chat Completions, Responses) alongside Anthropic Messages, with automatic wire-format detection and /v1 URL fallbacks. Fixes custom provider rejection (issues #41, #9), the max_tokens validation error (#39), and tightens memory bounds against force closes (#29).",
+  "versionCode": 7,
+  "versionName": "1.0.6",
+  "notes": "Stability hardening: background task failures now log instead of crashing the app; deprecated icons modernized. NOTE: signed with a new release key — uninstall v1.0.5 or older before installing this update (one time).",
   "artifacts": {
     "online": {
-      "url": "https://github.com/ferdausfs/Mobile-Harness/releases/download/v1.0.5/mobile-harness-online-v1.0.5.apk",
-      "sha256": "fd17ebfa638eaac649ae8816cf1db928d1e8df78354d0a69c24780c09e4829b6",
-      "sizeBytes": 87463107
+      "url": "https://github.com/ferdausfs/Mobile-Harness/releases/download/v1.0.6/mobile-harness-online-v1.0.6.apk",
+      "sha256": "106e713495fc72fbb0c245f1ecdb5bc22a06fa7987ec7b8f85c9ac4e71f1e6ff",
+      "sizeBytes": 87489354
     }
   }
 }

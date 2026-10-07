@@ -4,6 +4,56 @@ Newest entries prepended. Never delete entries.
 
 ---
 
+## 2026-10-08 — v1.0.11 full-scan fixes (agent-screen install flow, Antigravity v1.0.10 parity, UTF-8/native/installer hardening, ferdausfs URL migration)
+
+- **Agent/tool**: Claude Code agent session (Super Z), direct repo work on `ferdausfs/Mobile-Harness` branch `main`
+- **Feature/trigger**: Full-app review after the v1.0.10 release; fix-first the reported "Agent screen: only DeepSeek tab works" symptom, then every real bug found by a whole-app scan; ship v1.0.11 (versionCode 12)
+
+### What changed (one commit per concept)
+1. **Agent screen install flow** (`ui/AgentScreen.kt`) — commit `18167f0`
+   - The engine selector only acted `if (isInstalled)`: tapping Claude Code or Antigravity when uninstalled was a silent no-op, and the install card below the tabs was dead UI (viewedAgent could never become an uninstalled agent). Tapping an uninstalled agent now shows its install card and starts `installAgent` with live progress, switching on success (existing Settings flow); a rejected switch still toasts "Stop the current agent before switching."
+   - `viewedAgent` follows `state.agentKind` via `LaunchedEffect` (no more stale highlighted tab after a Settings/onboarding switch).
+   - Install failures surface `agentMessage` on the not-installed card (previously set but never displayed).
+   - Claude Code + Antigravity install paths verified sound in code (`AgentRegistry.builtIns` → `RuntimeInstaller.ensureAgentInstalled`); end-to-end on-device not verifiable here (see Pending).
+2. **Antigravity v1.0.10 parity** (`runtime/AntigravityRuntimeBridge.kt`) — commit `400ff0d`
+   - v1.0.10's per-session state and failed-attempt-changes fixes touched only Claude/Dsh. Antigravity: `onFailure` now merges the attempt baseline's changed paths into changes.json + emits FilesChanged (a failed task's edits stay visible/undoable instead of being absorbed into the next baseline); `userStopRequested` is per-session (`AntigravitySessionState`); tail teardown guarded by `activeSessionId == sessionId` so an old dying session can't clear the new session's Stop or hijack notifications.
+3. **UTF-8 chunk-boundary corruption** (`runtime/BoundedFileReads.kt`, all 3 bridges) — commit `fc87957`
+   - All bridges decoded each 16 KB output chunk independently: a multibyte char straddling a boundary became U+FFFD, breaking the whole JSON event line (lost deltas/tool events/possibly the result envelope). New `Utf8LineAssembler` decodes only complete newline-terminated lines (same scheme the gateways already used); Claude/Dsh/Antigravity (session + hello probe) use it; capped recent-output buffer preserves error diagnostics. Tests: `Utf8LineAssemblerTest` (5, incl. the multibyte-split regression).
+4. **Native spawn** (`app/src/main/cpp/pocket_spawn.c`, `runtime/NativeSpawnProcess.kt`) — commit `1d9fea1`
+   - Double-reap race: watchdog/stop threads call `isAlive()` while a worker blocks in `waitFor()`; the WNOHANG side could reap first, the blocking waitpid got ECHILD, and -138 was cached as the exit code (success → bogus failure). Single-reaper lock; waitFor polls WNOHANG (liveness checks stay responsive); exit status never overwritten; errno encodings retried briefly, never cached; C side retries waitpid on EINTR.
+   - Failed spawn returned NULL to a non-null `IntArray` → bare NPE; now throws RuntimeException (skipped if a JNI exception is pending).
+   - Child resets `SIGPIPE` to SIG_DFL (Android's SIG_IGN survives execve; guest pipelines died incorrectly). `signal()` is async-signal-safe; fd-sweep/leak fixes from v1.0.10 re-verified intact.
+5. **Agent updates** (`runtime/RuntimeInstaller.kt`) — commit `c8253f1`
+   - `isVersionNewer` folded pre-release digits into the numeric core: stable `0.1.2` was never offered over `0.1.2-rc.1`, and suffix words containing "rc" misclassified. Now semver-style (numeric core first, stable outranks its own pre-release), exposed as internal `isAgentVersionNewer` + `AgentVersionComparisonTest` (7).
+   - `updateClaude`/`updateAgy` renamed the new binary over the old before verification with no rollback → a broken release left a dead binary with a stale marker. Both keep `.previous` aside and restore on verification failure (same contract `updateDsh` already had).
+6. **techjarves → ferdausfs URL migration** (`app/build.gradle.kts`, `fdroid/`, `PRIVACY.md`, `docs/`, `README.md`, `scripts/build-play-release.sh`) — commit `a70bccc`
+   - `runtimeReleaseBaseUrl` (BuildConfig, online flavor) and the default privacy-policy URL pointed at the frozen techjarves org (latest release v1.0.4, no redirects). The `runtime-2026.09.4` release assets (7 bundles + manifest, ~1 GB) were mirrored to `ferdausfs/Mobile-Harness` release `runtime-2026.09.4` byte-for-byte, sha256-verified against `manifest.json` (core-09.4 has no manifest entry; uploaded unverified). fdroid metadata refreshed (author/URLs, version pins 1.0.2/3 → 1.0.11/12); README badge/download links → v1.0.11; `build-play-release.sh` no longer defaults to versionCode 1 when called without args. YouTube channel link intentionally kept (different platform).
+7. **Release** — commits `1e4da8c` (bump), `d2a81f6` (manifest)
+
+### Verification
+- Unit tests: `./gradlew testOnlineDebugUnitTest` → **118 tests, 0 failures, 0 errors** (12 new). Bare `testDebugUnitTest` remains ambiguous with flavors. `testOfflineDebugUnitTest` could NOT run on this host: `prepareOfflineRuntimeAssets` copies all 5 bundles (~870 MB) into build/ and the 4 GB-RAM/10 GB-disk box ran out of headroom — same test source set as online (flavor-independent), so coverage is not affected.
+- Native compile verified via full `:app:externalNativeBuildOnlineRelease` + NDK clang `-Wall -Wextra -fsyntax-only`.
+- APK: `mobile-harness-online-v1.0.11.apk`, 87,635,591 bytes, sha256 `9283618c6b5c67148edbf48a94f520fb1e593ac39c106bd963b56726d530c8c5` (re-downloaded from the release URL and re-verified).
+- **Signature cert SHA-256 `d07ba804cfa95dd39083002628b65487d7ae99acab12cdfa61c5f42bca7dccfe` — identical to v1.0.9/v1.0.10** (apksigner verify --print-certs, compared). Same key; in-place update works.
+- Release: https://github.com/ferdausfs/Mobile-Harness/releases/tag/v1.0.11 (ID 406216069), assets: APK + `mobile-harness-update.json`. `releases/latest/download/mobile-harness-update.json` serves versionCode 12. v1.0.9/v1.0.10 releases and tags untouched.
+
+### Touched files
+`ui/AgentScreen.kt`, `runtime/AntigravityRuntimeBridge.kt`, `runtime/BoundedFileReads.kt`, `runtime/ClaudeRuntimeBridge.kt`, `runtime/DshRuntimeBridge.kt`, `runtime/NativeSpawnProcess.kt`, `runtime/RuntimeInstaller.kt`, `app/src/main/cpp/pocket_spawn.c`, `app/build.gradle.kts`, `mobile-harness-update.json`, `fastlane/metadata/android/en-US/changelogs/12.txt`, `fdroid/com.jarves.mh.yml`, `PRIVACY.md`, `README.md`, `docs/PLAY_STORE_CHECKLIST.md`, `docs/play/APP_CONTENT_DECLARATIONS.md`, `scripts/build-play-release.sh`, tests (`AgentVersionComparisonTest`, `Utf8LineAssemblerTest`), this file.
+
+### Pending items (real gaps found by the scan, deliberately not fixed this release)
+- **Usage tracking hole**: `recordUpstreamResult` is only fed by `LocalFormatGateway.reportUsage`, which the Claude bridge installs for OpenAI-protocol providers only. DeepSeek Harness (all providers) and Claude on Anthropic-protocol providers never report usage → the Live status counters stay 0 and the pre-task daily-limit failover never fires there. Fixing requires usage extraction in the Dsh/Claude protocol parsers = feature work, deferred.
+- **Offline flavor**: unbuildable from a fresh clone (5 gitignored bundle tarballs required); a bootstrap script (download-by-sha256 from the runtime release) would fix tests and builds.
+- **No CI**: zero GitHub workflows; tests run only locally. A test-only workflow is the safe first step.
+- **On-device end-to-end** (install Claude Code/Antigravity → authenticate → run a prompt) not verifiable in this environment — code paths reviewed only.
+- Minor: SetupScreen's agent switch sheet switches to an uninstalled agent without offering install (clear error appears on send; left as is).
+- Keystore unchanged: recoverable from private gist `4b76689e972c864d8a6e187503b174c4`; local copy `keystores/mobile-harness-release.jks`.
+
+### Notes for next agent
+- Build env bootstrap notes from the v1.0.10 entry below still apply (JDK 21 at /home/z/jdk, SDK 36 + NDK r26b via direct zips, submodules required, RAM/workers strategy in gradle.properties, agy bundle in dist/runtime-bundles).
+- **New**: runtime bundles now ALSO serve from this repo (`releases/download/runtime-2026.09.4/...`); `runtimeReleaseBaseUrl` in `app/build.gradle.kts` points there since v1.0.11. The techjarves mirror still exists but is stale — never point anything new at it.
+
+---
+
 ## 2026-10-08 — v1.0.10 failover/detection fixes (session-scoped failover, strict error shapes, per-session bridge state, changes-tab baseline, native fork-safety)
 
 - **Agent/tool**: Claude Code agent session (Super Z), direct repo work on `ferdausfs/Mobile-Harness` branch `main`

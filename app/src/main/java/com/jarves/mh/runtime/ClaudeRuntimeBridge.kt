@@ -117,40 +117,46 @@ class ClaudeRuntimeBridge(
     private val eventBus = MutableSharedFlow<RuntimeEvent>(extraBufferCapacity = 64)
     override val events: Flow<RuntimeEvent> = eventBus
     private val pending = ConcurrentHashMap<String, PendingPermission>()
-    private val toolNames = ConcurrentHashMap<String, String>()
-    private val seenToolCalls = ConcurrentHashMap.newKeySet<String>()
     private val finishedSessions = ConcurrentHashMap.newKeySet<String>()
     private val projectRoots = ConcurrentHashMap<String, String>()
+    /**
+     * Stream state that used to live on the bridge itself. A failover restart
+     * can begin a new session while the previous session's tail is still
+     * emitting events, so everything below must be per-session or the two
+     * sessions corrupt each other's streamed text, tool tracking and stop flag.
+     */
+    private val sessionStates = ConcurrentHashMap<String, SessionStreamState>()
     @Volatile private var activeProcess: Process? = null
     @Volatile private var activeSessionId: String? = null
-    @Volatile private var userStopRequested: Boolean = false
     @Volatile private var activeProjectSlug: String? = null
     @Volatile private var taskStartedAtElapsedRealtime: Long = 0L
     @Volatile private var lastForegroundProgressAt: Long = 0L
     @Volatile private var foregroundResultPosted: Boolean = false
-    private val streamedText = StringBuilder()
-    private val streamedThinking = StringBuilder()
-    private var lastReasoningTokens = 0
-    private var lastReasoningUpdateAt = 0L
-    private var lastThinkingUpdateAt = 0L
-    private var currentThinkingBlockId = 0L
+
+    /** Per-session stream state; see [sessionStates]. */
+    private class SessionStreamState {
+        val streamedText = StringBuilder()
+        val streamedThinking = StringBuilder()
+        val toolNames = ConcurrentHashMap<String, String>()
+        val seenToolCalls = ConcurrentHashMap.newKeySet<String>()
+        @Volatile var userStopRequested: Boolean = false
+        var lastReasoningTokens = 0
+        var lastReasoningUpdateAt = 0L
+        var lastThinkingUpdateAt = 0L
+        var currentThinkingBlockId = 0L
+    }
+
+    private fun sessionState(sessionId: String): SessionStreamState? = sessionStates[sessionId]
 
     override suspend fun startSession(projectId: String, projectSlug: String, projectKind: ProjectKind, prompt: String, conversationHistory: List<ChatMessage>, provider: ProviderProfile): String = withContext(Dispatchers.IO + NonCancellable) {
         val sessionId = UUID.randomUUID().toString()
         finishedSessions.remove(sessionId)
         activeSessionId = sessionId
-        userStopRequested = false
         activeProjectSlug = projectSlug
         taskStartedAtElapsedRealtime = android.os.SystemClock.elapsedRealtime()
         lastForegroundProgressAt = 0L
         foregroundResultPosted = false
-        toolNames.clear()
-        seenToolCalls.clear()
-        lastReasoningTokens = 0
-        lastReasoningUpdateAt = 0L
-        lastThinkingUpdateAt = 0L
-        currentThinkingBlockId = 0L
-        streamedThinking.clear()
+        val state = SessionStreamState().also { sessionStates[sessionId] = it }
         eventBus.emit(RuntimeEvent.SessionStarted(sessionId))
         pushForegroundProgress("Starting Claude Code…")
         val secret = secretFor(provider).orEmpty()
@@ -161,6 +167,7 @@ class ClaudeRuntimeBridge(
                 "No API key is saved for ${provider.kind.title}."
             }
             eventBus.emit(RuntimeEvent.SessionFailed(sessionId, message))
+            sessionStates.remove(sessionId)
             return@withContext sessionId
         }
 
@@ -168,7 +175,7 @@ class ClaudeRuntimeBridge(
         var openRouterGateway: OpenRouterRoutingGateway? = null
         runCatching {
             RuntimeTaskController.stopAction = {
-                userStopRequested = true
+                state.userStopRequested = true
                 val running = activeProcess
                 if (running != null) {
                     Thread {
@@ -236,7 +243,7 @@ class ClaudeRuntimeBridge(
                 guestWorkspacePath = guestWorkspacePath,
             )
             activeProcess = process
-            if (userStopRequested) process.destroy()
+            if (state.userStopRequested) process.destroy()
             coroutineScope {
                 val permissionWatcher = launch { watchPermissionRequests(sessionId) }
                 var lastDiagnostic = ""
@@ -307,7 +314,7 @@ class ClaudeRuntimeBridge(
                         detail = "Claude Code finished the task in $projectSlug.",
                     )
                 } else {
-                    if (userStopRequested) throw ProviderSessionException("Stopped by user")
+                    if (state.userStopRequested) throw ProviderSessionException("Stopped by user")
                     error(lastDiagnostic.ifBlank { "Claude Code stopped with exit code $exit" })
                 }
             }
@@ -315,7 +322,7 @@ class ClaudeRuntimeBridge(
             Log.e("ClaudeBridge", "Session failed", error)
             val message = friendlyError(error)
             emitFailureOnce(sessionId, message)
-            if (userStopRequested) {
+            if (sessionState(sessionId)?.userStopRequested == true) {
                 cancelForegroundRuntime()
             } else {
                 finishForegroundRuntime(
@@ -335,6 +342,9 @@ class ClaudeRuntimeBridge(
             activeSessionId = null
             RuntimeTaskController.stopAction = null
         }
+        // Drop this session's stream state last so tail events emitted above
+        // still resolve it, and any late events after this point are ignored.
+        sessionStates.remove(sessionId)
         sessionId
     }
 
@@ -349,7 +359,7 @@ class ClaudeRuntimeBridge(
 
     override suspend fun stopSession(sessionId: String) = withContext(Dispatchers.IO) {
         if (activeSessionId == sessionId) {
-            userStopRequested = true
+            sessionStates[sessionId]?.userStopRequested = true
             activeProcess?.destroy()
             delay(500)
             if (activeProcess?.isAlive == true) activeProcess?.destroyForcibly()
@@ -466,6 +476,9 @@ class ClaudeRuntimeBridge(
     }
 
     private suspend fun consumeClaudeJsonEvent(sessionId: String, json: JSONObject) {
+        // Late tail output from a session that already ended has no state left;
+        // dropping it keeps a failover restart's stream uncontaminated.
+        val state = sessionStates[sessionId] ?: return
         when (json.optString("type")) {
             "stream_event" -> json.optJSONObject("event")?.let { consumeClaudeJsonEvent(sessionId, it) }
             "system" -> when (json.optString("subtype")) {
@@ -483,35 +496,35 @@ class ClaudeRuntimeBridge(
                 val block = json.optJSONObject("content_block")
                 when (block?.optString("type")) {
                     "thinking" -> {
-                        currentThinkingBlockId += 1
-                        streamedThinking.clear()
+                        state.currentThinkingBlockId += 1
+                        state.streamedThinking.clear()
                         emitReasoningSummary(sessionId, "", startsNewBlock = true)
                         block.optString("thinking").takeIf(String::isNotBlank)?.let {
-                            appendStreamedThinking(sessionId, it)
+                            appendStreamedThinking(state, it)
                             emitReasoningSummary(sessionId, it, force = true)
                         }
                     }
-                    "text" -> streamedText.clear()
+                    "text" -> state.streamedText.clear()
                 }
             }
             "content_block_delta" -> {
                 val delta = json.optJSONObject("delta")
                 when (delta?.optString("type")) {
                     "thinking_delta" -> delta.optString("thinking").takeIf(String::isNotEmpty)?.let {
-                        appendStreamedThinking(sessionId, it)
-                        emitReasoningSummary(sessionId, streamedThinking.toString())
+                        appendStreamedThinking(state, it)
+                        emitReasoningSummary(sessionId, state.streamedThinking.toString())
                     }
                     "text_delta", "" -> delta.optString("text").takeIf(String::isNotEmpty)?.let {
-                        if (streamedText.length < MAX_STREAMED_TEXT_CHARS) {
-                            streamedText.append(it)
+                        if (state.streamedText.length < MAX_STREAMED_TEXT_CHARS) {
+                            state.streamedText.append(it)
                             eventBus.emit(RuntimeEvent.AssistantDelta(sessionId, it))
                         }
                     }
                 }
             }
             "content_block_stop" -> {
-                if (streamedThinking.isNotBlank()) {
-                    emitReasoningSummary(sessionId, streamedThinking.toString(), force = true, isFinal = true)
+                if (state.streamedThinking.isNotBlank()) {
+                    emitReasoningSummary(sessionId, state.streamedThinking.toString(), force = true, isFinal = true)
                 }
             }
             "assistant" -> {
@@ -520,16 +533,16 @@ class ClaudeRuntimeBridge(
                 for (index in 0 until content.length()) {
                     val block = content.optJSONObject(index) ?: continue
                     when (block.optString("type")) {
-                        "text" -> if (streamedText.isEmpty()) {
+                        "text" -> if (state.streamedText.isEmpty()) {
                             block.optString("text").takeIf(String::isNotBlank)?.let {
                                 eventBus.emit(RuntimeEvent.AssistantDelta(sessionId, it))
                             }
                         }
                         "thinking" -> block.optString("thinking").takeIf(String::isNotBlank)?.let {
-                            if (currentThinkingBlockId == 0L || streamedThinking.toString() != it) {
-                                currentThinkingBlockId += 1
-                                streamedThinking.clear()
-                                appendStreamedThinking(sessionId, it)
+                            if (state.currentThinkingBlockId == 0L || state.streamedThinking.toString() != it) {
+                                state.currentThinkingBlockId += 1
+                                state.streamedThinking.clear()
+                                appendStreamedThinking(state, it)
                                 emitReasoningSummary(
                                     sessionId,
                                     it,
@@ -542,7 +555,7 @@ class ClaudeRuntimeBridge(
                         "tool_use" -> emitToolStarted(sessionId, block)
                     }
                 }
-                streamedText.clear()
+                state.streamedText.clear()
                 // Some Anthropic-compatible providers omit Claude Code's final
                 // `result` envelope. An assistant end_turn is still authoritative;
                 // tool_use means the agent must remain active for another turn.
@@ -557,7 +570,7 @@ class ClaudeRuntimeBridge(
                     val block = content.optJSONObject(index) ?: continue
                     if (block.optString("type") == "tool_result") {
                         val toolId = block.optString("tool_use_id")
-                        val toolName = toolNames.remove(toolId) ?: "Tool"
+                        val toolName = state.toolNames.remove(toolId) ?: "Tool"
                         val result = block.optString("content")
                             .ifBlank { if (block.optBoolean("is_error")) "Tool failed" else "Completed successfully" }
                         eventBus.emit(RuntimeEvent.ToolCompleted(sessionId, toolName, sanitizeForDisplay(result)))
@@ -579,9 +592,9 @@ class ClaudeRuntimeBridge(
     }
 
     /** Bounds the reasoning buffer so a pathological provider stream cannot exhaust memory. */
-    private fun appendStreamedThinking(sessionId: String, chunk: String) {
-        if (streamedThinking.length >= MAX_STREAMED_TEXT_CHARS) return
-        streamedThinking.append(chunk)
+    private fun appendStreamedThinking(state: SessionStreamState, chunk: String) {
+        if (state.streamedThinking.length >= MAX_STREAMED_TEXT_CHARS) return
+        state.streamedThinking.append(chunk)
     }
 
     private suspend fun emitReasoningSummary(
@@ -591,16 +604,17 @@ class ClaudeRuntimeBridge(
         startsNewBlock: Boolean = false,
         isFinal: Boolean = false,
     ) {
+        val state = sessionStates[sessionId] ?: return
         val summary = sanitizeForDisplay(text).trim().take(2_000)
         if (summary.isBlank() && !startsNewBlock) return
         val now = android.os.SystemClock.elapsedRealtime()
-        if (startsNewBlock || isFinal || force || now - lastThinkingUpdateAt >= 150) {
-            lastThinkingUpdateAt = now
+        if (startsNewBlock || isFinal || force || now - state.lastThinkingUpdateAt >= 150) {
+            state.lastThinkingUpdateAt = now
             eventBus.emit(
                 RuntimeEvent.ReasoningSummary(
                     sessionId = sessionId,
                     summary = summary,
-                    blockId = currentThinkingBlockId,
+                    blockId = state.currentThinkingBlockId,
                     startsNewBlock = startsNewBlock,
                     isFinal = isFinal,
                 ),
@@ -611,20 +625,22 @@ class ClaudeRuntimeBridge(
 
     private suspend fun emitReasoningProgress(sessionId: String, tokens: Int) {
         if (tokens <= 0) return
+        val state = sessionStates[sessionId] ?: return
         val now = android.os.SystemClock.elapsedRealtime()
-        if (tokens - lastReasoningTokens >= 25 || now - lastReasoningUpdateAt >= 500) {
-            lastReasoningTokens = tokens
-            lastReasoningUpdateAt = now
+        if (tokens - state.lastReasoningTokens >= 25 || now - state.lastReasoningUpdateAt >= 500) {
+            state.lastReasoningTokens = tokens
+            state.lastReasoningUpdateAt = now
             eventBus.emit(RuntimeEvent.ReasoningProgress(sessionId, tokens))
             pushForegroundProgress("Thinking…")
         }
     }
 
     private suspend fun emitToolStarted(sessionId: String, block: JSONObject) {
+        val state = sessionStates[sessionId] ?: return
         val id = block.optString("id")
-        if (id.isNotBlank() && !seenToolCalls.add(id)) return
+        if (id.isNotBlank() && !state.seenToolCalls.add(id)) return
         val name = block.optString("name", "Tool")
-        if (id.isNotBlank()) toolNames[id] = name
+        if (id.isNotBlank()) state.toolNames[id] = name
         val input = block.optJSONObject("input") ?: JSONObject()
         val detail = when (name) {
             "Bash" -> input.optString("command").ifBlank { input.optString("description") }
@@ -658,7 +674,7 @@ class ClaudeRuntimeBridge(
     private suspend fun emitFailureOnce(sessionId: String, reason: String) {
         if (finishedSessions.add(sessionId)) {
             eventBus.emit(RuntimeEvent.SessionFailed(sessionId, reason))
-            if (userStopRequested) {
+            if (sessionState(sessionId)?.userStopRequested == true) {
                 cancelForegroundRuntime()
             } else {
                 finishForegroundRuntime(

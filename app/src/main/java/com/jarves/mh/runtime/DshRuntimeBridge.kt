@@ -48,30 +48,39 @@ class DshRuntimeBridge(
     private val eventBus = MutableSharedFlow<RuntimeEvent>(extraBufferCapacity = 64)
     override val events: Flow<RuntimeEvent> = eventBus
     private val finishedSessions = ConcurrentHashMap.newKeySet<String>()
+    /**
+     * Per-session stop flag and thinking throttle. A failover restart can begin
+     * a new session while the previous one's tail is still running; sharing
+     * these on the bridge would let the two sessions reset each other's state.
+     */
+    private val sessionStates = ConcurrentHashMap<String, DshSessionState>()
     @Volatile private var activeProcess: Process? = null
     @Volatile private var activeSessionId: String? = null
-    @Volatile private var userStopRequested: Boolean = false
     @Volatile private var activeProjectSlug: String? = null
     @Volatile private var taskStartedAtElapsedRealtime: Long = 0L
     @Volatile private var lastForegroundProgressAt: Long = 0L
     @Volatile private var foregroundResultPosted: Boolean = false
-    @Volatile private var lastThinkingUpdateAt: Long = 0L
+
+    private class DshSessionState {
+        @Volatile var userStopRequested: Boolean = false
+        var lastThinkingUpdateAt: Long = 0L
+    }
 
     override suspend fun startSession(projectId: String, projectSlug: String, projectKind: ProjectKind, prompt: String, conversationHistory: List<ChatMessage>, provider: ProviderProfile): String = withContext(Dispatchers.IO + NonCancellable) {
         val sessionId = UUID.randomUUID().toString()
         finishedSessions.remove(sessionId)
         activeSessionId = sessionId
-        userStopRequested = false
         activeProjectSlug = projectSlug
         taskStartedAtElapsedRealtime = android.os.SystemClock.elapsedRealtime()
         lastForegroundProgressAt = 0L
         foregroundResultPosted = false
-        lastThinkingUpdateAt = 0L
+        val state = DshSessionState().also { sessionStates[sessionId] = it }
         eventBus.emit(RuntimeEvent.SessionStarted(sessionId))
         pushForegroundProgress("Starting DeepSeek Harness…")
         val secret = secretFor(provider).orEmpty()
         if (secret.isBlank()) {
             eventBus.emit(RuntimeEvent.SessionFailed(sessionId, "No API key is saved for ${provider.kind.title}."))
+            sessionStates.remove(sessionId)
             return@withContext sessionId
         }
         if (provider.kind == ProviderKind.CLAUDE) {
@@ -81,13 +90,14 @@ class DshRuntimeBridge(
                     "Claude subscription login is not supported by DeepSeek Harness. Pick a key-based provider in Settings.",
                 ),
             )
+            sessionStates.remove(sessionId)
             return@withContext sessionId
         }
 
         var openRouterGateway: OpenRouterRoutingGateway? = null
         runCatching {
             RuntimeTaskController.stopAction = {
-                userStopRequested = true
+                state.userStopRequested = true
                 val running = activeProcess
                 if (running != null) {
                     Thread {
@@ -142,7 +152,7 @@ class DshRuntimeBridge(
                 emulateHardLinks = false,
             )
             activeProcess = process
-            if (userStopRequested) process.destroy()
+            if (state.userStopRequested) process.destroy()
             val sdkResult = runSdkSession(
                 process = process,
                 sessionId = sessionId,
@@ -162,7 +172,7 @@ class DshRuntimeBridge(
             } else if (!File(checkpoints.checkpointDir(projectId), "changes.json").isFile) {
                 acceptLastChanges(projectId)
             }
-            if (exit == 0 && sdkResult.completed && !userStopRequested) {
+            if (exit == 0 && sdkResult.completed && !state.userStopRequested) {
                 emitCompletedOnce(sessionId)
                 finishForegroundRuntime(
                     completed = true,
@@ -170,14 +180,14 @@ class DshRuntimeBridge(
                     detail = "DeepSeek Harness finished the task in $projectSlug.",
                 )
             } else {
-                if (userStopRequested) throw DshSessionException("Stopped by user")
+                if (state.userStopRequested) throw DshSessionException("Stopped by user")
                 error(sdkResult.failure.ifBlank { "DeepSeek Harness stopped with exit code $exit" })
             }
         }.onFailure { error ->
             Log.e("DshBridge", "Session failed", error)
             val message = friendlyError(error)
             emitFailureOnce(sessionId, message)
-            if (userStopRequested) {
+            if (state.userStopRequested) {
                 cancelForegroundRuntime()
             } else {
                 finishForegroundRuntime(
@@ -195,6 +205,9 @@ class DshRuntimeBridge(
             activeSessionId = null
             RuntimeTaskController.stopAction = null
         }
+        // Drop this session's state last so tail events emitted above still
+        // resolve it, and any late events after this point are ignored.
+        sessionStates.remove(sessionId)
         sessionId
     }
 
@@ -354,7 +367,7 @@ class DshRuntimeBridge(
 
     override suspend fun stopSession(sessionId: String) = withContext(Dispatchers.IO) {
         if (activeSessionId == sessionId) {
-            userStopRequested = true
+            sessionStates[sessionId]?.userStopRequested = true
             activeProcess?.destroy()
             delay(500)
             if (activeProcess?.isAlive == true) activeProcess?.destroyForcibly()
@@ -468,8 +481,9 @@ class DshRuntimeBridge(
         val summary = text.replace(Regex("\\s+"), " ").trim().take(2_000)
         if (summary.isBlank()) return
         val now = android.os.SystemClock.elapsedRealtime()
-        if (force || now - lastThinkingUpdateAt >= 400) {
-            lastThinkingUpdateAt = now
+        val state = sessionStates[sessionId] ?: return
+        if (force || now - state.lastThinkingUpdateAt >= 400) {
+            state.lastThinkingUpdateAt = now
             eventBus.emit(
                 RuntimeEvent.ReasoningSummary(
                     sessionId = sessionId,
@@ -497,7 +511,7 @@ class DshRuntimeBridge(
     private suspend fun emitFailureOnce(sessionId: String, reason: String) {
         if (finishedSessions.add(sessionId)) {
             eventBus.emit(RuntimeEvent.SessionFailed(sessionId, reason))
-            if (userStopRequested) {
+            if (sessionStates[sessionId]?.userStopRequested == true) {
                 cancelForegroundRuntime()
             } else {
                 finishForegroundRuntime(

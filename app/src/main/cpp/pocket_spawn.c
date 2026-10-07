@@ -114,6 +114,11 @@ Java_com_jarves_mh_runtime_NativeSpawn_spawn(JNIEnv *env, jobject self, jobjectA
 
     pid = fork();
     if (pid == 0) {
+        /* Android leaves SIGPIPE ignored (SIG_IGN) in every app process, and
+         * ignored dispositions survive execve. Restore the default so guest
+         * CLIs die on EPIPE the way they do in a real terminal instead of
+         * surfacing write errors from every downstream closed pipe. */
+        signal(SIGPIPE, SIG_DFL);
         if (use_pty) {
             if (setsid() < 0) _exit(126);
             int slave_fd = open(slave_name, O_RDWR);
@@ -204,6 +209,12 @@ fail:
     free(output_path);
     if (master_fd >= 0) close(master_fd);
     close_pair(in_pipe);
+    // The Kotlin side declares a non-null IntArray return; a bare NULL would
+    // surface as an NPE instead of the designed failure message.
+    if (!(*env)->ExceptionCheck(env)) {
+        (*env)->ThrowNew(env, (*env)->FindClass(env, "java/lang/RuntimeException"),
+                         "Native runtime launch failed");
+    }
     return NULL;
 }
 
@@ -211,7 +222,10 @@ JNIEXPORT jint JNICALL
 Java_com_jarves_mh_runtime_NativeSpawn_waitFor(JNIEnv *env, jobject self, jint pid, jboolean no_hang) {
     (void)env; (void)self;
     int status = 0;
-    pid_t value = waitpid(pid, &status, no_hang ? WNOHANG : 0);
+    pid_t value;
+    do {
+        value = waitpid(pid, &status, no_hang ? WNOHANG : 0);
+    } while (value < 0 && errno == EINTR);
     if (value == 0) return -2;
     if (value < 0) return -128 - errno;
     if (WIFEXITED(status)) return WEXITSTATUS(status);

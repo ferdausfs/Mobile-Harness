@@ -16,23 +16,57 @@ internal class NativeSpawnProcess private constructor(
 ) : Process() {
     @Volatile private var result: Int? = null
 
+    /**
+     * Single-reaper guard. waitFor() and exitValue() (and therefore isAlive(),
+     * which watchdog and stop threads call concurrently with a worker blocked
+     * in waitFor()) all waitpid the same pid; without this, a concurrent
+     * isAlive() can reap the child first, the blocking waitpid then fails with
+     * ECHILD, and the error encoding (-138) got cached as the exit code —
+     * turning a successful task into a bogus failure. Reaping is serialized
+     * here and a known exit status is never overwritten.
+     */
+    private val reapLock = Any()
+
     override fun getOutputStream(): OutputStream = stdin
     override fun getInputStream(): InputStream = FileInputStream(outputFile)
     override fun getErrorStream(): InputStream = ByteArrayInputStream(ByteArray(0))
 
     override fun waitFor(): Int {
-        result?.let { return it }
-        return NativeSpawn.waitFor(pid, false).also {
-            result = it
+        var transientRetries = 0
+        while (true) {
+            val cached = synchronized(reapLock) { result }
+            cached?.let { return it }
+            // Poll instead of blocking inside the lock so watchdog threads
+            // can still observe liveness (exitValue) while we wait.
+            val status = synchronized(reapLock) { NativeSpawn.waitFor(pid, true) }
+            if (status == NativeSpawn.STILL_RUNNING) {
+                Thread.sleep(50)
+                continue
+            }
+            if (status < 0 && transientRetries < 3) {
+                // errno encoding (e.g. EINTR); transient — retry briefly.
+                transientRetries++
+                Thread.sleep(20)
+                continue
+            }
+            synchronized(reapLock) {
+                // Never cache a negative encoding as the final exit status.
+                if (result == null && status >= 0) result = status
+            }
             outputPump?.join(1_000)
+            return status
         }
     }
 
     override fun exitValue(): Int {
-        result?.let { return it }
-        val status = NativeSpawn.waitFor(pid, true)
-        if (status == NativeSpawn.STILL_RUNNING) throw IllegalThreadStateException("Process is still running")
-        return status.also { result = it }
+        synchronized(reapLock) {
+            result?.let { return it }
+            val status = NativeSpawn.waitFor(pid, true)
+            if (status == NativeSpawn.STILL_RUNNING) throw IllegalThreadStateException("Process is still running")
+            if (status < 0) return status
+            result = status
+            return status
+        }
     }
 
     override fun destroy() {

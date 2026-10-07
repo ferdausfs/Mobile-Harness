@@ -2106,6 +2106,8 @@ private fun RootScreenHost(
                     onRemoveFailoverProvider = viewModel::removeFailoverProvider,
                     onToggleFailoverProvider = viewModel::toggleFailoverProvider,
                     failoverKeySaved = viewModel::failoverKeyPreview,
+                    onSetProviderLimit = viewModel::setProviderDailyLimit,
+                    onCheckProviderUsage = viewModel::checkProviderUsage,
                     onSelectAgent = viewModel::selectAgent,
                     onInstallAgent = viewModel::installAgent,
                     onCheckAgentUpdates = viewModel::checkAgentUpdates,

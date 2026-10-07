@@ -18,7 +18,7 @@ import org.json.JSONObject
 import java.io.File
 import java.time.Instant
 
-class AppPreferences(private val context: Context) {
+class AppPreferences(private val context: Context) : AppPreferencesBridge {
     private val preferences = context.getSharedPreferences("pocket_preferences", Context.MODE_PRIVATE)
 
     var onboardingComplete: Boolean
@@ -338,6 +338,13 @@ class AppPreferences(private val context: Context) {
             )
         }
     }.getOrDefault(emptyList())
+
+    /** Live per-provider usage counters rendered by the Agent screen status card. */
+    override fun saveProviderUsage(json: String) {
+        preferences.edit().putString("provider_usage_json", json).apply()
+    }
+
+    override fun loadProviderUsage(): String? = preferences.getString("provider_usage_json", null)
 
     private val chatsDir = File(context.filesDir, "chats").also { it.mkdirs() }
 

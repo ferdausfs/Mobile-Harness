@@ -95,6 +95,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.jarves.mh.data.ApiKeyInfo
+import com.jarves.mh.data.ProviderLiveState
+import com.jarves.mh.data.ProviderUsageSnapshot
+import com.jarves.mh.data.ProviderUsageTracker
 import com.jarves.mh.model.AgentKind
 import com.jarves.mh.model.DSH_PROTOCOL_PROVIDERS
 import com.jarves.mh.model.ProviderKind
@@ -105,6 +108,7 @@ import com.jarves.mh.model.providersForAgent
 import com.jarves.mh.network.ConnectionValidation
 import com.jarves.mh.network.DiscoveredModel
 import com.jarves.mh.network.ModelDiscoveryResult
+import com.jarves.mh.network.OllamaUsageClient
 import com.jarves.mh.runtime.AntigravityAuthStatus
 import com.jarves.mh.ui.theme.PocketBlue
 import com.jarves.mh.ui.theme.PocketOrange
@@ -171,6 +175,8 @@ fun AgentScreen(
     onRemoveFailoverProvider: (String) -> Unit = { _ -> },
     onToggleFailoverProvider: (String) -> Unit = { _ -> },
     failoverKeySaved: (ProviderKind) -> Boolean = { false },
+    onSetProviderLimit: (ProviderKind, Int) -> Unit = { _, _ -> },
+    onCheckProviderUsage: (ProviderKind) -> Unit = { _ -> },
     onSelectAgent: (AgentKind) -> Unit = {},
     onInstallAgent: (AgentKind) -> Unit = {},
     onCheckAgentUpdates: () -> Unit = {},
@@ -994,6 +1000,8 @@ fun AgentScreen(
                         onRemoveFailoverProvider = onRemoveFailoverProvider,
                         onToggleFailoverProvider = onToggleFailoverProvider,
                         failoverKeySaved = failoverKeySaved,
+                        onSetProviderLimit = onSetProviderLimit,
+                        onCheckProviderUsage = onCheckProviderUsage,
                         keyConnectionStatuses = keyConnectionStatuses,
                         savedKeys = savedKeys,
                         newKeyName = newKeyName,
@@ -1503,6 +1511,8 @@ private fun AgentProviderCard(
     onRemoveFailoverProvider: (String) -> Unit,
     onToggleFailoverProvider: (String) -> Unit,
     failoverKeySaved: (ProviderKind) -> Boolean,
+    onSetProviderLimit: (ProviderKind, Int) -> Unit,
+    onCheckProviderUsage: (ProviderKind) -> Unit,
     keyConnectionStatuses: Map<String, KeyConnectionStatus>,
     savedKeys: List<ApiKeyInfo>,
     newKeyName: String,
@@ -1871,6 +1881,13 @@ private fun AgentProviderCard(
                 onToggle = onToggleFailoverProvider,
             )
             Spacer(Modifier.height(12.dp))
+            ProviderLiveStatusSection(
+                state = state,
+                failoverKeySaved = failoverKeySaved,
+                onSetLimit = onSetProviderLimit,
+                onCheckUsage = onCheckProviderUsage,
+            )
+            Spacer(Modifier.height(12.dp))
             OutlinedButton(
                 onClick = onValidate,
                 enabled = apiKey.isNotBlank() && !isDiscovering && !isValidating &&
@@ -2026,6 +2043,243 @@ private fun FailoverProviderSection(
             },
         )
     }
+}
+
+/**
+ * Live per-provider usage card: requests made today, tokens spent, health
+ * state and — when the user sets a daily budget — how many requests are
+ * left before the failover chain has to take over. Ollama Cloud can also
+ * fetch its account usage straight from ollama.com/api.
+ */
+@Composable
+private fun ProviderLiveStatusSection(
+    state: AppUiState,
+    failoverKeySaved: (ProviderKind) -> Boolean,
+    onSetLimit: (ProviderKind, Int) -> Unit,
+    onCheckUsage: (ProviderKind) -> Unit,
+) {
+    var limitDialogKind by rememberSaveable { mutableStateOf<String?>(null) }
+    Column {
+        Text("Live status", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(
+            "Usage today and how much of each provider's limit is left",
+            fontSize = 11.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        val kinds = (listOf(state.provider.kind) + state.failoverProviders.map { it.kind }).distinct()
+        Surface(
+            shape = RoundedCornerShape(13.dp),
+            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+        ) {
+            Column {
+                if (kinds.isEmpty()) {
+                    Text(
+                        "Pick a provider to see its live usage here.",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(13.dp),
+                    )
+                }
+                kinds.forEachIndexed { index, kind ->
+                    ProviderStatusRow(
+                        kind = kind,
+                        snapshot = state.providerUsage[kind],
+                        isActive = kind == state.provider.kind,
+                        hasKey = kind == state.provider.kind || failoverKeySaved(kind),
+                        checking = state.usageCheckInProgress == kind.name,
+                        onSetLimit = { limitDialogKind = kind.name },
+                        onCheckUsage = { onCheckUsage(kind) },
+                    )
+                    if (index != kinds.lastIndex) {
+                        HorizontalDivider(Modifier.padding(start = 13.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f))
+                    }
+                }
+            }
+        }
+    }
+    limitDialogKind?.let { name ->
+        val kind = remember(name) { runCatching { ProviderKind.valueOf(name) }.getOrNull() }
+        if (kind != null) {
+            ProviderLimitDialog(
+                kind = kind,
+                current = state.providerUsage[kind]?.dailyRequestLimit ?: 0,
+                onDismiss = { limitDialogKind = null },
+                onSave = { value ->
+                    onSetLimit(kind, value)
+                    limitDialogKind = null
+                },
+            )
+        }
+    }
+}
+
+@Composable
+private fun ProviderStatusRow(
+    kind: ProviderKind,
+    snapshot: ProviderUsageSnapshot?,
+    isActive: Boolean,
+    hasKey: Boolean,
+    checking: Boolean,
+    onSetLimit: () -> Unit,
+    onCheckUsage: () -> Unit,
+) {
+    val s = snapshot ?: ProviderUsageSnapshot(kind)
+    val stateColor = when (s.state) {
+        ProviderLiveState.ACTIVE -> Color(0xFF2F9E5B)
+        ProviderLiveState.SWITCHED -> PocketBlue
+        ProviderLiveState.LIMIT -> PocketOrange
+        ProviderLiveState.AUTH_ERROR, ProviderLiveState.ERROR -> MaterialTheme.colorScheme.error
+        ProviderLiveState.IDLE -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    val stateLabel = when (s.state) {
+        ProviderLiveState.ACTIVE -> "Active"
+        ProviderLiveState.SWITCHED -> "Took over"
+        ProviderLiveState.LIMIT -> "Limit reached"
+        ProviderLiveState.AUTH_ERROR -> "Key rejected"
+        ProviderLiveState.ERROR -> "Error"
+        ProviderLiveState.IDLE -> "Idle"
+    }
+    Column(Modifier.fillMaxWidth().padding(start = 13.dp, end = 9.dp, top = 9.dp, bottom = 9.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                Modifier
+                    .size(9.dp)
+                    .clip(CircleShape)
+                    .background(stateColor),
+            )
+            Spacer(Modifier.width(7.dp))
+            Text(
+                buildString {
+                    append(kind.title)
+                    if (isActive) append(" · active")
+                    else if (!hasKey) append(" · no key")
+                },
+                fontWeight = FontWeight.Medium,
+                fontSize = 13.sp,
+                modifier = Modifier.weight(1f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(stateLabel, fontSize = 11.sp, color = stateColor, fontWeight = FontWeight.SemiBold)
+        }
+        Spacer(Modifier.height(3.dp))
+        Text(
+            buildString {
+                append("Today · ${s.dayTasks} task${if (s.dayTasks == 1) "" else "s"}")
+                append(" · ${s.dayRequests} request${if (s.dayRequests == 1) "" else "s"}")
+                append(" · ${ProviderUsageTracker.formatTokens(s.dayTokens)} tokens")
+                if (s.totalTokens > 0) append(" · ${ProviderUsageTracker.formatTokens(s.totalTokens)} all-time")
+            },
+            fontSize = 11.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        if (s.dailyRequestLimit > 0) {
+            Spacer(Modifier.height(5.dp))
+            LinearProgressIndicator(
+                progress = { s.limitFraction },
+                modifier = Modifier.fillMaxWidth().height(5.dp).clip(RoundedCornerShape(3.dp)),
+                color = if (s.limitFraction >= 1f) MaterialTheme.colorScheme.error else stateColor,
+                trackColor = MaterialTheme.colorScheme.surfaceVariant,
+            )
+            Text(
+                "${s.remainingToday} of ${s.dailyRequestLimit} requests left today",
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        if (s.lastMessage.isNotBlank()) {
+            Text(
+                s.lastMessage,
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            TextButton(onClick = onSetLimit, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)) {
+                Text(if (s.dailyRequestLimit > 0) "Change limit" else "Set daily limit", fontSize = 11.sp)
+            }
+            if (kind == ProviderKind.OLLAMA_CLOUD) {
+                TextButton(
+                    onClick = onCheckUsage,
+                    enabled = hasKey && !checking,
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                ) {
+                    if (checking) {
+                        CircularProgressIndicator(Modifier.size(12.dp), strokeWidth = 1.5.dp)
+                        Spacer(Modifier.width(6.dp))
+                        Text("Checking…", fontSize = 11.sp)
+                    } else {
+                        Text("Check account usage", fontSize = 11.sp)
+                    }
+                }
+            }
+        }
+        if (kind == ProviderKind.OLLAMA_CLOUD && s.remoteUsageJson != null) {
+            val lines = remember(s.remoteUsageJson) { OllamaUsageClient.summarize(s.remoteUsageJson.orEmpty()) }
+            if (lines.isNotEmpty()) {
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    color = MaterialTheme.colorScheme.surface.copy(alpha = 0.7f),
+                    modifier = Modifier.fillMaxWidth().padding(top = 2.dp),
+                ) {
+                    Column(Modifier.padding(horizontal = 9.dp, vertical = 7.dp)) {
+                        lines.forEach { line ->
+                            Text(
+                                line,
+                                fontSize = 10.sp,
+                                fontFamily = FontFamily.Monospace,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ProviderLimitDialog(
+    kind: ProviderKind,
+    current: Int,
+    onDismiss: () -> Unit,
+    onSave: (Int) -> Unit,
+) {
+    var text by rememberSaveable(kind) { mutableStateOf(if (current > 0) current.toString() else "") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Daily request limit", fontWeight = FontWeight.Bold) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(9.dp)) {
+                Text(
+                    "A soft budget for ${kind.title}, counted from this app's own live tracker. When it is used up, the failover chain takes over automatically. Leave empty to remove the limit.",
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                OutlinedTextField(
+                    value = text,
+                    onValueChange = { input -> if (input.all(Char::isDigit)) text = input.take(6) },
+                    label = { Text("Requests per day") },
+                    placeholder = { Text("No limit") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onSave(text.toIntOrNull() ?: 0) }) { Text("Save") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        },
+    )
 }
 
 @Composable

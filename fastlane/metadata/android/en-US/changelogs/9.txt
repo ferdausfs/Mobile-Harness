@@ -1,0 +1,1 @@
+Live provider status: see requests, tokens and how much of each provider's daily limit is left. Ollama Cloud can fetch account usage directly. Custom base URLs ending in /api now fall back to Ollama's OpenAI endpoint automatically.

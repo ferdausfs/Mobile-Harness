@@ -19,6 +19,8 @@ internal class LocalFormatGateway(
     private val profile: ProviderProfile,
     private val apiKey: String,
     private val protocol: com.jarves.mh.model.ProviderProtocol = com.jarves.mh.model.ProviderProtocol.OPENAI_CHAT,
+    /** Receives every upstream HTTP result for live usage tracking (code, input tokens, output tokens). */
+    private val onUpstreamResult: ((code: Int, inputTokens: Int, outputTokens: Int) -> Unit)? = null,
 ) : AutoCloseable {
     private val running = AtomicBoolean(true)
     private val server = ServerSocket(0, 8, InetAddress.getByName("127.0.0.1"))
@@ -290,12 +292,25 @@ internal class LocalFormatGateway(
         var lastBody = ""
         for (path in paths) {
             val (code, text) = postJson(base + path, body)
-            if (code in 200..299) return code to text
+            if (code in 200..299) {
+                reportUsage(code, text)
+                return code to text
+            }
             lastCode = code
             lastBody = text
             // Retry the versioned path only when the flat path does not exist.
             if (code != 404 && code != 405) break
         }
+        // Ollama Cloud exposes its OpenAI-compatible endpoint at /v1 while the
+        // native API lives at /api. A base URL ending in /api therefore never
+        // resolves; retry once against the same host with /v1.
+        val fallbackBase = openAiCompatibleBase(base)
+        if (fallbackBase != null) {
+            val (code, text) = postJson(fallbackBase + "/chat/completions", body)
+            if (code in 200..299) reportUsage(code, text)
+            return code to text
+        }
+        reportUsage(lastCode, lastBody)
         return lastCode to lastBody
     }
 
@@ -310,12 +325,45 @@ internal class LocalFormatGateway(
         var lastBody = ""
         for (path in paths) {
             val (code, text) = postJson(base + path, body)
-            if (code in 200..299) return code to text
+            if (code in 200..299) {
+                reportUsage(code, text)
+                return code to text
+            }
             lastCode = code
             lastBody = text
             if (code != 404 && code != 405) break
         }
+        // Same /api → /v1 rescue as [callProvider] for the Responses wire format.
+        val fallbackBase = openAiCompatibleBase(base)
+        if (fallbackBase != null) {
+            val (code, text) = postJson(fallbackBase + "/responses", body)
+            if (code in 200..299) reportUsage(code, text)
+            return code to text
+        }
+        reportUsage(lastCode, lastBody)
         return lastCode to lastBody
+    }
+
+    /** https://ollama.com/api → https://ollama.com/v1 when the flat path 404s. */
+    private fun openAiCompatibleBase(base: String): String? {
+        if (!base.endsWith("/api")) return null
+        val host = runCatching { java.net.URI(base).host.orEmpty() }.getOrDefault("")
+        if (!host.equals("ollama.com", true)) return null
+        return base.removeSuffix("/api") + "/v1"
+    }
+
+    /** Pull token usage out of an upstream reply and forward it to the tracker. */
+    private fun reportUsage(code: Int, body: String) {
+        val listener = onUpstreamResult ?: return
+        val usage = runCatching {
+            val root = JSONObject(body)
+            root.optJSONObject("usage") ?: JSONObject()
+        }.getOrDefault(JSONObject())
+        val input = usage.optInt("prompt_tokens").takeIf { it > 0 }
+            ?: usage.optInt("input_tokens")
+        val output = usage.optInt("completion_tokens").takeIf { it > 0 }
+            ?: usage.optInt("output_tokens")
+        runCatching { listener(code, input, output) }
     }
 
     private fun postJson(endpoint: String, body: JSONObject): Pair<Int, String> {

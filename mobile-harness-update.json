@@ -1,12 +1,12 @@
 {
-  "versionCode": 8,
-  "versionName": "1.0.7",
-  "notes": "Ollama Cloud is now a built-in provider. New backup-provider failover: add multiple providers and when one hits its limit, quota or key errors, the next one takes over automatically. Same signing key as v1.0.6 — installs as a normal update.",
+  "versionCode": 9,
+  "versionName": "1.0.8",
+  "notes": "New live status card: see requests made, tokens spent and how much of each provider's daily limit is left. Ollama Cloud can fetch account usage directly from ollama.com/api. Base URLs ending in /api now auto-fall-back to Ollama's OpenAI endpoint. NOTE: the release signing key was recovered after a build-machine reset — this build is signed with a NEW key, so uninstall v1.0.7 or older once before installing (future updates will upgrade normally).",
   "artifacts": {
     "online": {
-      "url": "https://github.com/ferdausfs/Mobile-Harness/releases/download/v1.0.7/mobile-harness-online-v1.0.7.apk",
-      "sha256": "3f066319db7b7e7ab8202a319326b430f24427bf7e39209f904a6e9a0ca555a5",
-      "sizeBytes": 87554890
+      "url": "https://github.com/ferdausfs/Mobile-Harness/releases/download/v1.0.8/mobile-harness-online-v1.0.8.apk",
+      "sha256": "1331be7f9a1b787d48451b4db635600204ecd90a0405746483d0b4c4b8a8e5b0",
+      "sizeBytes": 87632714
     }
   }
 }

@@ -16,6 +16,8 @@ import com.jarves.mh.BuildConfig
 import com.jarves.mh.data.ApiKeyVault
 import com.jarves.mh.data.ApiKeyInfo
 import com.jarves.mh.data.AppPreferences
+import com.jarves.mh.data.ProviderUsageSnapshot
+import com.jarves.mh.data.ProviderUsageTracker
 import com.jarves.mh.model.ActivityItem
 import com.jarves.mh.model.AgentKind
 import com.jarves.mh.model.ChangeItem
@@ -38,6 +40,7 @@ import com.jarves.mh.model.nextFailoverCandidate
 import com.jarves.mh.model.ProviderProtocol
 import com.jarves.mh.network.ConnectionValidation
 import com.jarves.mh.network.ModelDiscoveryResult
+import com.jarves.mh.network.OllamaUsageClient
 import com.jarves.mh.network.ProviderApiClient
 import com.jarves.mh.network.GitHubRepository
 import com.jarves.mh.runtime.ClaudeRuntimeBridge
@@ -156,6 +159,10 @@ data class AppUiState(
     val provider: ProviderProfile = ProviderProfile(ProviderKind.ANTHROPIC),
     val activeApiKeyName: String? = null,
     val failoverProviders: List<FailoverProvider> = emptyList(),
+    /** Live per-provider usage/health snapshots for the status card on the Agent screen. */
+    val providerUsage: Map<ProviderKind, ProviderUsageSnapshot> = emptyMap(),
+    /** Provider kind name while a remote usage check (Ollama Cloud) is in flight. */
+    val usageCheckInProgress: String? = null,
     val themeMode: com.jarves.mh.ui.theme.AppThemeMode = com.jarves.mh.ui.theme.AppThemeMode.DARK,
     val apiPingStatus: ApiPingStatus = ApiPingStatus.IDLE,
     val apiPingMessage: String? = null,
@@ -266,7 +273,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val vault = ApiKeyVault(application)
     private val preferences = AppPreferences(application)
-    private val claudeRuntime = ClaudeRuntimeBridge(application) { profile -> vault.get(profile.kind.name) }
+    private val usageTracker = ProviderUsageTracker(preferences)
+    private val claudeRuntime = ClaudeRuntimeBridge(
+        application,
+        { profile -> vault.get(profile.kind.name) },
+        onUpstreamResult = { kind, code, inputTokens, outputTokens ->
+            usageTracker.recordUpstreamResult(kind, code, inputTokens, outputTokens)
+        },
+    )
     private val dshRuntime = DshRuntimeBridge(application) { profile -> vault.get(profile.kind.name) }
     private val installer = RuntimeInstaller(application)
     private val antigravityRuntime = AntigravityRuntimeBridge(
@@ -342,6 +356,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     )
 
     init {
+        usageTracker.onChange = { publishProviderUsage() }
+        publishProviderUsage()
         // GitHub's official CLI owns its OAuth credential. Remove credentials from
         // the retired custom OAuth implementation and discover the real CLI status.
         vault.remove(LEGACY_GITHUB_TOKEN_KEY)
@@ -1343,6 +1359,53 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     /** The API key saved for a backup provider's kind, for prefilling the add dialog. */
     fun failoverKeyPreview(kind: ProviderKind): Boolean = vault.contains(kind.name)
+
+    /** Sets the daily upstream-request budget shown as "remaining" on the live status card. */
+    fun setProviderDailyLimit(kind: ProviderKind, limit: Int) {
+        usageTracker.setDailyLimit(kind, limit)
+    }
+
+    /**
+     * Fetches account usage from the provider. Ollama Cloud exposes
+     * GET /api/usage and POST /api/me behind the standard Bearer key;
+     * both payloads are stored for the live status card. Other kinds have
+     * no public usage endpoint and rely on locally tracked counters.
+     */
+    fun checkProviderUsage(kind: ProviderKind) {
+        if (kind != ProviderKind.OLLAMA_CLOUD) {
+            _state.update { it.copy(toastMessage = "${kind.title} has no public usage endpoint — showing locally tracked usage.") }
+            return
+        }
+        if (_state.value.usageCheckInProgress != null) return
+        viewModelScope.launch(backgroundGuard + Dispatchers.IO) {
+            _state.update { it.copy(usageCheckInProgress = kind.name) }
+            val result = OllamaUsageClient.fetch(vault.get(kind.name).orEmpty())
+            if (result.ok) {
+                usageTracker.saveRemoteUsage(kind, result.body)
+                _state.update {
+                    it.copy(
+                        usageCheckInProgress = null,
+                        toastMessage = "Ollama Cloud usage updated.",
+                    )
+                }
+            } else {
+                usageTracker.saveRemoteUsage(
+                    kind,
+                    org.json.JSONObject().put("error", result.error ?: "Usage check failed").toString(),
+                )
+                _state.update {
+                    it.copy(
+                        usageCheckInProgress = null,
+                        toastMessage = result.error ?: "Usage check failed.",
+                    )
+                }
+            }
+        }
+    }
+
+    private fun publishProviderUsage() {
+        _state.update { it.copy(providerUsage = usageTracker.snapshotMap()) }
+    }
 
     fun finishAntigravityOnboarding() {
         check(_state.value.antigravityAuth.status == AntigravityAuthStatus.SIGNED_IN) {
@@ -3146,6 +3209,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         failedApiKeyIds.clear()
         failedProviderKinds.clear()
+        usageTracker.recordTurnStart(state.value.provider.kind)
         activeRuntimeRequest = RuntimeRetryRequest(
             runtime = activeRuntime(),
             project = project,
@@ -3327,6 +3391,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (event is RuntimeEvent.SessionFailed && _state.value.agentKind == AgentKind.ANTIGRAVITY &&
             (event.reason.contains("sign-in", true) || event.reason.contains("authentication", true))) {
             antigravityAuthController.invalidateSession(event.reason)
+        }
+        if (event is RuntimeEvent.SessionFailed) {
+            usageTracker.recordSessionFailure(_state.value.provider.kind, event.reason)
         }
         if (event is RuntimeEvent.SessionFailed && retryWithNextApiKey(event)) return
         _state.update { current ->
@@ -3517,6 +3584,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
         }
+        if (event is RuntimeEvent.SessionCompleted) {
+            usageTracker.recordSessionCompleted(_state.value.provider.kind)
+        }
         if (event is RuntimeEvent.SessionCompleted || event is RuntimeEvent.SessionFailed) {
             activeRuntimeRequest = null
             failedApiKeyIds.clear()
@@ -3585,6 +3655,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             failedProviderNames = failedProviderKinds,
             hasSecret = { kind -> vault.contains(kind.name) },
         ) ?: return false
+        usageTracker.recordFailover(request.provider.kind, candidate.kind, event.reason)
         val profile = candidate.toProfile()
         val activeKeyName = vault.list(profile.kind.name)
             .firstOrNull(ApiKeyInfo::isActive)?.name

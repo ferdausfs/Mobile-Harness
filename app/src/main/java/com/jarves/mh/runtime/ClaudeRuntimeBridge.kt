@@ -66,6 +66,8 @@ internal object ProviderRuntimeErrorDetector {
 class ClaudeRuntimeBridge(
     private val context: Context,
     private val secretFor: (ProviderProfile) -> String?,
+    /** Receives upstream HTTP results from the in-app format gateway for live usage tracking. */
+    private val onUpstreamResult: ((kind: ProviderKind, code: Int, inputTokens: Int, outputTokens: Int) -> Unit)? = null,
 ) : RuntimeBridge {
     private val installer = RuntimeInstaller(context)
     private val eventBus = MutableSharedFlow<RuntimeEvent>(extraBufferCapacity = 64)
@@ -147,7 +149,9 @@ class ClaudeRuntimeBridge(
             formatGateway = if (effectiveProtocol in setOf(
                     com.jarves.mh.model.ProviderProtocol.OPENAI_CHAT,
                     com.jarves.mh.model.ProviderProtocol.OPENAI_RESPONSES,
-                )) LocalFormatGateway(provider, secret, effectiveProtocol).start() else null
+                )) LocalFormatGateway(provider, secret, effectiveProtocol, onUpstreamResult = { code, inputTokens, outputTokens ->
+                    onUpstreamResult?.invoke(provider.kind, code, inputTokens, outputTokens)
+                }).start() else null
             openRouterGateway = if (
                 provider.kind == ProviderKind.LLM_ROUTER && provider.openRouterProviders.isNotEmpty()
             ) OpenRouterRoutingGateway(provider, secret).start() else null

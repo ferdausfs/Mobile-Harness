@@ -551,30 +551,41 @@ class DshRuntimeBridge(
 
     private fun friendlyError(error: Throwable): String {
         val message = error.message.orEmpty()
+        if (error is DshSessionException && message.isMeaningfulDshText()) return message
+        // Only explicit provider error wording may be rewritten into a canonical
+        // message. Loose words such as "quota", "expired" or a bare "401" inside
+        // an arbitrary harness diagnostic must pass through unchanged, otherwise
+        // MainViewModel would fail over on unrelated text.
+        val lower = message.lowercase()
         return when {
-            error is DshSessionException && message.isMeaningfulDshText() -> message
-            message.contains("authentication", true) ||
-                message.contains("invalid api key", true) ||
-                message.contains("autherror", true) ||
-                message.contains("expired", true) ||
-                message.contains("quota", true) ||
-                listOf("401", "403").any { code ->
-                    message.contains(code) && (message.contains("auth", true) || message.contains("HTTP", true))
-                } ->
+            lower.contains("user not found") ->
+                "User not found. Check the API key and provider account."
+            lower.contains("authentication_failed") ||
+                lower.contains("authentication failed") ||
+                lower.contains("invalid api key") ||
+                lower.contains("autherror") ||
+                lower.contains("unauthorized") ||
+                lower.contains("http 401") ||
+                lower.contains("http 403") ||
+                lower.contains("api key expired") ||
+                lower.contains("token has expired") ->
                 "The provider rejected the saved API key."
-            message.contains("rate limit", true) ||
-                listOf("429").any { code ->
-                    message.contains(code) && (message.contains("auth", true) || message.contains("HTTP", true))
-                } ->
+            lower.contains("rate limit exceeded") ||
+                lower.contains("rate limit reached") ||
+                lower.contains("rate limiting") ||
+                lower.contains("rate_limit_error") ||
+                lower.contains("too many requests") ||
+                lower.contains("http 429") ||
+                lower.contains("usage limit") ->
                 "The provider is rate limiting requests."
-            message.contains("http 402", true) ||
-                message.contains("insufficient credit", true) ||
-                message.contains("insufficient funds", true) ||
-                message.contains("payment required", true) ->
+            lower.contains("http 402") ||
+                lower.contains("insufficient credit") ||
+                lower.contains("insufficient funds") ||
+                lower.contains("payment required") ->
                 "The provider reports insufficient credits or quota."
-            message.contains("missing_credential", true) ->
+            lower.contains("missing_credential") ->
                 "No API key reached DeepSeek Harness. Re-save the provider key in Settings."
-            message.contains("not installed", true) -> message.take(300)
+            lower.contains("not installed") -> message.take(300)
             !message.isMeaningfulDshText() -> "DeepSeek Harness could not start."
             else -> message.take(500)
         }

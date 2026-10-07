@@ -3855,7 +3855,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun explicitStatusShape(value: String, code: Int): Boolean {
         if (Regex("api error[^0-9]{0,40}$code([^0-9]|$)").containsMatchIn(value)) return true
         if (Regex("http[/ ]{0,2}$code([^0-9]|$)").containsMatchIn(value)) return true
-        if (Regex("http/1\.[01] $code([^0-9]|$)").containsMatchIn(value)) return true
+        if (Regex("http/1\\.[01] $code([^0-9]|$)").containsMatchIn(value)) return true
         if (Regex("status code[: ]+$code([^0-9]|$)").containsMatchIn(value)) return true
         return Regex("(^|[^0-9])$code (unauthorized|forbidden|payment required|too many requests)").containsMatchIn(value)
     }

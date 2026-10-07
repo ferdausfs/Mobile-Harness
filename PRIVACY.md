@@ -58,4 +58,4 @@ This policy may be updated as Mobile Harness changes. Material changes will be r
 
 ## Contact
 
-For privacy questions or requests, open an issue at [github.com/techjarves/Mobile-Harness/issues](https://github.com/techjarves/Mobile-Harness/issues).
+For privacy questions or requests, open an issue at [github.com/ferdausfs/Mobile-Harness/issues](https://github.com/ferdausfs/Mobile-Harness/issues).

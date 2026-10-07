@@ -2,20 +2,29 @@ Categories:
   - Development
   - System
 License: MIT
-AuthorName: TechJarves
-SourceCode: https://github.com/techjarves/Mobile-Harness
-IssueTracker: https://github.com/techjarves/Mobile-Harness/issues
-Changelog: https://github.com/techjarves/Mobile-Harness/releases
+AuthorName: ferdausfs
+SourceCode: https://github.com/ferdausfs/Mobile-Harness
+IssueTracker: https://github.com/ferdausfs/Mobile-Harness/issues
+Changelog: https://github.com/ferdausfs/Mobile-Harness/releases
 
 AutoName: Mobile Harness
 
 RepoType: git
-Repo: https://github.com/techjarves/Mobile-Harness.git
+Repo: https://github.com/ferdausfs/Mobile-Harness.git
 
 AntiFeatures:
   - NonFreeNet
 
 Builds:
+  - versionName: 1.0.11
+    versionCode: 12
+    commit: v1.0.11
+    subdir: app
+    ndk: r26b
+    submodules: true
+    gradle:
+      - yes
+
   - versionName: 1.0.2
     versionCode: 3
     commit: v1.0.2
@@ -27,5 +36,5 @@ Builds:
 
 AutoUpdateMode: Version v%v
 UpdateCheckMode: Tags
-CurrentVersion: 1.0.2
-CurrentVersionCode: 3
+CurrentVersion: 1.0.11
+CurrentVersionCode: 12

@@ -6,8 +6,12 @@ keystore_path="${MH_UPLOAD_STORE_FILE:-/Users/jarves/.mobile-harness/mobile-harn
 key_alias="${MH_UPLOAD_KEY_ALIAS:-mobile-harness-upload}"
 keychain_account="com.jarves.mh"
 keychain_service="Mobile Harness Upload Key"
-version_code="${1:-1}"
-version_name="${2:-1.0.0}"
+version_code="${1:-}"
+version_name="${2:-}"
+if [[ -z "$version_code" || -z "$version_name" ]]; then
+  echo "Usage: $0 <versionCode> <versionName>  (e.g. $0 12 1.0.11)" >&2
+  exit 1
+fi
 
 if [[ ! -f "$keystore_path" ]]; then
   echo "Upload keystore not found: $keystore_path" >&2

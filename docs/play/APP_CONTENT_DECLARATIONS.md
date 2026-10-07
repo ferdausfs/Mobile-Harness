@@ -21,6 +21,6 @@ Use these answers as a submission worksheet and revalidate them for the exact re
 
 ## Store listing contact
 
-- Website: `https://github.com/techjarves/Mobile-Harness`
-- Support: `https://github.com/techjarves/Mobile-Harness/issues`
+- Website: `https://github.com/ferdausfs/Mobile-Harness`
+- Support: `https://github.com/ferdausfs/Mobile-Harness/issues`
 - Email: provide a dedicated public support address in Play Console. Do not reuse a private signing or account email without explicit approval.

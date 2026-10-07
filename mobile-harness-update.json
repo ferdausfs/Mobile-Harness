@@ -1,12 +1,12 @@
 {
-  "versionCode": 7,
-  "versionName": "1.0.6",
-  "notes": "Stability hardening: background task failures now log instead of crashing the app; deprecated icons modernized. NOTE: signed with a new release key — uninstall v1.0.5 or older before installing this update (one time).",
+  "versionCode": 8,
+  "versionName": "1.0.7",
+  "notes": "Ollama Cloud is now a built-in provider. New backup-provider failover: add multiple providers and when one hits its limit, quota or key errors, the next one takes over automatically. Same signing key as v1.0.6 — installs as a normal update.",
   "artifacts": {
     "online": {
-      "url": "https://github.com/ferdausfs/Mobile-Harness/releases/download/v1.0.6/mobile-harness-online-v1.0.6.apk",
-      "sha256": "106e713495fc72fbb0c245f1ecdb5bc22a06fa7987ec7b8f85c9ac4e71f1e6ff",
-      "sizeBytes": 87489354
+      "url": "https://github.com/ferdausfs/Mobile-Harness/releases/download/v1.0.7/mobile-harness-online-v1.0.7.apk",
+      "sha256": "3f066319db7b7e7ab8202a319326b430f24427bf7e39209f904a6e9a0ca555a5",
+      "sizeBytes": 87554890
     }
   }
 }

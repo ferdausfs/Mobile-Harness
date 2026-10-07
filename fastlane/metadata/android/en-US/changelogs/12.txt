@@ -1,0 +1,7 @@
+The Agent screen tabs finally work for every agent: tapping Claude Code or Antigravity when it is not installed now offers the install right there with live download progress and switches to it on success - no more dead taps and no more hunting through Settings. Install failures now show their actual reason on the screen instead of vanishing.
+
+Antigravity parity: a failed Antigravity task no longer hides the files it already changed (they show up in the Changes tab and stay undoable), and a new prompt started right after Stop can no longer lose its Stop button or notification to the dying previous session.
+
+Reliability: multi-byte characters (emoji, CJK) that straddled a 16 KB output read boundary no longer corrupt the session transcript; concurrent liveness checks can no longer turn a successful task's exit code into a bogus failure (-138); agent updates verify before replacing the working binary and roll back automatically if the new release is broken on your device; update checks understand pre-release versions correctly.
+
+Repo migration: all runtime bundle downloads and the privacy policy URL now point at the ferdausfs/Mobile-Harness repository (the old techjarves URLs serve stale content).

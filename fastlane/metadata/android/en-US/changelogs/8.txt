@@ -1,0 +1,1 @@
+Adds Ollama Cloud as a built-in provider and backup-provider failover: when one provider hits its limit, the next one takes over automatically.

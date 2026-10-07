@@ -2102,6 +2102,10 @@ private fun RootScreenHost(
                     onAddApiKey = viewModel::addApiKey,
                     onActivateApiKey = viewModel::activateApiKey,
                     onRemoveApiKey = viewModel::removeApiKey,
+                    onAddFailoverProvider = viewModel::addFailoverProvider,
+                    onRemoveFailoverProvider = viewModel::removeFailoverProvider,
+                    onToggleFailoverProvider = viewModel::toggleFailoverProvider,
+                    failoverKeySaved = viewModel::failoverKeyPreview,
                     onSelectAgent = viewModel::selectAgent,
                     onInstallAgent = viewModel::installAgent,
                     onCheckAgentUpdates = viewModel::checkAgentUpdates,
@@ -2587,6 +2591,7 @@ private fun ProviderChoiceRow(
         ProviderKind.KIMI -> Color(0xFF8B7CF6)
         ProviderKind.OPENCODE_ZEN -> Color(0xFF22C55E)
         ProviderKind.NVIDIA_NIM -> Color(0xFF76B900)
+        ProviderKind.OLLAMA_CLOUD -> Color(0xFF38BDF8)
         ProviderKind.CUSTOM -> PocketOrange
     }
     val mark = when (provider) {
@@ -2597,6 +2602,7 @@ private fun ProviderChoiceRow(
         ProviderKind.KIMI -> "K"
         ProviderKind.OPENCODE_ZEN -> "Z"
         ProviderKind.NVIDIA_NIM -> "NV"
+        ProviderKind.OLLAMA_CLOUD -> "OL"
         ProviderKind.CUSTOM -> "<>"
     }
 

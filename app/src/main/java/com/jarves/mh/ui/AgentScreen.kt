@@ -36,6 +36,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Key
@@ -51,6 +52,7 @@ import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.ui.draw.clip
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -66,6 +68,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -164,6 +167,10 @@ fun AgentScreen(
     onAddApiKey: (ProviderKind, String, String) -> List<ApiKeyInfo>,
     onActivateApiKey: (ProviderKind, String) -> List<ApiKeyInfo>,
     onRemoveApiKey: (ProviderKind, String) -> List<ApiKeyInfo>,
+    onAddFailoverProvider: (ProviderProfile, String) -> Unit = { _, _ -> },
+    onRemoveFailoverProvider: (String) -> Unit = { _ -> },
+    onToggleFailoverProvider: (String) -> Unit = { _ -> },
+    failoverKeySaved: (ProviderKind) -> Boolean = { false },
     onSelectAgent: (AgentKind) -> Unit = {},
     onInstallAgent: (AgentKind) -> Unit = {},
     onCheckAgentUpdates: () -> Unit = {},
@@ -983,6 +990,10 @@ fun AgentScreen(
                         status = status,
                         statusOk = statusOk,
                         statusProviderMessage = statusProviderMessage,
+                        onAddFailoverProvider = onAddFailoverProvider,
+                        onRemoveFailoverProvider = onRemoveFailoverProvider,
+                        onToggleFailoverProvider = onToggleFailoverProvider,
+                        failoverKeySaved = failoverKeySaved,
                         keyConnectionStatuses = keyConnectionStatuses,
                         savedKeys = savedKeys,
                         newKeyName = newKeyName,
@@ -1488,6 +1499,10 @@ private fun AgentProviderCard(
     status: String?,
     statusOk: Boolean,
     statusProviderMessage: String?,
+    onAddFailoverProvider: (ProviderProfile, String) -> Unit,
+    onRemoveFailoverProvider: (String) -> Unit,
+    onToggleFailoverProvider: (String) -> Unit,
+    failoverKeySaved: (ProviderKind) -> Boolean,
     keyConnectionStatuses: Map<String, KeyConnectionStatus>,
     savedKeys: List<ApiKeyInfo>,
     newKeyName: String,
@@ -1847,6 +1862,15 @@ private fun AgentProviderCard(
             }
 
             Spacer(Modifier.height(12.dp))
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))
+            FailoverProviderSection(
+                state = state,
+                failoverKeySaved = failoverKeySaved,
+                onAdd = onAddFailoverProvider,
+                onRemove = onRemoveFailoverProvider,
+                onToggle = onToggleFailoverProvider,
+            )
+            Spacer(Modifier.height(12.dp))
             OutlinedButton(
                 onClick = onValidate,
                 enabled = apiKey.isNotBlank() && !isDiscovering && !isValidating &&
@@ -1918,6 +1942,219 @@ private fun PremiumSummaryRow(
             tint = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
+}
+
+/**
+ * Backup providers used for automatic cross-provider failover. When the active
+ * provider is rejected (auth exhausted, quota, rate limit), the runtime walks
+ * this list top-down and resumes on the first entry with a stored key.
+ */
+@Composable
+private fun FailoverProviderSection(
+    state: AppUiState,
+    failoverKeySaved: (ProviderKind) -> Boolean,
+    onAdd: (ProviderProfile, String) -> Unit,
+    onRemove: (String) -> Unit,
+    onToggle: (String) -> Unit,
+) {
+    var showAddDialog by rememberSaveable { mutableStateOf(false) }
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text("Backup providers", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(
+                if (state.failoverProviders.isEmpty()) "If one provider's limit ends, the next starts automatically"
+                else "${state.failoverProviders.count { it.enabled }} of ${state.failoverProviders.size} armed · tried in order",
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        OutlinedButton(onClick = { showAddDialog = true }, contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)) {
+            Text("Add", fontSize = 12.sp)
+        }
+    }
+    if (state.failoverProviders.isNotEmpty()) {
+        Surface(
+            shape = RoundedCornerShape(13.dp),
+            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+        ) {
+            Column {
+                state.failoverProviders.forEachIndexed { index, entry ->
+                    Row(
+                        Modifier.fillMaxWidth().padding(start = 13.dp, end = 9.dp, top = 8.dp, bottom = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                "${index + 1}. ${entry.kind.title}",
+                                fontWeight = FontWeight.Medium,
+                                fontSize = 13.sp,
+                                color = if (entry.enabled) Color.Unspecified else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f),
+                            )
+                            Text(
+                                buildString {
+                                    append(entry.model.ifBlank { "No model set" })
+                                    if (!failoverKeySaved(entry.kind)) append(" · no key saved")
+                                    if (!entry.enabled) append(" · off")
+                                },
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                        Switch(checked = entry.enabled, onCheckedChange = { onToggle(entry.id) })
+                        IconButton(onClick = { onRemove(entry.id) }) {
+                            Icon(Icons.Default.DeleteOutline, "Remove ${entry.kind.title}", tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(18.dp))
+                        }
+                    }
+                    if (index != state.failoverProviders.lastIndex) {
+                        HorizontalDivider(Modifier.padding(start = 13.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f))
+                    }
+                }
+            }
+        }
+    }
+    if (showAddDialog) {
+        AddFailoverProviderDialog(
+            agentKind = state.agentKind,
+            failoverKeySaved = failoverKeySaved,
+            onDismiss = { showAddDialog = false },
+            onAdd = { profile, secret ->
+                onAdd(profile, secret)
+                showAddDialog = false
+            },
+        )
+    }
+}
+
+@Composable
+private fun AddFailoverProviderDialog(
+    agentKind: AgentKind,
+    failoverKeySaved: (ProviderKind) -> Boolean,
+    onDismiss: () -> Unit,
+    onAdd: (ProviderProfile, String) -> Unit,
+) {
+    val kinds = remember(agentKind) {
+        providersForAgent(agentKind).filterNot { it == ProviderKind.CLAUDE }
+    }
+    var kind by rememberSaveable { mutableStateOf(kinds.firstOrNull() ?: ProviderKind.CUSTOM) }
+    var kindExpanded by rememberSaveable { mutableStateOf(false) }
+    var baseUrl by rememberSaveable(kind) { mutableStateOf(kind.defaultBaseUrl) }
+    var model by rememberSaveable(kind) { mutableStateOf(kind.defaultModel) }
+    var dshApi by rememberSaveable(kind) { mutableStateOf(defaultDshApiForProvider(kind)) }
+    var secret by rememberSaveable(kind) { mutableStateOf("") }
+    var secretVisible by rememberSaveable { mutableStateOf(false) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Add backup provider", fontWeight = FontWeight.Bold) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(9.dp)) {
+                Text(
+                    "Tried in order when the active provider hits its limit, quota or key errors.",
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Surface(
+                    modifier = Modifier.fillMaxWidth().clickable { kindExpanded = !kindExpanded },
+                    shape = RoundedCornerShape(11.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+                ) {
+                    Column {
+                        Row(Modifier.padding(horizontal = 12.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f)) {
+                                Text(kind.title, fontWeight = FontWeight.Medium, fontSize = 13.sp)
+                                Text(kind.subtitle, fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                            Icon(if (kindExpanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown, null, Modifier.size(18.dp))
+                        }
+                        if (kindExpanded) {
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f))
+                            kinds.forEach { option ->
+                                Row(
+                                    Modifier.fillMaxWidth().clickable {
+                                        kind = option
+                                        kindExpanded = false
+                                    }.padding(horizontal = 12.dp, vertical = 9.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Text(option.title, Modifier.weight(1f), fontSize = 13.sp)
+                                    if (failoverKeySaved(option)) {
+                                        Text("key saved", fontSize = 10.sp, color = Color(0xFF2E9D72))
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if (!kind.fixedBaseUrl) {
+                    OutlinedTextField(
+                        baseUrl,
+                        {
+                            baseUrl = it
+                            dshApi = inferredDshApiForUrl(it)
+                        },
+                        label = { Text("Base URL") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+                if (kind == ProviderKind.CUSTOM) {
+                    Text("Gateway protocol", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Surface(shape = RoundedCornerShape(11.dp), color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)) {
+                        Column {
+                            listOf("anthropic-messages", "openai-completions", "openai-responses").forEachIndexed { index, option ->
+                                Row(
+                                    Modifier.fillMaxWidth().clickable { dshApi = option }.padding(horizontal = 12.dp, vertical = 9.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Text(option, Modifier.weight(1f), fontSize = 13.sp)
+                                    if (dshApi == option) Icon(Icons.Default.Check, null, Modifier.size(16.dp), tint = PocketOrange)
+                                }
+                                if (index != 2) HorizontalDivider(Modifier.padding(start = 12.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f))
+                            }
+                        }
+                    }
+                }
+                OutlinedTextField(model, { model = it }, label = { Text("Model ID") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(
+                    secret,
+                    { secret = it },
+                    label = { Text(if (failoverKeySaved(kind)) "API key (empty reuses the saved key)" else "API key") },
+                    singleLine = true,
+                    visualTransformation = if (secretVisible) VisualTransformation.None else PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                    trailingIcon = {
+                        IconButton(onClick = { secretVisible = !secretVisible }) {
+                            Icon(if (secretVisible) Icons.Default.VisibilityOff else Icons.Default.Visibility, null, Modifier.size(17.dp))
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    onAdd(
+                        ProviderProfile(
+                            kind = kind,
+                            baseUrl = if (kind.fixedBaseUrl) kind.defaultBaseUrl else baseUrl.trim(),
+                            model = model.trim().ifBlank { kind.defaultModel },
+                            dshApi = dshApi,
+                        ),
+                        secret.trim(),
+                    )
+                },
+                enabled = model.isNotBlank() && (kind.fixedBaseUrl || baseUrl.isNotBlank()) &&
+                    (secret.isNotBlank() || failoverKeySaved(kind)),
+            ) { Text("Add", color = PocketOrange, fontWeight = FontWeight.SemiBold) }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        },
+    )
 }
 
 /**

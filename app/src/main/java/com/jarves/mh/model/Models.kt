@@ -41,6 +41,15 @@ enum class ProviderKind(
         fixedBaseUrl = true,
         fixedProtocol = true,
     ),
+    OLLAMA_CLOUD(
+        "Ollama Cloud",
+        "OpenAI-compatible models on Ollama's cloud GPUs",
+        ProviderProtocol.OPENAI_CHAT,
+        "https://ollama.com/v1",
+        "gpt-oss:120b",
+        fixedBaseUrl = true,
+        fixedProtocol = true,
+    ),
     CUSTOM("Custom API", "Any OpenAI- or Anthropic-compatible endpoint", ProviderProtocol.ANTHROPIC_GATEWAY, "", "", true),
 }
 
@@ -89,6 +98,7 @@ val DEEPSEEK_HARNESS_PROVIDERS: Set<ProviderKind> = setOf(
     ProviderKind.KIMI,
     ProviderKind.OPENCODE_ZEN,
     ProviderKind.NVIDIA_NIM,
+    ProviderKind.OLLAMA_CLOUD,
     ProviderKind.CUSTOM,
 )
 
@@ -101,7 +111,7 @@ val DSH_PROTOCOL_PROVIDERS: Set<ProviderKind> = setOf(
 
 fun defaultDshApiForProvider(kind: ProviderKind): String = when (kind) {
     ProviderKind.OPENCODE_ZEN -> "openai-responses"
-    ProviderKind.NVIDIA_NIM -> "openai-completions"
+    ProviderKind.NVIDIA_NIM, ProviderKind.OLLAMA_CLOUD -> "openai-completions"
     else -> "anthropic-messages"
 }
 
@@ -117,6 +127,7 @@ fun inferredDshApiForUrl(baseUrl: String): String {
         "api.mistral.ai", "api.deepseek.com", "dashscope.aliyuncs.com",
         "api.siliconflow.cn", "api.fireworks.ai", "api.cerebras.ai",
         "generativelanguage.googleapis.com", "api.x.ai", "api-inference.huggingface.co",
+        "ollama.com",
     )
     return when {
         normalized.endsWith("/responses") -> "openai-responses"
@@ -182,6 +193,60 @@ data class ProviderProfile(
 }
 
 enum class ProjectKind { PROJECT, QUICK_PROJECT }
+
+/**
+ * A backup provider entry for automatic cross-provider failover.
+ * When the active provider (or all of its pooled API keys) is rejected for
+ * auth/quota/rate-limit reasons, the runtime walks this list in order and
+ * resumes the session on the first enabled entry that has a stored secret.
+ */
+data class FailoverProvider(
+    val id: String = UUID.randomUUID().toString(),
+    val kind: ProviderKind,
+    val baseUrl: String = kind.defaultBaseUrl,
+    val model: String = kind.defaultModel,
+    /** Wire format for CUSTOM entries: anthropic-messages | openai-completions | openai-responses. */
+    val dshApi: String = defaultDshApiForProvider(kind),
+    val enabled: Boolean = true,
+) {
+    /** Resolved effective base URL, mirroring [ProviderProfile.resolvedBaseUrl]. */
+    val resolvedBaseUrl: String get() = if (kind.fixedBaseUrl) kind.defaultBaseUrl else baseUrl
+
+    fun toProfile(): ProviderProfile = ProviderProfile(
+        kind = kind,
+        baseUrl = baseUrl,
+        model = model,
+        hasSecret = true,
+        dshApi = dshApi,
+    )
+
+    companion object {
+        fun fromProfile(profile: ProviderProfile): FailoverProvider = FailoverProvider(
+            kind = profile.kind,
+            baseUrl = profile.baseUrl,
+            model = profile.model,
+            dshApi = profile.dshApi,
+        )
+    }
+}
+
+/**
+ * Picks the next failover candidate from an ordered chain.
+ * Skips disabled entries, entries without a stored secret, entries belonging to
+ * a provider already known to have failed during this retry chain, and the
+ * currently active provider itself.
+ */
+fun nextFailoverCandidate(
+    chain: List<FailoverProvider>,
+    currentKind: ProviderKind,
+    failedProviderNames: Set<String>,
+    hasSecret: (ProviderKind) -> Boolean,
+): FailoverProvider? = chain.firstOrNull { entry ->
+    entry.enabled &&
+        entry.kind != currentKind &&
+        entry.kind.name !in failedProviderNames &&
+        hasSecret(entry.kind)
+}
 
 data class Project(
     val id: String = UUID.randomUUID().toString(),

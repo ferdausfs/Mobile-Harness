@@ -22,6 +22,7 @@ import com.jarves.mh.model.ChangeItem
 import com.jarves.mh.model.ChatMessage
 import com.jarves.mh.model.ChatAttachment
 import com.jarves.mh.model.DevStack
+import com.jarves.mh.model.FailoverProvider
 import com.jarves.mh.model.Project
 import com.jarves.mh.model.ProjectKind
 import com.jarves.mh.model.ProjectChat
@@ -33,6 +34,7 @@ import com.jarves.mh.model.WorkspaceEntry
 import com.jarves.mh.model.projectSlug
 import com.jarves.mh.model.generateQuickChatIdentity
 import com.jarves.mh.model.providerProtocolForAgent
+import com.jarves.mh.model.nextFailoverCandidate
 import com.jarves.mh.model.ProviderProtocol
 import com.jarves.mh.network.ConnectionValidation
 import com.jarves.mh.network.ModelDiscoveryResult
@@ -153,6 +155,7 @@ data class AppUiState(
     val backgroundSetupComplete: Boolean = false,
     val provider: ProviderProfile = ProviderProfile(ProviderKind.ANTHROPIC),
     val activeApiKeyName: String? = null,
+    val failoverProviders: List<FailoverProvider> = emptyList(),
     val themeMode: com.jarves.mh.ui.theme.AppThemeMode = com.jarves.mh.ui.theme.AppThemeMode.DARK,
     val apiPingStatus: ApiPingStatus = ApiPingStatus.IDLE,
     val apiPingMessage: String? = null,
@@ -294,6 +297,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     @Volatile private var lastOpenedAntigravityAuthUrl: String? = null
     private var activeRuntimeRequest: RuntimeRetryRequest? = null
     private val failedApiKeyIds = mutableSetOf<String>()
+    private val failedProviderKinds = mutableSetOf<String>()
     private val transcriptWrites = Channel<TranscriptWrite>(Channel.UNLIMITED)
     private val initialAgentKind = AgentKind.fromStored(preferences.agentKind)
     private val initialPrimaryAgentKind = preferences.primaryAgentKind
@@ -318,6 +322,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             provider = preferences.loadProvider(vault, initialAgentKind),
             activeApiKeyName = vault.list(preferences.loadProvider(vault, initialAgentKind).kind.name)
                 .firstOrNull(ApiKeyInfo::isActive)?.name,
+            failoverProviders = preferences.loadFailoverProviders(),
             antigravityAuth = AntigravityAuthState(
                 status = if (preferences.antigravitySignedIn) AntigravityAuthStatus.SIGNED_IN else AntigravityAuthStatus.SIGNED_OUT,
                 message = preferences.antigravityAccountEmail.takeIf(String::isNotBlank)?.let { "Connected as $it" },
@@ -1307,6 +1312,37 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         refreshActiveApiKey(profile.kind)
         pingApi()
     }
+
+    /** Adds a backup provider to the automatic failover chain (optionally storing its API key). */
+    fun addFailoverProvider(profile: ProviderProfile, secret: String) {
+        val entry = FailoverProvider.fromProfile(profile)
+        if (secret.isNotBlank()) vault.put(profile.kind.name, secret)
+        val updated = _state.value.failoverProviders + entry
+        preferences.saveFailoverProviders(updated)
+        _state.update {
+            it.copy(
+                failoverProviders = updated,
+                toastMessage = "${entry.kind.title} added as a backup provider.",
+            )
+        }
+    }
+
+    fun removeFailoverProvider(id: String) {
+        val updated = _state.value.failoverProviders.filterNot { it.id == id }
+        preferences.saveFailoverProviders(updated)
+        _state.update { it.copy(failoverProviders = updated) }
+    }
+
+    fun toggleFailoverProvider(id: String) {
+        val updated = _state.value.failoverProviders.map { entry ->
+            if (entry.id == id) entry.copy(enabled = !entry.enabled) else entry
+        }
+        preferences.saveFailoverProviders(updated)
+        _state.update { it.copy(failoverProviders = updated) }
+    }
+
+    /** The API key saved for a backup provider's kind, for prefilling the add dialog. */
+    fun failoverKeyPreview(kind: ProviderKind): Boolean = vault.contains(kind.name)
 
     fun finishAntigravityOnboarding() {
         check(_state.value.antigravityAuth.status == AntigravityAuthStatus.SIGNED_IN) {
@@ -3109,6 +3145,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             appendLine("</attached_files>")
         }
         failedApiKeyIds.clear()
+        failedProviderKinds.clear()
         activeRuntimeRequest = RuntimeRetryRequest(
             runtime = activeRuntime(),
             project = project,
@@ -3483,6 +3520,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (event is RuntimeEvent.SessionCompleted || event is RuntimeEvent.SessionFailed) {
             activeRuntimeRequest = null
             failedApiKeyIds.clear()
+            failedProviderKinds.clear()
         }
         if (event is RuntimeEvent.FilesChanged || event is RuntimeEvent.SessionCompleted) {
             _state.value.activeProject?.id?.let { touchProject(it) }
@@ -3503,14 +3541,65 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val credentials = vault.credentials(request.provider.kind.name)
         val active = credentials.firstOrNull { it.isActive } ?: return false
         failedApiKeyIds += active.id
-        val next = credentials.firstOrNull { it.id !in failedApiKeyIds } ?: return false
-        if (!vault.activate(request.provider.kind.name, next.id)) return false
+        val next = credentials.firstOrNull { it.id !in failedApiKeyIds }
+        if (next != null) {
+            if (!vault.activate(request.provider.kind.name, next.id)) return false
+            _state.update {
+                it.copy(
+                    activeSessionId = null,
+                    activeApiKeyName = next.name,
+                    toastMessage = "${active.name} failed. Switched to ${next.name}.",
+                    liveProcess = it.liveProcess + ActivityItem("API key switched", "Using ${next.name}", true),
+                )
+            }
+            viewModelScope.launch {
+                kotlinx.coroutines.delay(300)
+                request.runtime.startSession(
+                    request.project.id,
+                    request.project.slug,
+                    request.project.kind,
+                    request.prompt,
+                    request.history,
+                    request.provider,
+                )
+            }
+            return true
+        }
+        return retryWithNextProvider(event, request, current)
+    }
+
+    /**
+     * Cross-provider failover: every pooled key of the active provider was
+     * rejected, so walk the user-configured backup chain in order and resume
+     * the session on the first enabled backup that has a stored secret.
+     */
+    private fun retryWithNextProvider(
+        event: RuntimeEvent.SessionFailed,
+        request: RuntimeRetryRequest,
+        current: AppUiState,
+    ): Boolean {
+        failedProviderKinds += request.provider.kind.name
+        val candidate = nextFailoverCandidate(
+            chain = current.failoverProviders,
+            currentKind = request.provider.kind,
+            failedProviderNames = failedProviderKinds,
+            hasSecret = { kind -> vault.contains(kind.name) },
+        ) ?: return false
+        val profile = candidate.toProfile()
+        val activeKeyName = vault.list(profile.kind.name)
+            .firstOrNull(ApiKeyInfo::isActive)?.name
+        preferences.saveProvider(profile, current.agentKind)
         _state.update {
             it.copy(
+                provider = profile,
                 activeSessionId = null,
-                activeApiKeyName = next.name,
-                toastMessage = "${active.name} failed. Switched to ${next.name}.",
-                liveProcess = it.liveProcess + ActivityItem("API key switched", "Using ${next.name}", true),
+                activeApiKeyName = activeKeyName,
+                toastMessage = "${request.provider.kind.title} limit reached. Switched to ${candidate.kind.title}.",
+                liveProcess = it.liveProcess + ActivityItem(
+                    "Provider switched",
+                    "${request.provider.kind.title} failed (${event.reason.take(80)}). Using ${candidate.kind.title} · ${candidate.model}",
+                    true,
+                ),
             )
         }
         viewModelScope.launch {
@@ -3521,7 +3610,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 request.project.kind,
                 request.prompt,
                 request.history,
-                request.provider,
+                profile,
             )
         }
         return true

@@ -9,6 +9,7 @@ import com.jarves.mh.model.ProjectKind
 import com.jarves.mh.model.ProjectChat
 import com.jarves.mh.model.ProviderKind
 import com.jarves.mh.model.ProviderProfile
+import com.jarves.mh.model.FailoverProvider
 import com.jarves.mh.model.defaultDshApiForProvider
 import com.jarves.mh.model.projectSlug
 import com.jarves.mh.model.providersForAgent
@@ -303,6 +304,40 @@ class AppPreferences(private val context: Context) {
         }
         return list
     }
+
+    /** Ordered backup providers used for automatic cross-provider failover. */
+    fun saveFailoverProviders(entries: List<FailoverProvider>) {
+        val arr = JSONArray()
+        entries.forEach { entry ->
+            arr.put(JSONObject().apply {
+                put("id", entry.id)
+                put("kind", entry.kind.name)
+                put("baseUrl", entry.baseUrl)
+                put("model", entry.model)
+                put("dshApi", entry.dshApi)
+                put("enabled", entry.enabled)
+            })
+        }
+        preferences.edit().putString("failover_providers_json", arr.toString()).apply()
+    }
+
+    fun loadFailoverProviders(): List<FailoverProvider> = runCatching {
+        val raw = preferences.getString("failover_providers_json", null) ?: return emptyList()
+        val arr = JSONArray(raw)
+        (0 until arr.length()).mapNotNull { index ->
+            val item = arr.optJSONObject(index) ?: return@mapNotNull null
+            val kind = runCatching { ProviderKind.valueOf(item.optString("kind")) }.getOrNull()
+                ?: return@mapNotNull null
+            FailoverProvider(
+                id = item.optString("id").ifBlank { java.util.UUID.randomUUID().toString() },
+                kind = kind,
+                baseUrl = item.optString("baseUrl", kind.defaultBaseUrl),
+                model = item.optString("model", kind.defaultModel),
+                dshApi = item.optString("dshApi", defaultDshApiForProvider(kind)),
+                enabled = item.optBoolean("enabled", true),
+            )
+        }
+    }.getOrDefault(emptyList())
 
     private val chatsDir = File(context.filesDir, "chats").also { it.mkdirs() }
 

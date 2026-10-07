@@ -29,6 +29,32 @@ data class InstalledRuntime(
     val rootfs: File,
 )
 
+/**
+ * Semver-style precedence used by the agent update checks: the numeric core
+ * is compared first and a pre-release suffix (-alpha/-rc/…) ranks LOWER than
+ * the same core without one, so shipping the stable release must be offered
+ * to users still on its own rc.
+ */
+internal fun isAgentVersionNewer(candidate: String, current: String): Boolean {
+    fun numericCore(value: String) = Regex("\\d+").findAll(value.substringBefore('-'))
+        .map { it.value.toIntOrNull() ?: 0 }
+        .toList()
+    fun preRelease(value: String) = value.substringAfter('-', "").ifBlank { null }
+    val candidateCore = numericCore(candidate)
+    val currentCore = numericCore(current)
+    repeat(maxOf(candidateCore.size, currentCore.size)) { index ->
+        val comparison = candidateCore.getOrElse(index) { 0 }.compareTo(currentCore.getOrElse(index) { 0 })
+        if (comparison != 0) return comparison > 0
+    }
+    val candidatePre = preRelease(candidate)
+    val currentPre = preRelease(current)
+    if (candidatePre != null && currentPre != null) {
+        return candidate != current && candidatePre > currentPre
+    }
+    // Exactly one side is a pre-release: the stable one outranks it.
+    return candidatePre == null && currentPre != null
+}
+
 data class RuntimeInstallProgress(
     val message: String,
     val fraction: Float,
@@ -399,11 +425,22 @@ class RuntimeInstaller(private val context: Context) {
         val claude = File(rootfs, CLAUDE_GUEST_PATH.removePrefix("/"))
         claude.parentFile?.mkdirs()
         val staged = File(claude.parentFile, ".claude-$latest.installing")
+        val previous = File(claude.parentFile, ".claude.previous")
         downloaded.copyTo(staged, overwrite = true)
         Os.chmod(staged.absolutePath, 0b111101101)
+        if (claude.isFile) Os.rename(claude.absolutePath, previous.absolutePath)
         Os.rename(staged.absolutePath, claude.absolutePath)
         downloaded.delete()
-        verifyGuest(runtime.proot, "$CLAUDE_GUEST_PATH --version", "Claude Code update verification failed")
+        try {
+            verifyGuest(runtime.proot, "$CLAUDE_GUEST_PATH --version", "Claude Code update verification failed")
+        } catch (failure: Throwable) {
+            // The new release is broken on this device; put the working binary
+            // back so the agent stays usable and the marker still tells the
+            // truth (it is only written after verification succeeds).
+            if (previous.isFile) runCatching { Os.rename(previous.absolutePath, claude.absolutePath) }
+            throw failure
+        }
+        previous.delete()
         claudeMarker.writeText(latest)
     }
 
@@ -421,6 +458,7 @@ class RuntimeInstaller(private val context: Context) {
             onProgress(RuntimeInstallProgress("Downloading Antigravity CLI $latest", ratio * 0.9f, bytes, total.takeIf { it > 0L }, event = RuntimeInstallEvent.DOWNLOAD))
         }
         val destination = File(rootfs, AGY_GUEST_PATH.removePrefix("/"))
+        val previous = File(destination.parentFile, ".agy.previous")
         var found = false
         TarArchiveInputStream(GzipCompressorInputStream(BufferedInputStream(downloaded.inputStream()))).use { archive ->
             var entry = archive.nextEntry
@@ -429,6 +467,7 @@ class RuntimeInstaller(private val context: Context) {
                     val staged = File(destination.parentFile, ".agy-$latest.installing")
                     FileOutputStream(staged).use { archive.copyTo(it) }
                     Os.chmod(staged.absolutePath, 0b111101101)
+                    if (destination.isFile) Os.rename(destination.absolutePath, previous.absolutePath)
                     Os.rename(staged.absolutePath, destination.absolutePath)
                     found = true
                     break
@@ -438,7 +477,15 @@ class RuntimeInstaller(private val context: Context) {
         }
         downloaded.delete()
         check(found) { "Antigravity update archive is incomplete" }
-        verifyGuest(runtime.proot, "$AGY_GUEST_PATH --version", "Antigravity update verification failed")
+        try {
+            verifyGuest(runtime.proot, "$AGY_GUEST_PATH --version", "Antigravity update verification failed")
+        } catch (failure: Throwable) {
+            // Same rollback contract as the Claude and Dsh updates: a broken
+            // release must not leave a dead binary behind.
+            if (previous.isFile) runCatching { Os.rename(previous.absolutePath, destination.absolutePath) }
+            throw failure
+        }
+        previous.delete()
         agyMarker.writeText(latest)
     }
 
@@ -476,16 +523,8 @@ class RuntimeInstaller(private val context: Context) {
         fetchText("https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/linux_arm64.json"),
     )
 
-    private fun isVersionNewer(candidate: String, current: String): Boolean {
-        fun parts(value: String) = Regex("\\d+").findAll(value).map { it.value.toIntOrNull() ?: 0 }.toList()
-        val left = parts(candidate)
-        val right = parts(current)
-        repeat(maxOf(left.size, right.size)) { index ->
-            val comparison = (left.getOrElse(index) { 0 }).compareTo(right.getOrElse(index) { 0 })
-            if (comparison != 0) return comparison > 0
-        }
-        return candidate != current && !candidate.contains("alpha", true) && !candidate.contains("rc", true)
-    }
+    private fun isVersionNewer(candidate: String, current: String): Boolean =
+        isAgentVersionNewer(candidate, current)
 
     /**
      * Older Core bundles stored Claude Code and its version in Core-owned markers.

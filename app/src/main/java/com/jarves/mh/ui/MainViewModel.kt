@@ -316,6 +316,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * failover, so this is only used to restore the UI state when the task ends.
      */
     private var failoverPrimaryProvider: ProviderProfile? = null
+    /** The provider kind the running session was switched to by failover. */
+    private var failoverActiveKind: com.jarves.mh.model.ProviderKind? = null
     private val failedApiKeyIds = mutableSetOf<String>()
     private val failedProviderKinds = mutableSetOf<String>()
     private val transcriptWrites = Channel<TranscriptWrite>(Channel.CONFLATED)
@@ -3255,6 +3257,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     // stay untouched so the next task starts on it again.
                     if (failoverPrimaryProvider == null) failoverPrimaryProvider = state.value.provider
                     val profile = candidate.toProfile()
+                    failoverActiveKind = profile.kind
                     usageTracker.recordFailover(turnKind, candidate.kind, "Daily request limit reached")
                     _state.update {
                         it.copy(
@@ -3752,6 +3755,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // ping-pongs between the same two providers forever.
         val retryRequest = request.copy(provider = profile)
         activeRuntimeRequest = retryRequest
+        failoverActiveKind = profile.kind
         failedApiKeyIds.clear()
         _state.update {
             it.copy(
@@ -3787,12 +3791,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /**
      * A failover must never outlive the task it served: the saved primary
      * provider comes back the moment the session completes, fails for good,
-     * or the user stops it.
+     * or the user stops it. A provider the user picked manually mid-task is
+     * kept instead of being clobbered by the restore.
      */
     private fun restoreFailoverPrimaryProvider() {
         val original = failoverPrimaryProvider ?: return
+        val switchedKind = failoverActiveKind
         failoverPrimaryProvider = null
-        if (_state.value.provider.kind == original.kind) return
+        failoverActiveKind = null
+        val currentKind = _state.value.provider.kind
+        if (switchedKind == null || currentKind != switchedKind) return
+        if (currentKind == original.kind) return
         _state.update {
             it.copy(
                 provider = original,

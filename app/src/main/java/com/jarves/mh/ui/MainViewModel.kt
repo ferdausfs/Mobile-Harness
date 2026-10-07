@@ -3682,6 +3682,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (!current.isRunning || current.activeSessionId != event.sessionId) return false
         if (!isApiKeyFailure(event.reason)) return false
         val request = activeRuntimeRequest ?: return false
+        if (isRateLimitFailure(event.reason)) {
+            // Rate limits are transient quota signals, not a broken key. The
+            // saved active key must stay exactly as the user left it, so this
+            // path never calls vault.activate; only the backup chain runs.
+            return retryWithNextProvider(event, request)
+        }
         val credentials = vault.credentials(request.provider.kind.name)
         val active = credentials.firstOrNull { it.isActive } ?: return false
         failedApiKeyIds += active.id

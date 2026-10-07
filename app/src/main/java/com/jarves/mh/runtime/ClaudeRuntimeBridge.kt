@@ -42,43 +42,69 @@ internal object ProviderRuntimeErrorDetector {
         val combined: String = if (json != null) {
             when {
                 json.optString("subtype") == "api_retry" ->
-                    "api_retry http ${json.optInt("error_status")} ${json.optString("message")}"
+                    // Structured retry telemetry: embed the numeric status in the
+                    // explicit "api error <status>" shape before classifying.
+                    "api error ${json.optInt("error_status")} ${json.optString("error")} ${json.optString("message")}"
                 json.optString("type") == "result" && json.optBoolean("is_error") ->
-                    "${json.optString("subtype")} ${json.optString("result")} ${json.optString("error")} ${json.optString("message")}"
+                    "${json.optString("subtype")} ${json.optString("error")} ${json.optString("message")} ${json.optString("result")}"
                 json.optString("type") == "result" -> return null
                 json.optString("type") == "system" ->
                     "${json.optString("subtype")} ${json.optString("error")} ${json.optString("message")}"
                 else -> return null
             }.lowercase()
         } else {
-            // Non-JSON diagnostics (stderr-style lines merged into the output file).
+            // Non-JSON diagnostics (stderr-style lines merged into the output
+            // file) are only checked against explicit provider error shapes.
             trimmed.lowercase()
         }
         return when {
             "user not found" in combined -> "User not found. Check the API key and provider account."
-            "authentication_failed" in combined ||
-                "authentication failed" in combined ||
-                "invalid api key" in combined ||
-                "http 401" in combined ||
-                mentionsStatusCode(combined, 401) ||
-                "http 403" in combined ||
-                mentionsStatusCode(combined, 403) ||
-                "expired" in combined ||
-                "quota" in combined ->
-                "The provider rejected the saved API key."
-            "http 429" in combined || "rate limit" in combined || mentionsStatusCode(combined, 429) ->
-                "The provider is rate limiting requests."
-            "http 402" in combined || mentionsStatusCode(combined, 402) ||
-                "insufficient credit" in combined || "insufficient funds" in combined || "payment required" in combined ->
-                "The provider reports insufficient credits or quota."
+            isAuthErrorShape(combined) -> "The provider rejected the saved API key."
+            isRateLimitShape(combined) -> "The provider is rate limiting requests."
+            isCreditsErrorShape(combined) -> "The provider reports insufficient credits or quota."
             else -> null
         }
     }
 
-    /** Matches a standalone HTTP status token like "API Error: 429" without
-     *  firing on longer numbers (1429) or hex-looking identifiers. */
-    private fun mentionsStatusCode(text: String, code: Int): Boolean =
-        Regex("(^|[^0-9])$code([^0-9]|$)").containsMatchIn(text)
+    private fun isAuthErrorShape(text: String): Boolean =
+        explicitStatusShape(text, 401) ||
+            explicitStatusShape(text, 403) ||
+            "authentication_failed" in text ||
+            "authentication failed" in text ||
+            "invalid api key" in text ||
+            "invalid_api_key" in text ||
+            "invalid x-api-key" in text ||
+            "api key expired" in text ||
+            "token has expired" in text ||
+            ("oauth token" in text && "expired" in text)
+
+    private fun isRateLimitShape(text: String): Boolean =
+        explicitStatusShape(text, 429) ||
+            "rate_limit_error" in text ||
+            "rate limit exceeded" in text ||
+            "rate limit reached" in text ||
+            "rate limiting" in text ||
+            "too many requests" in text ||
+            "usage limit" in text
+
+    private fun isCreditsErrorShape(text: String): Boolean =
+        explicitStatusShape(text, 402) ||
+            "insufficient credit" in text ||
+            "insufficient funds" in text ||
+            "credit balance" in text ||
+            "payment required" in text ||
+            "quota exceeded" in text
+
+    /** A status code only counts when an explicit error context precedes it:
+     *  "API Error: 429", "HTTP 401", "HTTP/1.1 429", "402 Payment Required".
+     *  A bare number (line numbers, durations, request IDs) never matches. */
+    private fun explicitStatusShape(text: String, code: Int): Boolean {
+        if (Regex("api error[^0-9]{0,40}$code([^0-9]|$)").containsMatchIn(text)) return true
+        if (Regex("http[/ ]{0,2}$code([^0-9]|$)").containsMatchIn(text)) return true
+        if (Regex("http/1\\.[01] $code([^0-9]|$)").containsMatchIn(text)) return true
+        if (Regex("status code[: ]+$code([^0-9]|$)").containsMatchIn(text)) return true
+        return Regex("(^|[^0-9])$code (unauthorized|forbidden|payment required|too many requests)").containsMatchIn(text)
+    }
 }
 
 class ClaudeRuntimeBridge(
@@ -972,11 +998,18 @@ class ClaudeRuntimeBridge(
 
     private fun friendlyError(error: Throwable): String {
         val message = error.message.orEmpty()
+        val lower = message.lowercase()
         return when {
             error is ProviderSessionException -> message
-            message.contains("user not found", true) -> "User not found. Check the API key and provider account."
-            message.contains("checksum", true) -> "Runtime verification failed. Nothing unverified was executed."
-            message.contains("HTTP 401", true) || message.contains("authentication", true) -> "The provider rejected the saved API key."
+            lower.contains("user not found") -> "User not found. Check the API key and provider account."
+            lower.contains("checksum") -> "Runtime verification failed. Nothing unverified was executed."
+            // Only explicit provider error wording may be reworded into the
+            // canonical key-rejection message; a raw diagnostic line that merely
+            // contains "authentication" must pass through unchanged.
+            lower.contains("http 401") ||
+                lower.contains("authentication_failed") ||
+                lower.contains("authentication failed") ||
+                lower.contains("invalid api key") -> "The provider rejected the saved API key."
             message.isBlank() -> "The real Claude Code runtime could not start."
             else -> message.take(500)
         }

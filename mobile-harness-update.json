@@ -1,12 +1,12 @@
 {
-  "versionCode": 11,
-  "versionName": "1.0.10",
-  "notes": "Failover fix release: switching to a backup provider is now session-scoped only - your saved primary provider is never overwritten and comes back when the task ends; Stop or a newer retry cancels stale delayed restarts so duplicate overlapping sessions can no longer start. Failure detection now matches only explicit provider error shapes (loose words like 'quota' or 'expired' in your code no longer kill tasks) and a 429 rate limit never silently switches your saved API key. Files modified by a failed attempt now appear in the Changes tab after failover. Native launcher fd sweep is fork-safe and frees everything on failure paths. Same signing key as v1.0.9 - installs directly over it.",
+  "versionCode": 12,
+  "versionName": "1.0.11",
+  "notes": "Agent screen fix: tapping Claude Code or Antigravity when not installed now offers the install right on the spot with live download progress and switches to the agent on success; install failures show their reason. Antigravity parity: a failed task's changed files stay in the Changes tab and a prompt started right after Stop can no longer lose its Stop button or notification. Reliability: emoji/CJK characters no longer corrupt session output at 16 KB read boundaries, concurrent liveness checks can no longer turn success into a bogus -138 failure, agent updates roll back automatically when verification fails and understand pre-release versions, and a failed spawn surfaces a proper error instead of a bare crash. Runtime bundle downloads and the privacy policy URL now come from the ferdausfs repository. Same signing key - installs directly over v1.0.9/v1.0.10.",
   "artifacts": {
     "online": {
-      "url": "https://github.com/ferdausfs/Mobile-Harness/releases/download/v1.0.10/mobile-harness-online-v1.0.10.apk",
-      "sha256": "adb83867a01d2bcd80446ae20c8c1c19b12c19102d0198f5e78b259476f2c17c",
-      "sizeBytes": 87628887
+      "url": "https://github.com/ferdausfs/Mobile-Harness/releases/download/v1.0.11/mobile-harness-online-v1.0.11.apk",
+      "sha256": "9283618c6b5c67148edbf48a94f520fb1e593ac39c106bd963b56726d530c8c5",
+      "sizeBytes": 87635591
     }
   }
 }

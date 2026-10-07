@@ -1,12 +1,12 @@
 {
-  "versionCode": 10,
-  "versionName": "1.0.9",
-  "notes": "Stability release: a full app scan found and fixed 23 bugs. Failover chain no longer loops (walks to the next backup), daily limits switch providers before a task starts, HTTP 402 out-of-credits triggers failover, sessions no longer die when your code merely mentions 'rate limit', terminal/transcript memory leaks fixed, key-store failures no longer crash onboarding. Same signing key as v1.0.8 — installs directly over it.",
+  "versionCode": 11,
+  "versionName": "1.0.10",
+  "notes": "Failover fix release: switching to a backup provider is now session-scoped only - your saved primary provider is never overwritten and comes back when the task ends; Stop or a newer retry cancels stale delayed restarts so duplicate overlapping sessions can no longer start. Failure detection now matches only explicit provider error shapes (loose words like 'quota' or 'expired' in your code no longer kill tasks) and a 429 rate limit never silently switches your saved API key. Files modified by a failed attempt now appear in the Changes tab after failover. Native launcher fd sweep is fork-safe and frees everything on failure paths. Same signing key as v1.0.9 - installs directly over it.",
   "artifacts": {
     "online": {
-      "url": "https://github.com/ferdausfs/Mobile-Harness/releases/download/v1.0.9/mobile-harness-online-v1.0.9.apk",
-      "sha256": "928b3c7fa1ea216d2da086474fe189e01b6039f666d0bba36bb04e84488eeaca",
-      "sizeBytes": 87617603
+      "url": "https://github.com/ferdausfs/Mobile-Harness/releases/download/v1.0.10/mobile-harness-online-v1.0.10.apk",
+      "sha256": "adb83867a01d2bcd80446ae20c8c1c19b12c19102d0198f5e78b259476f2c17c",
+      "sizeBytes": 87628887
     }
   }
 }

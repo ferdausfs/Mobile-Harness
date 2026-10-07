@@ -2,6 +2,7 @@ package com.jarves.mh.ui
 
 import android.app.Application
 import android.content.Intent
+import android.util.Log
 import android.net.Uri
 import android.provider.OpenableColumns
 import android.os.SystemClock
@@ -66,6 +67,7 @@ import java.util.UUID
 import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.channels.Channel
@@ -247,6 +249,18 @@ data class AppUiState(
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
+
+    /**
+     * Background lifetimes (event collectors, transcript persistence, update checks) must
+     * never take the whole app down. Without this handler any uncaught throwable inside a
+     * `viewModelScope.launch` crashes the process; with it the failure is logged and the
+     * rest of the scope keeps running. Feature flows that surface errors in the UI keep
+     * their own runCatching blocks — this is the last line of defense.
+     */
+    private val backgroundGuard = CoroutineExceptionHandler { _, throwable ->
+        Log.e("MainViewModel", "Unhandled background failure", throwable)
+    }
+
     private val vault = ApiKeyVault(application)
     private val preferences = AppPreferences(application)
     private val claudeRuntime = ClaudeRuntimeBridge(application) { profile -> vault.get(profile.kind.name) }
@@ -326,16 +340,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // GitHub's official CLI owns its OAuth credential. Remove credentials from
         // the retired custom OAuth implementation and discover the real CLI status.
         vault.remove(LEGACY_GITHUB_TOKEN_KEY)
-        viewModelScope.launch { refreshGitHubConnection() }
+        viewModelScope.launch(backgroundGuard) { refreshGitHubConnection() }
         RuntimeSetupController.restore(application)
-        viewModelScope.launch(Dispatchers.IO) {
+        viewModelScope.launch(backgroundGuard + Dispatchers.IO) {
             for (write in transcriptWrites) {
-                preferences.saveMessages(write.projectId, write.chatId, write.messages)
+                runCatching { preferences.saveMessages(write.projectId, write.chatId, write.messages) }
+                    .onFailure { Log.e("MainViewModel", "Transcript persist failed", it) }
             }
         }
-        viewModelScope.launch { dshRuntime.events.collect(::onRuntimeEvent) }
-        viewModelScope.launch { antigravityRuntime.events.collect(::onRuntimeEvent) }
-        viewModelScope.launch {
+        viewModelScope.launch(backgroundGuard) { dshRuntime.events.collect(::onRuntimeEvent) }
+        viewModelScope.launch(backgroundGuard) { antigravityRuntime.events.collect(::onRuntimeEvent) }
+        viewModelScope.launch(backgroundGuard) {
             antigravityAuthController.state.collect { auth ->
                 _state.update { it.copy(antigravityAuth = auth) }
                 auth.authorizationUrl?.takeIf { it != lastOpenedAntigravityAuthUrl }?.let { url ->
@@ -353,7 +368,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (antigravityAuthController.hasOfficialCredential() &&
             (!preferences.antigravitySignedIn || preferences.antigravityAccountEmail.isBlank())
         ) {
-            viewModelScope.launch { antigravityAuthController.beginLogin() }
+            viewModelScope.launch(backgroundGuard) { antigravityAuthController.beginLogin() }
         }
         if (!preferences.legacySeededCredentialRemoved) {
             vault.remove(ProviderKind.CUSTOM.name)

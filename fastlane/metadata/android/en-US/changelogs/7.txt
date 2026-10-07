@@ -1,0 +1,1 @@
+Hardens background task lifetimes so unexpected failures in event collectors and transcript persistence are logged instead of crashing the app, and modernizes deprecated icon usage.

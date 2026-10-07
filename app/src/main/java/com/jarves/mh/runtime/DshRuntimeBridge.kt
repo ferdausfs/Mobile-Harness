@@ -95,6 +95,10 @@ class DshRuntimeBridge(
         }
 
         var openRouterGateway: OpenRouterRoutingGateway? = null
+        // Kept so a failed attempt can still persist the files it changed
+        // before dying (see the onFailure handler below).
+        var attemptWorkspace: java.io.File? = null
+        var attemptBaseline: Map<String, String>? = null
         runCatching {
             RuntimeTaskController.stopAction = {
                 state.userStopRequested = true
@@ -116,6 +120,8 @@ class DshRuntimeBridge(
             val workspace = checkpoints.ensureWorkspace(projectId)
             checkpoints.createCheckpoint(projectId, workspace)
             val before = checkpoints.snapshot(workspace)
+            attemptWorkspace = workspace
+            attemptBaseline = before
             val baseRoute = DshRouteMapper.forProfile(provider)
             openRouterGateway = if (
                 provider.kind == ProviderKind.LLM_ROUTER && provider.openRouterProviders.isNotEmpty()
@@ -185,6 +191,26 @@ class DshRuntimeBridge(
             }
         }.onFailure { error ->
             Log.e("DshBridge", "Session failed", error)
+            // An exception thrown mid-stream (between the baseline snapshot and
+            // the exit handling) skips the normal change computation. Persist
+            // the failed attempt's edits so a failover retry — which
+            // re-snapshots the workspace — cannot lose them.
+            val failedWorkspace = attemptWorkspace
+            val failedBaseline = attemptBaseline
+            if (failedWorkspace != null && failedBaseline != null) {
+                runCatching {
+                    val failed = checkpoints.changedFiles(failedWorkspace, failedBaseline)
+                    if (failed.isNotEmpty()) {
+                        checkpoints.saveChangedPaths(projectId, failed)
+                        eventBus.emit(
+                            RuntimeEvent.FilesChanged(
+                                sessionId,
+                                checkpoints.buildChangeDetails(projectId, failedWorkspace, checkpoints.readChangedPaths(projectId)),
+                            ),
+                        )
+                    }
+                }
+            }
             val message = friendlyError(error)
             emitFailureOnce(sessionId, message)
             if (state.userStopRequested) {

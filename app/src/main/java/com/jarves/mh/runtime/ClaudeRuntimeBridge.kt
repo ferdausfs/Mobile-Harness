@@ -173,6 +173,10 @@ class ClaudeRuntimeBridge(
 
         var formatGateway: LocalFormatGateway? = null
         var openRouterGateway: OpenRouterRoutingGateway? = null
+        // Kept so a failed attempt can still persist the files it changed
+        // before dying (see the onFailure handler below).
+        var attemptWorkspace: File? = null
+        var attemptBaseline: Map<String, String>? = null
         runCatching {
             RuntimeTaskController.stopAction = {
                 state.userStopRequested = true
@@ -194,6 +198,8 @@ class ClaudeRuntimeBridge(
             val workspace = ensureWorkspace(projectId)
             createCheckpoint(projectId, workspace)
             val before = snapshot(workspace)
+            attemptWorkspace = workspace
+            attemptBaseline = before
             // CUSTOM endpoints follow the user-selected wire format for every agent,
             // so an OpenAI-compatible gateway launches the translation gateway here.
             val effectiveProtocol = com.jarves.mh.model.providerProtocolForAgent(provider, com.jarves.mh.model.AgentKind.CLAUDE_CODE)
@@ -320,6 +326,22 @@ class ClaudeRuntimeBridge(
             }
         }.onFailure { error ->
             Log.e("ClaudeBridge", "Session failed", error)
+            // The failed attempt may already have modified files (the error
+            // detector aborts the process before the success path computes
+            // changes). Persist them against the task's first baseline so the
+            // failover retry — which re-snapshots the workspace — cannot lose
+            // them from the Changes tab.
+            val failedWorkspace = attemptWorkspace
+            val failedBaseline = attemptBaseline
+            if (failedWorkspace != null && failedBaseline != null) {
+                runCatching {
+                    val failed = changedFiles(failedWorkspace, failedBaseline)
+                    if (failed.isNotEmpty()) {
+                        saveChangedPaths(projectId, failed)
+                        eventBus.emit(RuntimeEvent.FilesChanged(sessionId, loadPendingChanges(projectId)))
+                    }
+                }
+            }
             val message = friendlyError(error)
             emitFailureOnce(sessionId, message)
             if (sessionState(sessionId)?.userStopRequested == true) {

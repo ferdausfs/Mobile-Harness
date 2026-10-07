@@ -1,7 +1,6 @@
 #define _GNU_SOURCE
 #include <jni.h>
 #include <ctype.h>
-#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -9,29 +8,45 @@
 #include <string.h>
 #include <sys/prctl.h>
 #include <sys/ioctl.h>
+#include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <termios.h>
 #include <unistd.h>
+
+/* close_range(2) landed in Linux 5.9 (Android 12+); the syscall number is
+ * uniform across architectures. */
+#ifndef SYS_close_range
+#define SYS_close_range 436
+#endif
 
 static void close_pair(int pair[2]) { close(pair[0]); close(pair[1]); }
 
 /**
  * The child is forked from the whole app process, so every descriptor the
  * parent holds (sockets, files) would survive execve unless it is
- * close-on-exec. Sweep /proc/self/fd so guest code cannot inherit or even
- * reach the app's descriptors.
+ * close-on-exec. No launcher path relies on inherited descriptors: stdio is
+ * re-dup2'd below and every pipe/pty end is O_CLOEXEC, so all of them can go.
+ *
+ * The previous /proc/self/fd sweep used opendir/readdir, which allocate and
+ * take libc-internal locks. After fork() in a multithreaded JVM the child can
+ * inherit those locks in a held state, so the sweep could deadlock before
+ * execve. close_range(2) is a single syscall with no userspace allocation.
+ * The fallback sweeps a bounded descriptor range with plain close(), which is
+ * a syscall and therefore safe in the forked child.
  */
 static void close_inherited_fds(void) {
-    DIR *dir = opendir("/proc/self/fd");
-    if (!dir) return;
-    int dir_fd = dirfd(dir);
-    struct dirent *entry;
-    while ((entry = readdir(dir)) != NULL) {
-        int fd = atoi(entry->d_name);
-        if (fd > STDERR_FILENO && fd != dir_fd) close(fd);
+#ifdef SYS_close_range
+    if (syscall(SYS_close_range, STDERR_FILENO + 1, ~0U, 0) == 0) return;
+    /* ENOSYS on pre-5.9 kernels: fall through to the bounded sweep. */
+#endif
+    long limit = sysconf(_SC_OPEN_MAX);
+    int max_fd = limit > 0 ? (int)limit : 1024;
+    if (max_fd < 1024) max_fd = 1024;
+    if (max_fd > 65536) max_fd = 65536;
+    for (int fd = STDERR_FILENO + 1; fd < max_fd; fd++) {
+        close(fd);
     }
-    closedir(dir);
 }
 
 JNIEXPORT jintArray JNICALL
@@ -44,45 +59,60 @@ Java_com_jarves_mh_runtime_NativeSpawn_spawn(JNIEnv *env, jobject self, jobjectA
     jsize envc = (*env)->GetArrayLength(env, java_env);
     char **argv = calloc((size_t)argc + 1, sizeof(char *));
     char **envp = calloc((size_t)envc + 1, sizeof(char *));
-    if (!argv || !envp) return NULL;
+    char *cwd = NULL;
+    char *output_path = NULL;
+    char *slave_name = NULL;
+    int in_pipe[2] = {-1, -1};
+    int master_fd = -1;
+    pid_t pid = -1;
+    jintArray result = NULL;
+
+    if (!argv || !envp) goto fail;
     for (jsize i = 0; i < argc; i++) {
         jstring value = (jstring)(*env)->GetObjectArrayElement(env, java_argv, i);
+        if (!value || (*env)->ExceptionCheck(env)) goto fail;
         const char *utf = (*env)->GetStringUTFChars(env, value, NULL);
+        if (!utf) goto fail;
         argv[i] = strdup(utf);
         (*env)->ReleaseStringUTFChars(env, value, utf);
         (*env)->DeleteLocalRef(env, value);
+        if (!argv[i]) goto fail;
     }
     for (jsize i = 0; i < envc; i++) {
         jstring value = (jstring)(*env)->GetObjectArrayElement(env, java_env, i);
+        if (!value || (*env)->ExceptionCheck(env)) goto fail;
         const char *utf = (*env)->GetStringUTFChars(env, value, NULL);
+        if (!utf) goto fail;
         envp[i] = strdup(utf);
         (*env)->ReleaseStringUTFChars(env, value, utf);
         (*env)->DeleteLocalRef(env, value);
+        if (!envp[i]) goto fail;
     }
-    const char *cwd_utf = (*env)->GetStringUTFChars(env, java_cwd, NULL);
-    char *cwd = strdup(cwd_utf);
-    (*env)->ReleaseStringUTFChars(env, java_cwd, cwd_utf);
-    const char *output_utf = (*env)->GetStringUTFChars(env, java_output, NULL);
-    char *output_path = strdup(output_utf);
-    (*env)->ReleaseStringUTFChars(env, java_output, output_utf);
 
-    int in_pipe[2] = {-1, -1};
-    int master_fd = -1;
-    char *slave_name = NULL;
+    const char *cwd_utf = (*env)->GetStringUTFChars(env, java_cwd, NULL);
+    if (!cwd_utf) goto fail;
+    cwd = strdup(cwd_utf);
+    (*env)->ReleaseStringUTFChars(env, java_cwd, cwd_utf);
+    if (!cwd) goto fail;
+
+    const char *output_utf = (*env)->GetStringUTFChars(env, java_output, NULL);
+    if (!output_utf) goto fail;
+    output_path = strdup(output_utf);
+    (*env)->ReleaseStringUTFChars(env, java_output, output_utf);
+    if (!output_path) goto fail;
+
     if (use_pty) {
         master_fd = posix_openpt(O_RDWR | O_NOCTTY | O_CLOEXEC);
-        if (master_fd < 0 || grantpt(master_fd) != 0 || unlockpt(master_fd) != 0) {
-            if (master_fd >= 0) close(master_fd);
-            return NULL;
-        }
+        if (master_fd < 0 || grantpt(master_fd) != 0 || unlockpt(master_fd) != 0) goto fail;
         const char *name = ptsname(master_fd);
-        if (!name) { close(master_fd); return NULL; }
+        if (!name) goto fail;
         slave_name = strdup(name);
-        if (!slave_name) { close(master_fd); return NULL; }
+        if (!slave_name) goto fail;
     } else if (pipe2(in_pipe, O_CLOEXEC) != 0) {
-        return NULL;
+        goto fail;
     }
-    pid_t pid = fork();
+
+    pid = fork();
     if (pid == 0) {
         if (use_pty) {
             if (setsid() < 0) _exit(126);
@@ -124,25 +154,57 @@ Java_com_jarves_mh_runtime_NativeSpawn_spawn(JNIEnv *env, jobject self, jobjectA
         _exit(127);
     }
     if (pid > 0 && !use_pty) setpgid(pid, pid);
-    if (use_pty) free(slave_name);
+    if (pid < 0) goto fail;
+
+    if (use_pty) {
+        free(slave_name);
+        slave_name = NULL;
+    }
     for (jsize i = 0; i < argc; i++) free(argv[i]);
+    free(argv);
+    argv = NULL;
     for (jsize i = 0; i < envc; i++) free(envp[i]);
-    free(argv); free(envp); free(cwd); free(output_path);
-    if (pid < 0) {
-        if (use_pty) close(master_fd); else close_pair(in_pipe);
-        return NULL;
+    free(envp);
+    envp = NULL;
+    free(cwd);
+    cwd = NULL;
+    free(output_path);
+    output_path = NULL;
+
+    if (!use_pty) {
+        close(in_pipe[0]);
+        in_pipe[0] = -1;
     }
-    if (!use_pty) close(in_pipe[0]);
     int input_fd = use_pty ? (int)fcntl(master_fd, F_DUPFD_CLOEXEC, 0) : in_pipe[1];
-    if (input_fd < 0) {
-        kill(pid, SIGKILL);
-        if (use_pty) close(master_fd);
-        return NULL;
-    }
-    jint values[3] = {pid, input_fd, use_pty ? master_fd : -1};
-    jintArray result = (*env)->NewIntArray(env, 3);
+    if (input_fd < 0) goto fail;
+    jint values[3] = {(jint)pid, (jint)input_fd, use_pty ? master_fd : -1};
+    result = (*env)->NewIntArray(env, 3);
+    if (!result) goto fail;
     (*env)->SetIntArrayRegion(env, result, 0, 3, values);
     return result;
+
+fail:
+    // Reached only before the descriptors are handed to the VM, so closing
+    // them here cannot yank anything Kotlin already owns.
+    if (pid > 0) {
+        // Never leak an unkillable child behind a failed spawn.
+        kill(pid, SIGKILL);
+        waitpid(pid, NULL, 0);
+    }
+    free(slave_name);
+    if (argv) {
+        for (jsize i = 0; i < argc; i++) free(argv[i]);
+        free(argv);
+    }
+    if (envp) {
+        for (jsize i = 0; i < envc; i++) free(envp[i]);
+        free(envp);
+    }
+    free(cwd);
+    free(output_path);
+    if (master_fd >= 0) close(master_fd);
+    close_pair(in_pipe);
+    return NULL;
 }
 
 JNIEXPORT jint JNICALL

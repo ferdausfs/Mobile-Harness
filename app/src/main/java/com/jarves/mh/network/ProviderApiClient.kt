@@ -17,7 +17,13 @@ sealed interface ModelDiscoveryResult {
 }
 
 sealed interface ConnectionValidation {
-    data class Success(val message: String) : ConnectionValidation
+    data class Success(
+        val message: String,
+        /** Wire format that actually worked when auto-fallback had to switch protocols. */
+        val detectedProtocol: ProviderProtocol? = null,
+        /** Base URL that actually worked when auto-fallback had to add or drop a path suffix. */
+        val detectedBaseUrl: String? = null,
+    ) : ConnectionValidation
     data class Failure(
         val message: String,
         val providerMessage: String? = null,
@@ -80,60 +86,126 @@ class ProviderApiClient {
         if (baseUrl.isBlank() || model.isBlank() || apiKey.isBlank()) {
             return@withContext ConnectionValidation.Failure("Base URL, model, and API key are required.")
         }
-        val endpoint = messagesEndpoint(baseUrl, protocol)
-        val body = validationBody(model, protocol, openRouterProviderOrder, openRouterAllowFallbacks)
         // Gateways may need to cold-start a model before returning the first token.
         // A ten-second validation timeout produced false "network" failures even
         // though discovery and the endpoint itself were healthy.
-        val response = request(endpoint, "POST", apiKey, body, protocol, connectTimeoutMs = 12_000, readTimeoutMs = 45_000)
-        when {
-            response.code in 200..299 -> ConnectionValidation.Success(
-                if (protocol == ProviderProtocol.ANTHROPIC || protocol == ProviderProtocol.ANTHROPIC_GATEWAY || protocol == ProviderProtocol.OPENROUTER) {
-                    "Anthropic Messages endpoint verified. Claude Code settings are ready."
-                } else {
-                    "Connection successful. Claude Code settings are ready."
-                },
-            )
-            response.code == 401 || response.code == 403 -> ConnectionValidation.Failure(
-                "Check this API key or select another saved key.",
-                providerErrorMessage(response.body),
-                "Rejected",
-            )
-            response.code == 404 -> ConnectionValidation.Failure(
-                "Check the Base URL and selected gateway protocol.",
-                providerErrorMessage(response.body),
-                "Endpoint error",
-            )
-            response.code == 400 && response.body.contains("model", ignoreCase = true) ->
-                ConnectionValidation.Failure(
-                    "Refresh the model list or select a different model.",
-                    providerErrorMessage(response.body),
-                    "Model error",
+        val timeouts = Pair(12_000, 45_000)
+        var bestFailure: ConnectionValidation.Failure? = null
+        var sawAuthFailure = false
+        for (candidate in validationCandidates(baseUrl, protocol)) {
+            val body = validationBody(model, candidate.protocol, openRouterProviderOrder, openRouterAllowFallbacks)
+            val response = request(candidate.url, "POST", apiKey, body, candidate.protocol, connectTimeoutMs = timeouts.first, readTimeoutMs = timeouts.second)
+            when {
+                response.code in 200..299 -> return@withContext ConnectionValidation.Success(
+                    when (candidate.protocol) {
+                        ProviderProtocol.ANTHROPIC, ProviderProtocol.ANTHROPIC_GATEWAY, ProviderProtocol.OPENROUTER ->
+                            if (candidate.protocol != protocol || candidate.baseUrl != baseUrl) {
+                                "Endpoint verified with the ${wireFormatLabel(candidate.protocol)} format. Settings are ready."
+                            } else {
+                                "Anthropic Messages endpoint verified. Claude Code settings are ready."
+                            }
+                        else ->
+                            if (candidate.protocol != protocol || candidate.baseUrl != baseUrl) {
+                                "OpenAI-compatible endpoint verified. Claude Code requests will be translated."
+                            } else {
+                                "Connection successful. Claude Code settings are ready."
+                            }
+                    },
+                    detectedProtocol = if (candidate.protocol != protocol || candidate.baseUrl != baseUrl) candidate.protocol else null,
+                    detectedBaseUrl = if (candidate.baseUrl != baseUrl) candidate.baseUrl else null,
                 )
-            response.code == 429 -> ConnectionValidation.Failure(
-                "Wait a moment, then retry or use another API key.",
-                providerErrorMessage(response.body),
-                "Rate limited",
-            )
-            response.code in 500..599 -> ConnectionValidation.Failure(
-                "The provider is temporarily unavailable. Try again shortly.",
-                providerErrorMessage(response.body),
-                "Provider error",
-            )
-            response.code > 0 -> ConnectionValidation.Failure(
-                "Review the model, protocol, and endpoint settings.",
-                providerErrorMessage(response.body),
-                "Request failed",
-            )
-            response.error?.contains("timeout", ignoreCase = true) == true ||
-                response.error?.contains("timed out", ignoreCase = true) == true ->
-                ConnectionValidation.Failure("Check your connection and try again.", response.error, "Timed out")
-            else -> ConnectionValidation.Failure(
-                "Check your internet connection and provider settings.",
-                response.error,
-                "Network error",
-            )
+                response.code == 401 || response.code == 403 -> {
+                    sawAuthFailure = true
+                    bestFailure = ConnectionValidation.Failure(
+                        "Check this API key or select another saved key.",
+                        providerErrorMessage(response.body),
+                        "Rejected",
+                    )
+                }
+                response.code == 404 || response.code == 405 || response.code == 501 -> {
+                    // Wrong path or unsupported method on this wire format; try the next candidate.
+                    if (bestFailure == null) {
+                        bestFailure = ConnectionValidation.Failure(
+                            "Check the Base URL and selected gateway protocol.",
+                            providerErrorMessage(response.body),
+                            "Endpoint error",
+                        )
+                    }
+                }
+                response.code == 400 && response.body.contains("model", ignoreCase = true) ->
+                    return@withContext ConnectionValidation.Failure(
+                        "Refresh the model list or select a different model.",
+                        providerErrorMessage(response.body),
+                        "Model error",
+                    )
+                response.code == 429 -> return@withContext ConnectionValidation.Failure(
+                    "Wait a moment, then retry or use another API key.",
+                    providerErrorMessage(response.body),
+                    "Rate limited",
+                )
+                response.code in 500..599 -> return@withContext ConnectionValidation.Failure(
+                    "The provider is temporarily unavailable. Try again shortly.",
+                    providerErrorMessage(response.body),
+                    "Provider error",
+                )
+                response.code > 0 -> bestFailure = ConnectionValidation.Failure(
+                    "Review the model, protocol, and endpoint settings.",
+                    providerErrorMessage(response.body),
+                    "Request failed",
+                )
+                response.error?.contains("timeout", ignoreCase = true) == true ||
+                    response.error?.contains("timed out", ignoreCase = true) == true ->
+                    return@withContext ConnectionValidation.Failure("Check your connection and try again.", response.error, "Timed out")
+                else -> bestFailure = ConnectionValidation.Failure(
+                    "Check your internet connection and provider settings.",
+                    response.error,
+                    "Network error",
+                )
+            }
         }
+        bestFailure ?: ConnectionValidation.Failure(
+            "Check the Base URL and selected gateway protocol.",
+            null,
+            "Endpoint error",
+        ).let { failure ->
+            if (sawAuthFailure && failure.label == "Endpoint error") {
+                failure.copy(message = "The endpoint answered but rejected the key. Check the API key, protocol, and Base URL.")
+            } else {
+                failure
+            }
+        }
+    }
+
+    /** Wire-format candidates tried in order so any OpenAI- or Anthropic-style provider validates. */
+    internal fun validationCandidates(baseUrl: String, protocol: ProviderProtocol): List<EndpointCandidate> = buildList {
+        val base = baseUrl.trim().trimEnd('/')
+        add(EndpointCandidate(messagesEndpoint(base, protocol), protocol, base))
+        when (protocol) {
+            ProviderProtocol.OPENAI_CHAT, ProviderProtocol.OPENAI_RESPONSES -> {
+                if (!base.endsWith("/v1")) add(EndpointCandidate("$base/v1/${if (protocol == ProviderProtocol.OPENAI_CHAT) "chat/completions" else "responses"}", protocol, "$base/v1"))
+                // A chosen OpenAI format that 404s may actually be an Anthropic-style gateway.
+                add(EndpointCandidate(anthropicMessagesEndpoint(base), ProviderProtocol.ANTHROPIC_GATEWAY, base))
+            }
+            ProviderProtocol.ANTHROPIC, ProviderProtocol.ANTHROPIC_GATEWAY, ProviderProtocol.CLAUDE_LOGIN -> {
+                // An Anthropic attempt that 404s may actually be an OpenAI-compatible gateway.
+                openAiChatCandidates(base).forEach { add(EndpointCandidate(it.url, ProviderProtocol.OPENAI_CHAT, it.baseUrl)) }
+            }
+            ProviderProtocol.OPENROUTER -> Unit
+        }
+    }.distinctBy { it.url }
+
+    private fun openAiChatCandidates(base: String): List<EndpointCandidate> = buildList {
+        add(EndpointCandidate("$base/chat/completions", ProviderProtocol.OPENAI_CHAT, base))
+        if (!base.endsWith("/v1")) add(EndpointCandidate("$base/v1/chat/completions", ProviderProtocol.OPENAI_CHAT, "$base/v1"))
+    }
+
+    private fun anthropicMessagesEndpoint(base: String): String =
+        if (base.endsWith("/v1")) "$base/messages" else "$base/v1/messages"
+
+    private fun wireFormatLabel(protocol: ProviderProtocol): String = when (protocol) {
+        ProviderProtocol.OPENAI_CHAT -> "OpenAI Chat Completions"
+        ProviderProtocol.OPENAI_RESPONSES -> "OpenAI Responses"
+        else -> "Anthropic Messages"
     }
 
     private fun request(
@@ -180,7 +252,10 @@ class ProviderApiClient {
         val withoutAnthropic = base.removeSuffix("/anthropic")
         val candidates = when (protocol) {
             ProviderProtocol.OPENROUTER -> listOf("$base/v1/models")
-            ProviderProtocol.OPENAI_CHAT, ProviderProtocol.OPENAI_RESPONSES -> listOf("$base/models")
+            ProviderProtocol.OPENAI_CHAT, ProviderProtocol.OPENAI_RESPONSES -> buildList {
+                add("$base/models")
+                if (!base.endsWith("/v1")) add("$base/v1/models")
+            }
             else -> listOf("$base/v1/models", "$base/models", "$withoutAnthropic/models", "$withoutAnthropic/v1/models")
         }
         return candidates.distinct()
@@ -228,12 +303,12 @@ class ProviderApiClient {
             .toString()
         ProviderProtocol.OPENAI_CHAT -> JSONObject()
             .put("model", model)
-            .put("max_tokens", 1)
+            .put("max_tokens", 32)
             .put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", "Reply OK")))
             .toString()
         else -> JSONObject()
             .put("model", model)
-            .put("max_tokens", 1)
+            .put("max_tokens", 32)
             .put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", "Reply OK")))
             .also { body ->
                 val providers = openRouterProviderOrder.split(',')
@@ -278,6 +353,9 @@ class ProviderApiClient {
     }
 
     private data class HttpResult(val code: Int, val body: String, val error: String? = null)
+
+    /** One wire-format attempt: the full request URL plus the base URL that produced it. */
+    internal data class EndpointCandidate(val url: String, val protocol: ProviderProtocol, val baseUrl: String)
 }
 
 object ModelResponseParser {

@@ -259,7 +259,7 @@ class AgentProviderPresetTest {
     }
 
     @Test
-    fun deepSeekHarnessValidationUsesSelectedCustomProtocol() {
+    fun customWireFormatAppliesToEveryAgent() {
         val profile = ProviderProfile(
             ProviderKind.CUSTOM,
             baseUrl = "https://api.example.com/v1",
@@ -267,7 +267,8 @@ class AgentProviderPresetTest {
             dshApi = "openai-completions",
         )
         assertEquals(ProviderProtocol.OPENAI_CHAT, providerProtocolForAgent(profile, AgentKind.DEEPSEEK_HARNESS))
-        assertEquals(ProviderProtocol.ANTHROPIC_GATEWAY, providerProtocolForAgent(profile, AgentKind.CLAUDE_CODE))
+        // OpenAI-compatible custom endpoints must also work for Claude Code (#41).
+        assertEquals(ProviderProtocol.OPENAI_CHAT, providerProtocolForAgent(profile, AgentKind.CLAUDE_CODE))
     }
 
     @Test

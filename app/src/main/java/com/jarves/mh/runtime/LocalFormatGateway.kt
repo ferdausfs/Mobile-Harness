@@ -18,6 +18,7 @@ import org.json.JSONObject
 internal class LocalFormatGateway(
     private val profile: ProviderProfile,
     private val apiKey: String,
+    private val protocol: com.jarves.mh.model.ProviderProtocol = com.jarves.mh.model.ProviderProtocol.OPENAI_CHAT,
 ) : AutoCloseable {
     private val running = AtomicBoolean(true)
     private val server = ServerSocket(0, 8, InetAddress.getByName("127.0.0.1"))
@@ -66,12 +67,18 @@ internal class LocalFormatGateway(
         }
         runCatching {
             val anthropic = JSONObject(bodyBytes.decodeToString())
-            val upstream = callProvider(toOpenAi(anthropic))
+            val upstream = when (protocol) {
+                com.jarves.mh.model.ProviderProtocol.OPENAI_RESPONSES -> callResponsesProvider(toResponses(anthropic))
+                else -> callProvider(toOpenAi(anthropic))
+            }
             if (upstream.first !in 200..299) {
                 Log.w("FormatGateway", "Provider returned HTTP ${upstream.first}: ${providerError(upstream.second)}")
                 writeJson(output, upstream.first, errorJson("api_error", providerError(upstream.second)))
             } else {
-                val translated = fromOpenAi(JSONObject(upstream.second), anthropic.optString("model", profile.model))
+                val translated = when (protocol) {
+                    com.jarves.mh.model.ProviderProtocol.OPENAI_RESPONSES -> fromResponses(JSONObject(upstream.second), anthropic.optString("model", profile.model))
+                    else -> fromOpenAi(JSONObject(upstream.second), anthropic.optString("model", profile.model))
+                }
                 if (anthropic.optBoolean("stream", false)) writeStream(output, translated) else writeJson(output, 200, translated.toString())
             }
         }.onFailure { error ->
@@ -164,8 +171,154 @@ internal class LocalFormatGateway(
             .put("usage", JSONObject().put("input_tokens", usage.optInt("prompt_tokens")).put("output_tokens", usage.optInt("completion_tokens")))
     }
 
+    /** Anthropic Messages request -> OpenAI Responses API request. */
+    private fun toResponses(source: JSONObject): JSONObject {
+        val target = JSONObject()
+            .put("model", normalizeModel(profile.model))
+            .put("stream", false)
+            .put("max_output_tokens", source.optInt("max_tokens", 4096))
+        source.opt("system")?.let { system ->
+            val text = when (system) {
+                is JSONArray -> contentText(system)
+                else -> system.toString()
+            }
+            if (text.isNotBlank()) target.put("instructions", text)
+        }
+        val input = JSONArray()
+        val sourceMessages = source.optJSONArray("messages") ?: JSONArray()
+        for (index in 0 until sourceMessages.length()) {
+            val message = sourceMessages.getJSONObject(index)
+            val role = message.optString("role")
+            val content = message.opt("content")
+            if (content !is JSONArray) {
+                input.put(JSONObject().put("role", role).put("content", contentTextItem(role, content?.toString().orEmpty())))
+                continue
+            }
+            val text = contentText(content)
+            if (text.isNotBlank()) input.put(JSONObject().put("role", role).put("content", contentTextItem(role, text)))
+            for (partIndex in 0 until content.length()) {
+                val part = content.optJSONObject(partIndex) ?: continue
+                when (part.optString("type")) {
+                    "tool_use" -> input.put(
+                        JSONObject()
+                            .put("type", "function_call")
+                            .put("call_id", part.optString("id"))
+                            .put("name", part.optString("name"))
+                            .put("arguments", part.optJSONObject("input")?.toString() ?: "{}"),
+                    )
+                    "tool_result" -> input.put(
+                        JSONObject()
+                            .put("type", "function_call_output")
+                            .put("call_id", part.optString("tool_use_id"))
+                            .put("output", valueText(part.opt("content"))),
+                    )
+                }
+            }
+        }
+        target.put("input", input)
+        source.optJSONArray("tools")?.let { tools ->
+            val converted = JSONArray()
+            for (index in 0 until tools.length()) {
+                val tool = tools.getJSONObject(index)
+                converted.put(
+                    JSONObject()
+                        .put("type", "function")
+                        .put("name", tool.optString("name"))
+                        .put("description", tool.optString("description"))
+                        .put("parameters", tool.optJSONObject("input_schema") ?: JSONObject().put("type", "object")),
+                )
+            }
+            target.put("tools", converted).put("tool_choice", "auto")
+        }
+        return target
+    }
+
+    private fun contentTextItem(role: String, text: String): JSONArray = JSONArray().put(
+        JSONObject().put("type", if (role == "assistant") "output_text" else "input_text").put("text", text),
+    )
+
+    /** OpenAI Responses API reply -> Anthropic Messages reply. */
+    private fun fromResponses(source: JSONObject, model: String): JSONObject {
+        val content = JSONArray()
+        val output = source.optJSONArray("output") ?: JSONArray()
+        for (index in 0 until output.length()) {
+            val item = output.optJSONObject(index) ?: continue
+            when (item.optString("type")) {
+                "message" -> {
+                    val parts = item.optJSONArray("content") ?: JSONArray()
+                    for (partIndex in 0 until parts.length()) {
+                        val part = parts.optJSONObject(partIndex) ?: continue
+                        if (part.optString("type") == "output_text") {
+                            val text = part.optString("text")
+                            if (text.isNotBlank()) content.put(JSONObject().put("type", "text").put("text", text))
+                        }
+                    }
+                }
+                "function_call" -> content.put(
+                    JSONObject()
+                        .put("type", "tool_use")
+                        .put("id", item.optString("call_id").ifBlank { "tool_${UUID.randomUUID()}" })
+                        .put("name", item.optString("name"))
+                        .put("input", runCatching { JSONObject(item.optString("arguments", "{}")) }.getOrDefault(JSONObject())),
+                )
+            }
+        }
+        val usage = source.optJSONObject("usage") ?: JSONObject()
+        val toolCalls = content.length() > 0 && hasToolUse(content)
+        return JSONObject().put("id", source.optString("id").ifBlank { "msg_${UUID.randomUUID()}" })
+            .put("type", "message").put("role", "assistant").put("model", model)
+            .put("content", if (content.length() == 0) JSONArray().put(JSONObject().put("type", "text").put("text", "")) else content)
+            .put("stop_reason", if (toolCalls) "tool_use" else "end_turn")
+            .put("stop_sequence", JSONObject.NULL)
+            .put("usage", JSONObject().put("input_tokens", usage.optInt("input_tokens")).put("output_tokens", usage.optInt("output_tokens")))
+    }
+
+    private fun hasToolUse(content: JSONArray): Boolean {
+        for (index in 0 until content.length()) {
+            if (content.optJSONObject(index)?.optString("type") == "tool_use") return true
+        }
+        return false
+    }
+
     private fun callProvider(body: JSONObject): Pair<Int, String> {
-        val endpoint = profile.baseUrl.trimEnd('/') + "/chat/completions"
+        val base = profile.resolvedBaseUrl.trimEnd('/')
+        val paths = buildList {
+            add("/chat/completions")
+            if (!base.endsWith("/v1")) add("/v1/chat/completions")
+        }
+        var lastCode = 0
+        var lastBody = ""
+        for (path in paths) {
+            val (code, text) = postJson(base + path, body)
+            if (code in 200..299) return code to text
+            lastCode = code
+            lastBody = text
+            // Retry the versioned path only when the flat path does not exist.
+            if (code != 404 && code != 405) break
+        }
+        return lastCode to lastBody
+    }
+
+    /** OpenAI Responses API: a different envelope from Chat Completions. */
+    private fun callResponsesProvider(body: JSONObject): Pair<Int, String> {
+        val base = profile.resolvedBaseUrl.trimEnd('/')
+        val paths = buildList {
+            add("/responses")
+            if (!base.endsWith("/v1")) add("/v1/responses")
+        }
+        var lastCode = 0
+        var lastBody = ""
+        for (path in paths) {
+            val (code, text) = postJson(base + path, body)
+            if (code in 200..299) return code to text
+            lastCode = code
+            lastBody = text
+            if (code != 404 && code != 405) break
+        }
+        return lastCode to lastBody
+    }
+
+    private fun postJson(endpoint: String, body: JSONObject): Pair<Int, String> {
         val connection = URL(endpoint).openConnection() as HttpURLConnection
         return try {
             connection.requestMethod = "POST"

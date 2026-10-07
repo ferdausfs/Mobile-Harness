@@ -32,6 +32,7 @@ import com.jarves.mh.model.WorkspaceEntry
 import com.jarves.mh.model.projectSlug
 import com.jarves.mh.model.generateQuickChatIdentity
 import com.jarves.mh.model.providerProtocolForAgent
+import com.jarves.mh.model.ProviderProtocol
 import com.jarves.mh.network.ConnectionValidation
 import com.jarves.mh.network.ModelDiscoveryResult
 import com.jarves.mh.network.ProviderApiClient
@@ -1274,9 +1275,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun finishOnboarding(profile: ProviderProfile, secret: String) {
         vault.put(profile.kind.name, secret)
-        val saved = profile.copy(
+        var saved = profile.copy(
             hasSecret = secret.isNotBlank() || vault.contains(profile.kind.name),
         )
+        if (profile.kind == ProviderKind.CUSTOM) {
+            // A validation that auto-detected the wire format wins over the URL-shape guess.
+            val detected = detectedCustomApi
+            if (detected != null && detected.first == profile.baseUrl) {
+                saved = saved.copy(dshApi = detected.second)
+            }
+            detectedCustomApi = null
+        }
         preferences.saveProvider(saved, _state.value.agentKind)
         preferences.onboardingComplete = true
         _state.update { it.copy(onboardingComplete = true, provider = saved, startupStage = StartupStage.READY) }
@@ -1739,7 +1748,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         models: List<com.jarves.mh.network.DiscoveredModel>,
     ): ConnectionValidation {
         val key = secret.ifBlank { vault.get(profile.kind.name).orEmpty() }
-        return providerApi.validate(
+        val result = providerApi.validate(
             profile.baseUrl,
             profile.model,
             key,
@@ -1748,6 +1757,35 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             profile.openRouterProviderOrder,
             profile.openRouterAllowFallbacks,
         )
+        rememberDetectedCustomApi(profile, result)
+        return result
+    }
+
+    /** Wire format auto-detected while validating a CUSTOM endpoint, reused when the user saves. */
+    private var detectedCustomApi: Pair<String, String>? = null
+
+    private fun customApiName(protocol: ProviderProtocol): String = when (protocol) {
+        ProviderProtocol.OPENAI_CHAT -> "openai-completions"
+        ProviderProtocol.OPENAI_RESPONSES -> "openai-responses"
+        else -> "anthropic-messages"
+    }
+
+    private fun rememberDetectedCustomApi(profile: ProviderProfile, result: ConnectionValidation) {
+        if (result !is ConnectionValidation.Success || profile.kind != ProviderKind.CUSTOM) return
+        val detected = result.detectedProtocol ?: return
+        detectedCustomApi = (result.detectedBaseUrl ?: profile.baseUrl) to customApiName(detected)
+    }
+
+    /** Persists a detected wire format onto the saved CUSTOM profile after a successful test. */
+    private fun applyDetectedCustomApi(profile: ProviderProfile, result: ConnectionValidation) {
+        if (result !is ConnectionValidation.Success || profile.kind != ProviderKind.CUSTOM) return
+        val detected = result.detectedProtocol ?: return
+        val api = customApiName(detected)
+        val baseUrl = result.detectedBaseUrl ?: profile.baseUrl
+        if (api == profile.dshApi && baseUrl == profile.baseUrl) return
+        val updated = profile.copy(dshApi = api, baseUrl = baseUrl)
+        preferences.saveProvider(updated, _state.value.agentKind)
+        _state.update { it.copy(provider = updated) }
     }
 
     fun pingApi() {
@@ -1771,8 +1809,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 profile.openRouterAllowFallbacks,
             )
             when (result) {
-                is ConnectionValidation.Success -> _state.update {
-                    it.copy(apiPingStatus = ApiPingStatus.OK, apiPingMessage = "API responded successfully")
+                is ConnectionValidation.Success -> {
+                    applyDetectedCustomApi(profile, result)
+                    _state.update {
+                        it.copy(apiPingStatus = ApiPingStatus.OK, apiPingMessage = "API responded successfully")
+                    }
                 }
                 is ConnectionValidation.Failure -> _state.update {
                     it.copy(apiPingStatus = ApiPingStatus.FAILED, apiPingMessage = result.message)

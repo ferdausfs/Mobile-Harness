@@ -41,7 +41,7 @@ enum class ProviderKind(
         fixedBaseUrl = true,
         fixedProtocol = true,
     ),
-    CUSTOM("Custom API", "Anthropic-compatible endpoint", ProviderProtocol.ANTHROPIC_GATEWAY, "", "", true),
+    CUSTOM("Custom API", "Any OpenAI- or Anthropic-compatible endpoint", ProviderProtocol.ANTHROPIC_GATEWAY, "", "", true),
 }
 
 /**
@@ -111,16 +111,36 @@ fun defaultDshApiForProvider(kind: ProviderKind): String = when (kind) {
  */
 fun inferredDshApiForUrl(baseUrl: String): String {
     val normalized = baseUrl.trim().trimEnd('/').lowercase(Locale.ROOT)
+    val host = runCatching { java.net.URI(normalized).host.orEmpty() }.getOrDefault("")
+    val openAiOnlyHosts = listOf(
+        "api.openai.com", "openrouter.ai", "api.groq.com", "api.together.xyz",
+        "api.mistral.ai", "api.deepseek.com", "dashscope.aliyuncs.com",
+        "api.siliconflow.cn", "api.fireworks.ai", "api.cerebras.ai",
+        "generativelanguage.googleapis.com", "api.x.ai", "api-inference.huggingface.co",
+    )
     return when {
         normalized.endsWith("/responses") -> "openai-responses"
         "/anthropic" in normalized || "api.anthropic.com" in normalized -> "anthropic-messages"
-        normalized.endsWith("/v1") -> "openai-completions"
+        "/openai" in normalized -> "openai-completions"
+        normalized.endsWith("/v1") || normalized.endsWith("/v1beta") -> "openai-completions"
+        host in openAiOnlyHosts -> "openai-completions"
         else -> "anthropic-messages"
     }
 }
 
-/** Resolves the protocol DeepSeek Harness will actually use for this saved profile. */
+/**
+ * Resolves the wire protocol an agent will actually use for this saved profile.
+ * CUSTOM endpoints follow the user-selected wire format for every coding agent,
+ * so OpenAI-compatible gateways work with Claude Code exactly like Anthropic ones.
+ */
 fun providerProtocolForAgent(profile: ProviderProfile, agent: AgentKind): ProviderProtocol {
+    if (profile.kind == ProviderKind.CUSTOM) {
+        return when (profile.dshApi.ifBlank { inferredDshApiForUrl(profile.baseUrl) }) {
+            "openai-completions" -> ProviderProtocol.OPENAI_CHAT
+            "openai-responses" -> ProviderProtocol.OPENAI_RESPONSES
+            else -> ProviderProtocol.ANTHROPIC_GATEWAY
+        }
+    }
     if (agent != AgentKind.DEEPSEEK_HARNESS || profile.kind !in DSH_PROTOCOL_PROVIDERS) {
         return profile.kind.protocol
     }

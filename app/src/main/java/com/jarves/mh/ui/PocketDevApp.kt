@@ -2263,7 +2263,15 @@ private fun ProviderSetupScreen(
     var selected by rememberSaveable { mutableStateOf(initial.kind) }
     var baseUrl by rememberSaveable { mutableStateOf(initial.baseUrl.ifBlank { initial.kind.defaultBaseUrl }) }
     var model by rememberSaveable { mutableStateOf(initial.model.ifBlank { initial.kind.defaultModel }) }
-    var dshApi by rememberSaveable { mutableStateOf(initial.dshApi.ifBlank { "anthropic-messages" }) }
+    var dshApi by rememberSaveable(initial.kind) {
+        mutableStateOf(
+            when {
+                initial.kind.fixedProtocol -> initial.dshApi.ifBlank { "anthropic-messages" }
+                initial.dshApi.isNotBlank() -> initial.dshApi
+                else -> inferredDshApiForUrl(initial.baseUrl.ifBlank { initial.kind.defaultBaseUrl })
+            },
+        )
+    }
     var apiKey by rememberSaveable { mutableStateOf("") }
     var showAgentPicker by rememberSaveable { mutableStateOf(false) }
 
@@ -2343,7 +2351,9 @@ private fun ProviderSetupScreen(
                     apiKey = apiKey,
                     onBaseUrl = {
                         baseUrl = it
-                        if (agentKind == AgentKind.DEEPSEEK_HARNESS && selected == ProviderKind.CUSTOM) {
+                        // CUSTOM accepts any wire format, so keep the protocol guess in
+                        // step with the URL for every coding agent, not just DeepSeek Harness.
+                        if (selected == ProviderKind.CUSTOM) {
                             dshApi = inferredDshApiForUrl(it)
                         }
                     },
@@ -2837,6 +2847,7 @@ private fun ProviderCredentialsStep(
             Text(
                 when {
                     agentKind == AgentKind.DEEPSEEK_HARNESS -> "DeepSeek Harness will connect through this API endpoint."
+                    provider == ProviderKind.CUSTOM -> "Connect in the gateway protocol that matches this endpoint; OpenAI-compatible endpoints are translated for Claude Code."
                     provider.protocol.name.startsWith("OPENAI") -> "Mobile Harness will translate Claude Code requests for this provider."
                     else -> "Claude Code will connect through this API endpoint."
                 },
@@ -2862,7 +2873,9 @@ private fun ProviderCredentialsStep(
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth(),
                     )
-                    if (agentKind == AgentKind.DEEPSEEK_HARNESS && provider in DSH_PROTOCOL_PROVIDERS && !provider.fixedProtocol) {
+                    if ((agentKind == AgentKind.DEEPSEEK_HARNESS && provider in DSH_PROTOCOL_PROVIDERS && !provider.fixedProtocol) ||
+                        (provider == ProviderKind.CUSTOM && !provider.fixedProtocol)
+                    ) {
                         DshApiProtocolPicker(selected = dshApi, onSelected = { onDshApi(it); status = null })
                     }
                     OutlinedTextField(

@@ -141,10 +141,13 @@ class ClaudeRuntimeBridge(
             val workspace = ensureWorkspace(projectId)
             createCheckpoint(projectId, workspace)
             val before = snapshot(workspace)
-            formatGateway = if (provider.kind.protocol in setOf(
+            // CUSTOM endpoints follow the user-selected wire format for every agent,
+            // so an OpenAI-compatible gateway launches the translation gateway here.
+            val effectiveProtocol = com.jarves.mh.model.providerProtocolForAgent(provider, com.jarves.mh.model.AgentKind.CLAUDE_CODE)
+            formatGateway = if (effectiveProtocol in setOf(
                     com.jarves.mh.model.ProviderProtocol.OPENAI_CHAT,
                     com.jarves.mh.model.ProviderProtocol.OPENAI_RESPONSES,
-                )) LocalFormatGateway(provider, secret).start() else null
+                )) LocalFormatGateway(provider, secret, effectiveProtocol).start() else null
             openRouterGateway = if (
                 provider.kind == ProviderKind.LLM_ROUTER && provider.openRouterProviders.isNotEmpty()
             ) OpenRouterRoutingGateway(provider, secret).start() else null
@@ -152,6 +155,7 @@ class ClaudeRuntimeBridge(
                 provider,
                 authToken = secret,
                 localGatewayUrl = formatGateway?.url ?: openRouterGateway?.url,
+                effectiveProtocol = effectiveProtocol,
             )
             Log.d("ClaudeBridge", "Provider: ${provider.kind}, Model: ${provider.model}, BaseUrl: ${provider.baseUrl}")
             Log.d("ClaudeBridge", "Launch environment keys: ${launch.environment.keys}")
@@ -430,7 +434,7 @@ class ClaudeRuntimeBridge(
                         streamedThinking.clear()
                         emitReasoningSummary(sessionId, "", startsNewBlock = true)
                         block.optString("thinking").takeIf(String::isNotBlank)?.let {
-                            streamedThinking.append(it)
+                            appendStreamedThinking(sessionId, it)
                             emitReasoningSummary(sessionId, it, force = true)
                         }
                     }
@@ -441,12 +445,14 @@ class ClaudeRuntimeBridge(
                 val delta = json.optJSONObject("delta")
                 when (delta?.optString("type")) {
                     "thinking_delta" -> delta.optString("thinking").takeIf(String::isNotEmpty)?.let {
-                        streamedThinking.append(it)
+                        appendStreamedThinking(sessionId, it)
                         emitReasoningSummary(sessionId, streamedThinking.toString())
                     }
                     "text_delta", "" -> delta.optString("text").takeIf(String::isNotEmpty)?.let {
-                        streamedText.append(it)
-                        eventBus.emit(RuntimeEvent.AssistantDelta(sessionId, it))
+                        if (streamedText.length < MAX_STREAMED_TEXT_CHARS) {
+                            streamedText.append(it)
+                            eventBus.emit(RuntimeEvent.AssistantDelta(sessionId, it))
+                        }
                     }
                 }
             }
@@ -470,7 +476,7 @@ class ClaudeRuntimeBridge(
                             if (currentThinkingBlockId == 0L || streamedThinking.toString() != it) {
                                 currentThinkingBlockId += 1
                                 streamedThinking.clear()
-                                streamedThinking.append(it)
+                                appendStreamedThinking(sessionId, it)
                                 emitReasoningSummary(
                                     sessionId,
                                     it,
@@ -517,6 +523,12 @@ class ClaudeRuntimeBridge(
                 terminateActiveProcessGracefully()
             }
         }
+    }
+
+    /** Bounds the reasoning buffer so a pathological provider stream cannot exhaust memory. */
+    private fun appendStreamedThinking(sessionId: String, chunk: String) {
+        if (streamedThinking.length >= MAX_STREAMED_TEXT_CHARS) return
+        streamedThinking.append(chunk)
     }
 
     private suspend fun emitReasoningSummary(
@@ -1042,6 +1054,8 @@ class ClaudeRuntimeBridge(
         private const val DIFF_CONTEXT_LINES = 3
         private const val FOREGROUND_PROGRESS_MIN_INTERVAL_MS = 750L
         private const val MAX_CONVERSATION_HISTORY_CHARACTERS = 160_000
+        /** Keeps in-memory streamed text bounded so a runaway reply cannot trigger an OOM kill. */
+        private const val MAX_STREAMED_TEXT_CHARS = 1_000_000
         private val IGNORED_DIRECTORY_NAMES = setOf(
             ".claude",
             ".git",

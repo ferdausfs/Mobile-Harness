@@ -42,9 +42,14 @@ internal fun List<ChatMessage>.recentWithinCharacterBudget(maxCharacters: Int): 
 }
 
 object RuntimeLaunchConfigBuilder {
-    fun build(profile: ProviderProfile, authToken: String? = null, localGatewayUrl: String? = null): RuntimeLaunchConfig {
+    fun build(
+        profile: ProviderProfile,
+        authToken: String? = null,
+        localGatewayUrl: String? = null,
+        effectiveProtocol: com.jarves.mh.model.ProviderProtocol = profile.kind.protocol,
+    ): RuntimeLaunchConfig {
         val environment = linkedMapOf("DISABLE_AUTOUPDATER" to "1")
-        when (profile.kind.protocol) {
+        when (effectiveProtocol) {
             com.jarves.mh.model.ProviderProtocol.CLAUDE_LOGIN -> {
                 require(!authToken.isNullOrBlank()) { "Enter a Claude subscription token first" }
                 environment["CLAUDE_CODE_OAUTH_TOKEN"] = authToken
@@ -74,7 +79,7 @@ object RuntimeLaunchConfigBuilder {
             }
         }
         val runtimeModel = environment["ANTHROPIC_MODEL"] ?: profile.model
-        if (profile.kind.protocol != com.jarves.mh.model.ProviderProtocol.CLAUDE_LOGIN) {
+        if (effectiveProtocol != com.jarves.mh.model.ProviderProtocol.CLAUDE_LOGIN) {
             environment["ANTHROPIC_DEFAULT_OPUS_MODEL"] = runtimeModel
             environment["ANTHROPIC_DEFAULT_SONNET_MODEL"] = runtimeModel
             environment["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = runtimeModel

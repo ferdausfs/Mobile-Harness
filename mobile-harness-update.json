@@ -1,12 +1,12 @@
 {
-  "versionCode": 12,
-  "versionName": "1.0.11",
-  "notes": "Agent screen fix: tapping Claude Code or Antigravity when not installed now offers the install right on the spot with live download progress and switches to the agent on success; install failures show their reason. Antigravity parity: a failed task's changed files stay in the Changes tab and a prompt started right after Stop can no longer lose its Stop button or notification. Reliability: emoji/CJK characters no longer corrupt session output at 16 KB read boundaries, concurrent liveness checks can no longer turn success into a bogus -138 failure, agent updates roll back automatically when verification fails and understand pre-release versions, and a failed spawn surfaces a proper error instead of a bare crash. Runtime bundle downloads and the privacy policy URL now come from the ferdausfs repository. Same signing key - installs directly over v1.0.9/v1.0.10.",
+  "versionCode": 13,
+  "versionName": "1.0.12",
+  "notes": "Update failures now explain themselves. Releases v1.0.4-v1.0.7 each shipped a different signing key, so phones on those versions could never install anything newer (Android refuses a signing-key switch in place). The updater now says exactly what to do - back up your API key, uninstall once, install the new APK - and failed installs translate Android's raw codes (different signing key, version downgrade) into plain instructions. Same signing key as v1.0.8-v1.0.11: installs directly over those versions, no uninstall. Once you are on this key, every future update installs with one tap, forever.",
   "artifacts": {
     "online": {
-      "url": "https://github.com/ferdausfs/Mobile-Harness/releases/download/v1.0.11/mobile-harness-online-v1.0.11.apk",
-      "sha256": "9283618c6b5c67148edbf48a94f520fb1e593ac39c106bd963b56726d530c8c5",
-      "sizeBytes": 87635591
+      "url": "https://github.com/ferdausfs/Mobile-Harness/releases/download/v1.0.12/mobile-harness-online-v1.0.12.apk",
+      "sha256": "e84d2ac7c98177b8391b9719d208e4d371af3bec0c8d3df090ca11c1b2aefe5d",
+      "sizeBytes": 87636055
     }
   }
 }

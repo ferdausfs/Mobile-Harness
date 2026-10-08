@@ -1,12 +1,12 @@
 {
-  "versionCode": 13,
-  "versionName": "1.0.12",
-  "notes": "Update failures now explain themselves. Releases v1.0.4-v1.0.7 each shipped a different signing key, so phones on those versions could never install anything newer (Android refuses a signing-key switch in place). The updater now says exactly what to do - back up your API key, uninstall once, install the new APK - and failed installs translate Android's raw codes (different signing key, version downgrade) into plain instructions. Same signing key as v1.0.8-v1.0.11: installs directly over those versions, no uninstall. Once you are on this key, every future update installs with one tap, forever.",
+  "versionCode": 14,
+  "versionName": "1.0.13",
+  "notes": "OpenRouter keys finally validate: the connection test called OpenRouter's Anthropic-style endpoint without the mandatory version header and never tried the OpenAI endpoint, so a good key looked rejected while the same key worked through Custom API. The test now speaks both wire formats, remembers which one answered, and both coding agents use the proven one. Ollama Cloud got the same treatment: connection checks cover the endpoint the app actually uses, rejected keys explain where Ollama Cloud keys come from (ollama.com/keys), and reasoning models like gpt-oss can no longer break the session with an empty reply. Same signing key - installs directly over v1.0.12.",
   "artifacts": {
     "online": {
-      "url": "https://github.com/ferdausfs/Mobile-Harness/releases/download/v1.0.12/mobile-harness-online-v1.0.12.apk",
-      "sha256": "e84d2ac7c98177b8391b9719d208e4d371af3bec0c8d3df090ca11c1b2aefe5d",
-      "sizeBytes": 87636055
+      "url": "https://github.com/ferdausfs/Mobile-Harness/releases/download/v1.0.13/mobile-harness-online-v1.0.13.apk",
+      "sha256": "85c896e424a064172fa51da20ccf9f8a049820cf49b080cf1b28330f5eb0d4eb",
+      "sizeBytes": 87637363
     }
   }
 }

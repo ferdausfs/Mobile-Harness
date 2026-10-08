@@ -4,6 +4,46 @@ Newest entries prepended. Never delete entries.
 
 ---
 
+## 2026-10-08 — Install/update failure diagnosis (root cause: 4 different signing keys across v1.0.4–v1.0.8) + updater error-message fixes (LOCAL ONLY, not pushed)
+
+- **Agent/tool**: Claude Code agent session (Super Z), direct repo work on `ferdausfs/Mobile-Harness` branch `main`
+- **Feature/trigger**: User report "install hoy na .. update o hoy na .." — the phone refuses both a direct APK install and the in-app update. Diagnose the cause, fix what code can fix, publish what publishing allows (no GitHub token available this session → local commits only).
+
+### Root cause (verified, not guessed)
+Extracted the APK Signature Scheme v2 signer certificate SHA-256 from every published release (parser script: `/home/z/my-project/scripts/certcheck/apk_v2_cert.py`, mirrors `apksigner verify --print-certs`):
+
+| Release | v2 signing cert SHA-256 |
+|---------|------------------------|
+| v1.0.4 | `d364b1edd80b955e7fe9d99edc4cc211ce723e461ded6a5160c6a2db3fdd7af1` |
+| v1.0.5 | `9d6b60952000a093b71e84b10a773edba71ab664bdc8f4216c290e3d7ebdf1ad` |
+| v1.0.6 | `63256b9730ad360de9e81119bdaf1761a2c4bf71ad2d9fe852325ebd20913470` |
+| v1.0.7 | `63256b9730ad360de9e81119bdaf1761a2c4bf71ad2d9fe852325ebd20913470` |
+| v1.0.8 | `d07ba804cfa95dd39083002628b65487d7ae99acab12cdfa61c5f42bca7dccfe` |
+| v1.0.9 | `d07ba804cfa95dd39083002628b65487d7ae99acab12cdfa61c5f42bca7dccfe` |
+| v1.0.10 | `d07ba804cfa95dd39083002628b65487d7ae99acab12cdfa61c5f42bca7dccfe` |
+| v1.0.11 | `d07ba804cfa95dd39083002628b65487d7ae99acab12cdfa61c5f42bca7dccfe` |
+
+**Four different keys in four releases (v1.0.4 → 5 → 6 → 8).** Android refuses any in-place install whose APK is signed with a different key (`INSTALL_FAILED_UPDATE_INCOMPATIBLE`), so every user still on v1.0.4–v1.0.7 is hard-blocked from every newer release: direct install fails ("App not installed") AND the in-app updater's own `verifyApk` signature check rejects it by design. minSdk has always been 28 (not a factor). Server side is healthy: `releases/latest` → v1.0.11, APK re-downloaded and sha256 matches `mobile-harness-update.json`, all 7 runtime-bundle assets on `runtime-2026.09.4` return 200.
+
+### What changed (one commit per concept, local only)
+1. **AppUpdater signature-mismatch message** (`update/AppUpdater.kt`) — the dead-end "Update is not signed with the installed app's signing key" now explains the one-time uninstall path and the data-loss consequence (API key, chats, workspaces, installed agents).
+2. **PackageInstaller failure translation** (`runtime/AndroidAppInstallReceiver.kt`) — `INSTALL_FAILED_UPDATE_INCOMPATIBLE` → "uninstall once, reinstall"; `INSTALL_FAILED_VERSION_DOWNGRADE` → "a newer version is already installed"; raw status message otherwise.
+
+### Verification
+- Release/manifest/bundle reachability re-verified over HTTPS (see above). Code changes are string-only; no unit test covers the receiver, and the Android SDK container env was reset this session (rebuild required for a compile run) — no build/package/signing was possible without `MH_UPLOAD_*` secrets + keystore, which are also gone from this environment.
+
+### Pending items
+- **Push these two commits + ship v1.0.12 (versionCode 13)** once a GitHub token is available. Requires the standing release procedure: bump version, changelog `13.txt`, build online flavor with `MH_UPLOAD_*`, `apksigner verify --print-certs` must equal `d07ba804...ccfe`, update `mobile-harness-update.json`, GitHub Release.
+- **Never change the signing key again.** The v1.0.6 "new release signing key" and the v1.0.8 key switch each orphaned every older install silently. Current key (private gist `4b76689e972c864d8a6e187503b174c4`) must stay forever.
+- Optional future kindness: a one-time "export API key to a shareable file" action in Settings would soften the mandatory uninstall for stranded users (feature work — not started).
+- Environment for next session: JDK/Android SDK/NDK containers were wiped again; bootstrap per the v1.0.10 entry notes before building.
+
+### Notes for next agent
+- The user-facing fix for anyone on v1.0.4–v1.0.7 is **uninstall once → install v1.0.11 fresh** (no code can change Android's key check). Users on v1.0.8+ update normally over the top.
+- Cert-fingerprint script is self-contained (`python3 apk_v2_cert.py <apk...>`) — reuse it to verify any future APK before publishing.
+
+---
+
 ## 2026-10-08 — v1.0.11 full-scan fixes (agent-screen install flow, Antigravity v1.0.10 parity, UTF-8/native/installer hardening, ferdausfs URL migration)
 
 - **Agent/tool**: Claude Code agent session (Super Z), direct repo work on `ferdausfs/Mobile-Harness` branch `main`

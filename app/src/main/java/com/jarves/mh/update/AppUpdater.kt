@@ -126,7 +126,12 @@ class AppUpdater(
         val installedSignatures = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) installed.signingInfo?.apkContentsSigners else installed.signatures
         check(!archiveSignatures.isNullOrEmpty() && !installedSignatures.isNullOrEmpty() &&
             archiveSignatures.map { sha256(it.toByteArray()) }.toSet() == installedSignatures.map { sha256(it.toByteArray()) }.toSet()
-        ) { "Update is not signed with the installed app's signing key" }
+        ) {
+            // Releases before v1.0.8 were signed with several different keys, so
+            // users of those builds can never update in place. Say exactly what
+            // to do instead of leaving a dead-end error.
+            "This update uses a new signing key and cannot install over the version on this phone. Copy your API key somewhere safe, uninstall Mobile Harness once, then install the new APK from GitHub Releases. Your chats, workspaces and installed agents are removed by the uninstall."
+        }
     }
 
     private fun sha256(file: File): String = file.inputStream().use { input ->

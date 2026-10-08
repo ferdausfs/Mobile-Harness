@@ -19,7 +19,16 @@ class AndroidAppInstallReceiver : BroadcastReceiver() {
             return
         }
         if (status != PackageInstaller.STATUS_SUCCESS) {
-            val message = intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE) ?: "Installation failed"
+            val raw = intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE).orEmpty()
+            val message = when {
+                // Historic releases shipped several signing keys; users updating
+                // across that boundary hit INSTALL_FAILED_UPDATE_INCOMPATIBLE.
+                raw.contains("INSTALL_FAILED_UPDATE_INCOMPATIBLE") ->
+                    "Mobile Harness was installed with a different signing key. Uninstall it once, then install this APK again."
+                raw.contains("INSTALL_FAILED_VERSION_DOWNGRADE") ->
+                    "A newer version of Mobile Harness is already installed on this phone."
+                else -> raw.ifEmpty { "Installation failed" }
+            }
             Toast.makeText(context, message, Toast.LENGTH_LONG).show()
             return
         }

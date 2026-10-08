@@ -1,0 +1,5 @@
+OpenRouter keys finally validate: the connection test was calling OpenRouter's Anthropic-style endpoint without the mandatory version header and never tried OpenRouter's OpenAI endpoint, so a perfectly good key looked rejected while the same key worked through Custom API. The test now speaks both wire formats, remembers which one answered, and both coding agents use the proven one from then on. Your OpenRouter routing order still applies on either format.
+
+Ollama Cloud got the same treatment: connection checks now cover the endpoint variant the app actually uses at run time, a rejected key explains where Ollama Cloud keys come from (ollama.com/keys - a local Ollama install has no key), and reasoning models like gpt-oss can no longer break the session by returning a message with no content.
+
+Nothing else changed. Same signing key - installs directly over v1.0.12 with one tap.

@@ -4,6 +4,39 @@ Newest entries prepended. Never delete entries.
 
 ---
 
+---
+
+## 2026-10-08 — v1.0.13 release: OpenRouter + Ollama Cloud provider fixes (dual-wire validation/runtime, reasoning-model hardening)
+
+- **Agent/tool**: Claude Code agent session (Super Z), direct repo work on `ferdausfs/Mobile-Harness` branch `main`
+- **Feature/trigger**: User report after v1.0.12: OpenRouter key rejected on the OpenRouter provider but the same key works via Custom API; Ollama Cloud "not supported anywhere".
+
+### Root causes found
+1. **OpenRouter validation sent no `anthropic-version` header** (OPENROUTER was excluded from the header block in `ProviderApiClient.request`) and its `validationCandidates` had **no fallback** (`OPENROUTER -> Unit`). A valid key therefore died on the `/api/v1/messages` shim while Custom auto-detected the OpenAI wire and succeeded — the exact reported symptom.
+2. The runtime could not honor a detected wire for OpenRouter: `providerProtocolForAgent` ignored `dshApi` for LLM_ROUTER, `DshRouteMapper` hardcoded `anthropic-messages`, and detection persistence was CUSTOM-only.
+3. The OpenRouter routing gateway would 404 an OpenAI-wire dsh route routed through it (only `/messages` is proxied).
+4. Ollama Cloud: validation lacked the `/api`→`/v1` rescue the runtime gateway has; 401s gave no Ollama-specific guidance; translated replies from reasoning models (gpt-oss:120b returns `content: null` when the budget is spent reasoning) produced an **empty Anthropic content array**, which Claude Code rejects.
+5. Verified healthy upstream: `~anthropic/claude-sonnet-latest` IS in OpenRouter's public catalog (the `~` alias family is real); `ollama.com/v1/models` answers anonymously and `gpt-oss:120b` exists; `/v1/chat/completions` 401s with a bad key (Bearer). Note: OpenRouter's 401 wording is "Missing Authentication header" even for present-but-invalid keys — do not treat that message as a missing-header bug.
+
+### What changed (commit `081e167`, one review set)
+- `ProviderApiClient`: anthropic-version for the OPENROUTER protocol (Bearer only, no x-api-key, mirroring the routing gateway); OPENROUTER validation falls back to OpenAI chat candidates; Ollama-style `/api` bases get a `/v1` rescue candidate on both OpenAI branches; Ollama 401 hint (ollama.com/keys); OPENROUTER model discovery tolerates a versioned base.
+- `Models.kt` `providerProtocolForAgent`: LLM_ROUTER honors a saved `dshApi` detection (openai-completions → OPENAI_CHAT, openai-responses → OPENAI_RESPONSES, else OPENROUTER).
+- `MainViewModel`: detection persistence (remember/apply) extended to LLM_ROUTER.
+- `ClaudeRuntimeBridge`: routing gateway only starts when the effective protocol is OPENROUTER (prevents an unused loopback listener shadowing the translation gateway).
+- `DshRuntimeBridge`: routing-gateway URL swap only for `anthropic-messages` routes; LLM_ROUTER route honors `dshApi`.
+- `LocalFormatGateway`: OpenRouter routing order injected into upstream OpenAI/Responses bodies; empty translated content falls back to the model's `reasoning`/`thinking` text.
+- Tests: +4 (`ProviderUniversalCompatTest` x3, `DshBridgeTest` x1) → **122 tests, 0 failures, 0 errors**.
+
+### Verification
+- APK `mobile-harness-online-v1.0.13.apk` 87,637,363 bytes, sha256 `85c896e424a064172fa51da20ccf9f8a049820cf49b080cf1b28330f5eb0d4eb` (re-downloaded from the release URL, byte-identical), v2 cert `d07ba804…ccfe` = the v1.0.8+ key (in-place update for v1.0.12 users).
+- Release https://github.com/ferdausfs/Mobile-Harness/releases/tag/v1.0.13 (ID 406628924) with APK + manifest; `releases/latest` → v1.0.13, manifest serves versionCode 14.
+- certcheck parser script rewritten (the saved copy had a stale u32/u64 bug and printed nothing): `/home/z/my-project/scripts/certcheck/apk_v2_cert.py`.
+
+### Pending / notes for next agent
+- On-device end-to-end with REAL OpenRouter/Ollama keys is not verifiable here. If Ollama Cloud still fails after v1.0.13, the on-screen message now shows the provider's actual error — ask the user for that text before guessing further.
+- First validation after this update must succeed once for the detected wire to be saved; until then a stale profile keeps its old base/dshApi (defaults unchanged, backward compatible).
+
+
 ## 2026-10-08 — v1.0.12 release: signing-key migration guidance shipped (uninstall-once path made explicit; same key forever)
 
 - **Agent/tool**: Claude Code agent session (Super Z), direct repo work on `ferdausfs/Mobile-Harness` branch `main`

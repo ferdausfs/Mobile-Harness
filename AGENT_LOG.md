@@ -4,6 +4,32 @@ Newest entries prepended. Never delete entries.
 
 ---
 
+## 2026-10-08 — v1.0.12 release: signing-key migration guidance shipped (uninstall-once path made explicit; same key forever)
+
+- **Agent/tool**: Claude Code agent session (Super Z), direct repo work on `ferdausfs/Mobile-Harness` branch `main`
+- **Feature/trigger**: Follow-up to the install/update failure diagnosis (previous entry). User demanded a permanent solution, provided a fresh GitHub token. Push the pending fixes, ship them as v1.0.12 (versionCode 13), lock in the signing-key commitment.
+
+### What changed (one commit per concept)
+1. **`f3fc15d`** — Updater error messages (AppUpdater.kt, AndroidAppInstallReceiver.kt): signature mismatch now spells out "back up API key → uninstall once → install new APK"; PackageInstaller failures translate `INSTALL_FAILED_UPDATE_INCOMPATIBLE` / `INSTALL_FAILED_VERSION_DOWNGRADE` into plain instructions.
+2. **`b605bda`** — Version bump 1.0.12 (versionCode 13) + fastlane changelog 13.txt.
+3. **`7775230`** — gradle.properties build-JVM tuning: Xmx 2400m + SerialGC + `kotlin.compiler.execution.strategy=in-process`. On the 4 GB/4 GB-swapless container the previous settings OOM-killed the daemon during mergeDex; with these, `:app:assembleOnlineRelease` completes. Swap could not be enabled (container denies swapon) and disk is 9.9 GB — keep tuning lean.
+4. **`42a7e3b`** — mobile-harness-update.json → versionCode 13.
+
+### Verification
+- Unit tests: `./gradlew testOnlineDebugUnitTest` → **118 tests, 0 failures, 0 errors**.
+- APK: `mobile-harness-online-v1.0.12.apk`, 87,636,055 bytes, sha256 `e84d2ac7c98177b8391b9719d208e4d371af3bec0c8d3df090ca11c1b2aefe5d` — re-downloaded from the release URL and re-verified byte-identical.
+- **Signature cert SHA-256 `d07ba804cfa95dd39083002628b65487d7ae99acab12cdfa61c5f42bca7dccfe` — identical to v1.0.8–v1.0.11.** Never change this key; users on v1.0.8+ update in place forever.
+- Release: https://github.com/ferdausfs/Mobile-Harness/releases/tag/v1.0.12 (ID 406533197), assets: APK + mobile-harness-update.json. `releases/latest` → v1.0.12; `releases/latest/download/mobile-harness-update.json` serves versionCode 13.
+- Runtime bundle `pocketdev-agy-arm64-2026.09.1.tar.zst` re-downloaded from the ferdausfs runtime release, sha256 `a659ab91…d78` matches manifest.json.
+
+### Notes for next agent
+- The one-time uninstall is unavoidable for v1.0.4–v1.0.7 phones (Android key check); everyone else updates in place. Release notes include Bangla instructions.
+- Build env bootstrap used this session: JDK 21 at `/home/z/jdk` (Temurin), SDK at `/home/z/android-sdk` (platform-36, build-tools 34.0.0, NDK 26.1.10909125), submodules initialized, agy bundle in `dist/runtime-bundles/`. Bootstrap script: `/home/z/my-project/scripts/mh-bootstrap.sh` (needs /tmp cleanup patience; sdkmanager may die silently — rerun the missing pieces).
+- Disk is tight (9.9 GB total): clean `/tmp`, old APKs in scripts/certcheck, and app/build before building.
+- `apksigner` binary was absent from build-tools 34.0.0 install; cert verification used the self-contained python parser (`scripts/certcheck/apk_v2_cert.py`) — equivalent output to `apksigner verify --print-certs`.
+
+---
+
 ## 2026-10-08 — Install/update failure diagnosis (root cause: 4 different signing keys across v1.0.4–v1.0.8) + updater error-message fixes (LOCAL ONLY, not pushed)
 
 - **Agent/tool**: Claude Code agent session (Super Z), direct repo work on `ferdausfs/Mobile-Harness` branch `main`

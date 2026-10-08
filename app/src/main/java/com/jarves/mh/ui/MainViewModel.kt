@@ -1917,14 +1917,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun rememberDetectedCustomApi(profile: ProviderProfile, result: ConnectionValidation) {
-        if (result !is ConnectionValidation.Success || profile.kind != ProviderKind.CUSTOM) return
+        if (result !is ConnectionValidation.Success) return
+        if (profile.kind != ProviderKind.CUSTOM && profile.kind != ProviderKind.LLM_ROUTER) return
         val detected = result.detectedProtocol ?: return
         detectedCustomApi = (result.detectedBaseUrl ?: profile.baseUrl) to customApiName(detected)
     }
 
     /** Persists a detected wire format onto the saved CUSTOM profile after a successful test. */
     private fun applyDetectedCustomApi(profile: ProviderProfile, result: ConnectionValidation) {
-        if (result !is ConnectionValidation.Success || profile.kind != ProviderKind.CUSTOM) return
+        if (result !is ConnectionValidation.Success) return
+        if (profile.kind != ProviderKind.CUSTOM && profile.kind != ProviderKind.LLM_ROUTER) return
         val detected = result.detectedProtocol ?: return
         val api = customApiName(detected)
         val baseUrl = result.detectedBaseUrl ?: profile.baseUrl

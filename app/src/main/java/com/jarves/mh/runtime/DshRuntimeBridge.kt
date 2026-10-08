@@ -126,7 +126,10 @@ class DshRuntimeBridge(
             openRouterGateway = if (
                 provider.kind == ProviderKind.LLM_ROUTER && provider.openRouterProviders.isNotEmpty()
             ) OpenRouterRoutingGateway(provider, secret).start() else null
-            val route = if (openRouterGateway != null && baseRoute.custom != null) {
+            // The routing gateway only speaks the Anthropic Messages wire; a dsh
+            // route on the OpenAI wire must go straight to the provider instead
+            // of hitting the gateway's 404 for /chat/completions.
+            val route = if (openRouterGateway != null && baseRoute.custom != null && baseRoute.custom.api == "anthropic-messages") {
                 baseRoute.copy(custom = baseRoute.custom.copy(baseUrl = openRouterGateway!!.url))
             } else {
                 baseRoute
@@ -757,7 +760,9 @@ internal object DshRouteMapper {
                 name = "mh-openrouter",
                 keyEnv = DshRuntimeBridge.FALLBACK_KEY_ENV,
                 defaultModel = model,
-                custom = DshCustomRoute("anthropic-messages", profile.resolvedBaseUrl),
+                // Honors a validated wire detection: OpenRouter serves both the
+                // Anthropic Messages shim and the OpenAI chat endpoint.
+                custom = DshCustomRoute(profile.dshApi.ifBlank { "anthropic-messages" }, profile.resolvedBaseUrl),
             )
             ProviderKind.KIMI -> DshRoute(
                 name = "mh-kimi",

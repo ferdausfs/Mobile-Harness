@@ -116,8 +116,12 @@ class ProviderApiClient {
                 )
                 response.code == 401 || response.code == 403 -> {
                     sawAuthFailure = true
+                    val host = runCatching { URL(baseUrl).host }.getOrDefault("")
+                    val hint = if (host.equals("ollama.com", ignoreCase = true)) {
+                        " Ollama Cloud keys come from ollama.com/keys - a local Ollama install has no key."
+                    } else ""
                     bestFailure = ConnectionValidation.Failure(
-                        "Check this API key or select another saved key.",
+                        "Check this API key or select another saved key.$hint",
                         providerErrorMessage(response.body),
                         "Rejected",
                     )
@@ -183,6 +187,8 @@ class ProviderApiClient {
         when (protocol) {
             ProviderProtocol.OPENAI_CHAT, ProviderProtocol.OPENAI_RESPONSES -> {
                 if (!base.endsWith("/v1")) add(EndpointCandidate("$base/v1/${if (protocol == ProviderProtocol.OPENAI_CHAT) "chat/completions" else "responses"}", protocol, "$base/v1"))
+                // Ollama-style native /api bases expose OpenAI compatibility on /v1.
+                if (base.endsWith("/api")) add(EndpointCandidate("${base.removeSuffix("/api")}/v1/${if (protocol == ProviderProtocol.OPENAI_CHAT) "chat/completions" else "responses"}", protocol, "${base.removeSuffix("/api")}/v1"))
                 // A chosen OpenAI format that 404s may actually be an Anthropic-style gateway.
                 add(EndpointCandidate(anthropicMessagesEndpoint(base), ProviderProtocol.ANTHROPIC_GATEWAY, base))
             }
@@ -190,13 +196,20 @@ class ProviderApiClient {
                 // An Anthropic attempt that 404s may actually be an OpenAI-compatible gateway.
                 openAiChatCandidates(base).forEach { add(EndpointCandidate(it.url, ProviderProtocol.OPENAI_CHAT, it.baseUrl)) }
             }
-            ProviderProtocol.OPENROUTER -> Unit
+            ProviderProtocol.OPENROUTER -> {
+                // OpenRouter serves both wire formats. If its Anthropic Messages
+                // shim cannot answer, the mature OpenAI endpoint is still there.
+                openAiChatCandidates("$base/v1").forEach { add(EndpointCandidate(it.url, ProviderProtocol.OPENAI_CHAT, it.baseUrl)) }
+            }
         }
     }.distinctBy { it.url }
 
     private fun openAiChatCandidates(base: String): List<EndpointCandidate> = buildList {
         add(EndpointCandidate("$base/chat/completions", ProviderProtocol.OPENAI_CHAT, base))
         if (!base.endsWith("/v1")) add(EndpointCandidate("$base/v1/chat/completions", ProviderProtocol.OPENAI_CHAT, "$base/v1"))
+        // Ollama-style native /api bases expose OpenAI compatibility on /v1 of
+        // the same host (the runtime gateway applies the same rescue).
+        if (base.endsWith("/api")) add(EndpointCandidate("${base.removeSuffix("/api")}/v1/chat/completions", ProviderProtocol.OPENAI_CHAT, "${base.removeSuffix("/api")}/v1"))
     }
 
     private fun anthropicMessagesEndpoint(base: String): String =
@@ -233,9 +246,11 @@ class ProviderApiClient {
                     setRequestProperty("User-Agent", "opencode/1.18.20")
                     setRequestProperty("x-session-id", "session-${UUID.randomUUID()}")
                 }
-                if (apiKey.isNotBlank() && protocol != ProviderProtocol.OPENROUTER && protocol != ProviderProtocol.OPENAI_CHAT && protocol != ProviderProtocol.OPENAI_RESPONSES) {
-                    setRequestProperty("x-api-key", apiKey)
+                if (apiKey.isNotBlank() && protocol != ProviderProtocol.OPENAI_CHAT && protocol != ProviderProtocol.OPENAI_RESPONSES) {
+                    // Anthropic-Messages wire: the version header is mandatory;
+                    // OpenRouter authenticates via Bearer only, the rest accept x-api-key.
                     setRequestProperty("anthropic-version", "2023-06-01")
+                    if (protocol != ProviderProtocol.OPENROUTER) setRequestProperty("x-api-key", apiKey)
                 }
                 if (body != null) doOutput = true
             }
@@ -255,7 +270,11 @@ class ProviderApiClient {
         val base = baseUrl.trim().trimEnd('/')
         val withoutAnthropic = base.removeSuffix("/anthropic")
         val candidates = when (protocol) {
-            ProviderProtocol.OPENROUTER -> listOf("$base/v1/models")
+            ProviderProtocol.OPENROUTER -> buildList {
+                add("$base/v1/models")
+                // A saved detection can switch the base to .../api/v1; avoid a doubled segment.
+                if (base.endsWith("/v1")) add("$base/models")
+            }
             ProviderProtocol.OPENAI_CHAT, ProviderProtocol.OPENAI_RESPONSES -> buildList {
                 add("$base/models")
                 if (!base.endsWith("/v1")) add("$base/v1/models")

@@ -210,7 +210,8 @@ class ClaudeRuntimeBridge(
                     onUpstreamResult?.invoke(provider.kind, code, inputTokens, outputTokens)
                 }).start() else null
             openRouterGateway = if (
-                provider.kind == ProviderKind.LLM_ROUTER && provider.openRouterProviders.isNotEmpty()
+                provider.kind == ProviderKind.LLM_ROUTER && provider.openRouterProviders.isNotEmpty() &&
+                effectiveProtocol == com.jarves.mh.model.ProviderProtocol.OPENROUTER
             ) OpenRouterRoutingGateway(provider, secret).start() else null
             val launch = RuntimeLaunchConfigBuilder.build(
                 provider,

@@ -89,4 +89,34 @@ class ProviderUniversalCompatTest {
         val anthropicBody = JSONObject(api.validationBody(model = "m", protocol = ProviderProtocol.ANTHROPIC_GATEWAY))
         assertTrue(anthropicBody.getInt("max_tokens") > 2)
     }
+
+    @Test
+    fun openRouterValidationTriesOpenAiWireAfterMessages() {
+        val candidates = api.validationCandidates("https://openrouter.ai/api", ProviderProtocol.OPENROUTER)
+        assertEquals("https://openrouter.ai/api/v1/messages", candidates.first().url)
+        assertTrue(candidates.any { it.url == "https://openrouter.ai/api/v1/chat/completions" && it.protocol == ProviderProtocol.OPENAI_CHAT })
+    }
+
+    @Test
+    fun openRouterProfileHonorsDetectedOpenAiWire() {
+        val detected = ProviderProfile(
+            kind = ProviderKind.LLM_ROUTER,
+            baseUrl = "https://openrouter.ai/api/v1",
+            model = "test-model",
+            dshApi = "openai-completions",
+        )
+        assertEquals(ProviderProtocol.OPENAI_CHAT, providerProtocolForAgent(detected, AgentKind.CLAUDE_CODE))
+        assertEquals(ProviderProtocol.OPENAI_CHAT, providerProtocolForAgent(detected, AgentKind.DEEPSEEK_HARNESS))
+        // Default and the explicit Anthropic wire stay on OpenRouter's Messages shim.
+        val undetected = ProviderProfile(kind = ProviderKind.LLM_ROUTER, baseUrl = "https://openrouter.ai/api", model = "test-model", dshApi = "")
+        assertEquals(ProviderProtocol.OPENROUTER, providerProtocolForAgent(undetected, AgentKind.CLAUDE_CODE))
+        val anthropicWire = undetected.copy(dshApi = "anthropic-messages")
+        assertEquals(ProviderProtocol.OPENROUTER, providerProtocolForAgent(anthropicWire, AgentKind.DEEPSEEK_HARNESS))
+    }
+
+    @Test
+    fun ollamaNativeApiBaseGetsV1RescueCandidate() {
+        val candidates = api.validationCandidates("https://ollama.com/api", ProviderProtocol.OPENAI_CHAT)
+        assertTrue(candidates.any { it.url == "https://ollama.com/v1/chat/completions" && it.baseUrl == "https://ollama.com/v1" })
+    }
 }

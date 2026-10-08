@@ -177,6 +177,14 @@ internal class LocalFormatGateway(
                 .put("name", function.optString("name"))
                 .put("input", arguments))
         }
+        if (content.length() == 0) {
+            // Reasoning models (Ollama Cloud's gpt-oss, for example) can spend
+            // the whole budget reasoning and answer with a null content field;
+            // surface the reasoning text instead of an empty content array,
+            // which Anthropic Messages never produces and Claude Code rejects.
+            val reasoning = message.optString("reasoning").ifBlank { message.optString("thinking") }
+            content.put(JSONObject().put("type", "text").put("text", reasoning))
+        }
         val usage = source.optJSONObject("usage") ?: JSONObject()
         return JSONObject().put("id", source.optString("id").ifBlank { "msg_${UUID.randomUUID()}" })
             .put("type", "message").put("role", "assistant").put("model", model)
@@ -295,6 +303,7 @@ internal class LocalFormatGateway(
     }
 
     private fun callProvider(body: JSONObject): Pair<Int, String> {
+        val routed = applyOpenRouterRouting(body, profile)
         val base = profile.resolvedBaseUrl.trimEnd('/')
         val paths = buildList {
             add("/chat/completions")
@@ -303,7 +312,7 @@ internal class LocalFormatGateway(
         var lastCode = 0
         var lastBody = ""
         for (path in paths) {
-            val (code, text) = postJson(base + path, body)
+            val (code, text) = postJson(base + path, routed)
             if (code in 200..299) {
                 reportUsage(code, text)
                 return code to text
@@ -318,7 +327,7 @@ internal class LocalFormatGateway(
         // resolves; retry once against the same host with /v1.
         val fallbackBase = openAiCompatibleBase(base)
         if (fallbackBase != null) {
-            val (code, text) = postJson(fallbackBase + "/chat/completions", body)
+            val (code, text) = postJson(fallbackBase + "/chat/completions", routed)
             reportUsage(code, text)
             return code to text
         }
@@ -328,6 +337,7 @@ internal class LocalFormatGateway(
 
     /** OpenAI Responses API: a different envelope from Chat Completions. */
     private fun callResponsesProvider(body: JSONObject): Pair<Int, String> {
+        val routed = applyOpenRouterRouting(body, profile)
         val base = profile.resolvedBaseUrl.trimEnd('/')
         val paths = buildList {
             add("/responses")
@@ -336,7 +346,7 @@ internal class LocalFormatGateway(
         var lastCode = 0
         var lastBody = ""
         for (path in paths) {
-            val (code, text) = postJson(base + path, body)
+            val (code, text) = postJson(base + path, routed)
             if (code in 200..299) {
                 reportUsage(code, text)
                 return code to text
@@ -348,7 +358,7 @@ internal class LocalFormatGateway(
         // Same /api → /v1 rescue as [callProvider] for the Responses wire format.
         val fallbackBase = openAiCompatibleBase(base)
         if (fallbackBase != null) {
-            val (code, text) = postJson(fallbackBase + "/responses", body)
+            val (code, text) = postJson(fallbackBase + "/responses", routed)
             reportUsage(code, text)
             return code to text
         }

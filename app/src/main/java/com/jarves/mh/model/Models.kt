@@ -152,6 +152,16 @@ fun providerProtocolForAgent(profile: ProviderProfile, agent: AgentKind): Provid
             else -> ProviderProtocol.ANTHROPIC_GATEWAY
         }
     }
+    if (profile.kind == ProviderKind.LLM_ROUTER) {
+        // OpenRouter defaults to its Anthropic Messages wire. A saved detection
+        // (validation proved the OpenAI wire works) switches the runtime to the
+        // local translation gateway, exactly like a CUSTOM endpoint.
+        return when (profile.dshApi) {
+            "openai-completions" -> ProviderProtocol.OPENAI_CHAT
+            "openai-responses" -> ProviderProtocol.OPENAI_RESPONSES
+            else -> ProviderProtocol.OPENROUTER
+        }
+    }
     if (agent != AgentKind.DEEPSEEK_HARNESS || profile.kind !in DSH_PROTOCOL_PROVIDERS) {
         return profile.kind.protocol
     }

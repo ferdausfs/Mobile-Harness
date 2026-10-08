@@ -244,6 +244,16 @@ class DshRouteMapperTest {
         assertEquals("https://integrate.api.nvidia.com/v1", route.custom?.baseUrl)
     }
 
+    @Test
+    fun openRouterHonorsDetectedWireAndDefaultsToAnthropic() {
+        val detected = DshRouteMapper.forProfile(
+            ProviderProfile(ProviderKind.LLM_ROUTER, baseUrl = "https://openrouter.ai/api/v1", model = "m", dshApi = "openai-completions"),
+        )
+        assertEquals("openai-completions", detected.custom?.api)
+        val defaulted = DshRouteMapper.forProfile(ProviderProfile(ProviderKind.LLM_ROUTER, baseUrl = "https://openrouter.ai/api", model = "m", dshApi = ""))
+        assertEquals("anthropic-messages", defaulted.custom?.api)
+    }
+
     @Test(expected = IllegalArgumentException::class)
     fun claudeSubscriptionIsRejected() {
         DshRouteMapper.forProfile(ProviderProfile(ProviderKind.CLAUDE))

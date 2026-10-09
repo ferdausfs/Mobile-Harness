@@ -4,6 +4,64 @@ Newest entries prepended. Never delete entries.
 
 ---
 
+## 2026-10-09 — v1.0.16 release: Ollama Cloud native-first endpoint + key-check attribution (versionCode 17)
+
+- **Agent/tool**: Super Z agent session, direct repo work on `ferdausfs/Mobile-Harness` branch `main`
+- **Feature/trigger**: User report — *"Check this API key or select another saved key. Provider: Authentication Fails, Your api key: ****U3tk is invalid (request_id: 56908ba3-…)"* plus *"ekhono ollama cloud e url e default e https://ollama.com/v1 eta use kore ja kina local er jonno use hoy.. r cloud er jonno https://ollama.com/api/chat eta ja ami ekhon tader document theke deklam"* and *"api key thik thaklew add hoy na"*. All plans pre-approved by the user for this session.
+
+### Root cause (verified live)
+Probed the live endpoints with a bad bearer token to identify where the user's error came from:
+- `POST https://ollama.com/api/chat` → HTTP 401 `{"error":"Unauthorized"}` (native shape, plain string).
+- `POST https://ollama.com/v1/chat/completions` → HTTP 401 `{"error":{"message":"Unauthorized","type":"api_error",...}}` (OpenAI shape).
+- `POST https://api.deepseek.com/chat/completions` → HTTP 401 `{"error":{"message":"Authentication Fails, Your api key: ****6789 is invalid (request_id: <UUID>)","type":"authentication_error",...}}`.
+
+The user's pasted error text — "Authentication Fails, Your api key: ****U3tk is invalid (request_id: …)" — is **DeepSeek's 401 response format**, not Ollama's. Neither Ollama endpoint produces that string. The masked suffix and UUID request-id shape match DeepSeek exactly. Conclusion: the key ending in `U3tk` was checked against `api.deepseek.com` — i.e. the **DeepSeek provider card** was selected when "Check" ran, while the user believed they were validating their Ollama Cloud key. The app's failure message ("Check this API key or select another saved key.") named no endpoint, so a wrong-provider key paste read as "your key is invalid" with no clue that the provider selection, not the key, was wrong. The user separately (and correctly) observed that the Ollama Cloud provider card still defaulted to `https://ollama.com/v1` while Ollama's cloud documentation documents `https://ollama.com/api/chat` as the cloud endpoint.
+
+### What changed (one review set, commit `fe4a900`)
+1. **`Models.kt`** — `OLLAMA_CLOUD.defaultBaseUrl`: `https://ollama.com/v1` → `https://ollama.com/api` (the documented native cloud root). Because the kind is `fixedBaseUrl`, every saved OLLAMA_CLOUD profile resolves to the new root automatically through `resolvedBaseUrl`; no stored-drift migration is needed.
+2. **`ProviderApiClient.kt`** (validation + discovery):
+   - `validationCandidates()`: ollama.com hosts are now handled as their own branch with the **native `/api/chat` endpoint first**, then the OpenAI-compatible `/v1/chat/completions`, then the Anthropic `/v1/messages` shim — for every protocol, and for any base form (`https://ollama.com`, `.../api`, `.../v1`). The old per-protocol native-fallback candidates were folded into this branch. The native candidate reports `baseUrl = <root>/api` so a Custom API detection saves the native base.
+   - `modelEndpoints()`: ollama.com hosts return `["<root>/api/tags", "<root>/v1/models"]` — the public native catalog first.
+   - The 401/403 failure message now **names the endpoint that rejected the key**: `"<host> rejected this key. Check this API key or select another saved key."` (+ the existing ollama.com/keys hint when the host is ollama.com). A key pasted under the wrong provider card now self-explains.
+   - `ollamaRoot()` helper extracted; the now-unused `ollamaNativeChatEndpoint()` removed.
+3. **`LocalFormatGateway.kt`** (Claude Code runtime path):
+   - `callProvider()` routes ollama.com hosts to a new `callOllamaProvider()`: **native `/api/chat` first** (body gets `stream:false`; response translated to the OpenAI Chat Completions shape), then `/v1/chat/completions` as fallback. Error preference: a genuine auth/usage error beats a 404/405; the last real error is surfaced.
+   - `toOllamaNativeBody()` and `translateOllamaNativeToOpenAi()` moved from private methods to internal top-level functions (same behavior) so they are unit-testable, mirroring the `applyOpenRouterRouting` pattern.
+4. **`DshRuntimeBridge.kt`** (`DshRouteMapper`):
+   - OLLAMA_CLOUD route: base URL normalized through a new `ollamaOpenAiCompatibleUrl()` — any ollama.com base form resolves to `https://ollama.com/v1` for DSH's `openai-completions` wire (the native `/api` tree has no OpenAI-compatible paths). A stale saved profile storing the old `/v1` default and the new `/api` default both resolve correctly.
+   - CUSTOM routes on an OpenAI wire (`dshApi` `openai-*`) pointing at ollama.com get the same normalization; anthropic-wire CUSTOM bases pass through unchanged.
+5. **`MainViewModel.kt`** — `discoverModels()`, `validateProvider()`, and `pingApi()` now pass `profile.resolvedBaseUrl` instead of `profile.baseUrl`, so a fixed provider (Ollama Cloud) ignores any stored URL drift at every validation/discovery entry point, including the Settings screen and the status-card Test button.
+6. **Tests**:
+   - `ProviderApiClientTest.kt`: `ollamaCloudValidationTriesNativeApiChatFirst` (both `/v1` and `/api` saved forms → native first, `/v1` + Anthropic shim fallbacks), `ollamaCloudNativeBaseIsReportedForCustomDetection` (Custom profile on `https://ollama.com` → native candidate attributes the `/api` base), updated `ollamaCloudNativeApiTagsIsProbedDuringDiscovery`.
+   - `DshBridgeTest.kt`: `ollamaCloudRouteResolvesToOpenAiV1Tree` (OLLAMA_CLOUD + CUSTOM-on-openai-wire both resolve DSH's base to `https://ollama.com/v1`).
+   - `LocalFormatGatewayOllamaTest.kt` (new): native body forces `stream:false` without mutating the source; native envelope translates to OpenAI shape incl. usage tokens; non-native/unparseable bodies pass through untouched.
+7. **`app/build.gradle.kts`**: `versionCode 16` → `17`, `versionName "1.0.15"` → `"1.0.16"`.
+8. **`fastlane/metadata/android/en-US/changelogs/17.txt`** (new): store changelog in the established plain-English style.
+9. **`mobile-harness-update.json`**: `versionCode` 16 → 17, `versionName` 1.0.15 → 1.0.16, notes rewritten, `url` → v1.0.16 release asset, `sha256` → `4eb93cdd360e902ba1634039e07518dad2db20baaacc13b213b46095dfa267b3`, `sizeBytes` → 87,645,935.
+
+### What is intentionally NOT changed
+- The DSH runtime still talks to Ollama through the OpenAI-compatible `/v1` tree only; the DSH SDK cannot speak the native `/api/chat` wire. Both endpoints accept the same cloud keys (re-verified live this session: identical 401 behavior with a bad key), so this only matters for a hypothetical key that authenticates against `/api` but not `/v1` — unchanged limitation from v1.0.15, now documented with the explicit normalization.
+- F-03/F-04/F-05 remain out of scope (not approved in any session to date).
+- The F-Droid yml stays at its current pin; F-Droid's own process updates it.
+
+### Verification
+- Bootstrap from a wiped env: Temurin JDK 21.0.12.1 at `/home/z/jdk` (system java is JRE-only), SDK at `/home/z/android-sdk` (platform-36 r02, build-tools 35.0.0 + 36.0.0, platform-tools, cmake 3.22.1 — the cmake zip has NO wrapper dir, extract directly into `cmake/3.22.1/`), NDK 26.1.10909125 at `$SDK/ndk/26.1.10909125`, AGY bundle sha256 `a659ab91…d78` matches manifest.json, keystore re-fetched from private gist `4b76689e972c864d8a6e187503b174c4`.
+- `./gradlew :app:compileOnlineDebugKotlin` → BUILD SUCCESSFUL.
+- `./gradlew :app:testOnlineDebugUnitTest` → BUILD SUCCESSFUL. **130 tests, 0 failures, 0 ignored** (125 previous + 5 new/rewritten).
+- `./gradlew :app:assembleOnlineRelease` → **BUILD SUCCESSFUL in 4m 17s**.
+- APK: 87,645,935 bytes, sha256 `4eb93cdd360e902ba1634039e07518dad2db20baaacc13b213b46095dfa267b3`.
+- `aapt dump badging`: `versionCode='17' versionName='1.0.16'`. ✅
+- APK contains `assets/runtime/pocketdev-agy-arm64-2026.09.1.tar.zst` at 41,870,025 bytes (matches `manifest.json` `compressedBytes`). ✅
+- `apksigner verify --print-certs`: cert SHA-256 `d07ba804cfa95dd39083002628b65487d7ae99acab12cdfa61c5f42bca7dccfe` — identical to the v1.0.8–v1.0.15 line; in-place update path preserved. ✅
+- Tag `v1.0.16` pushed; release created with assets `mobile-harness-online-v1.0.16.apk` + `mobile-harness-update.json`; `releases/latest` → v1.0.16.
+
+### Notes for next agent
+- If a user reports "key invalid" again, the failure message now names the rejecting host — ask for that line first; it distinguishes wrong-provider-card (e.g. `api.deepseek.com rejected this key`) from a genuinely bad key on the right provider.
+- Ollama endpoint order is native-first everywhere the app itself makes requests; DSH remains `/v1`-only by SDK limitation.
+- Build env survives only this session; the bootstrap recipe above (direct zips, cmake has no wrapper dir, NDK under `$SDK/ndk/26.1.10909125`, keystore from the gist) reproduces it in ~10 minutes on a 4 GB box.
+
+---
+
 ## 2026-10-09 — v1.0.15 release: Ollama Cloud native /api/chat fallback (versionCode 16)
 
 - **Agent/tool**: Claude Code agent session (Super Z), direct repo work on `ferdausfs/Mobile-Harness` branch `main`

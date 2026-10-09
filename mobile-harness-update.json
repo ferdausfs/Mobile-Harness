@@ -1,12 +1,12 @@
 {
-  "versionCode": 15,
-  "versionName": "1.0.14",
-  "notes": "Privacy: Claude Code's launcher used to log your full prompt and conversation history plus every line of streaming output to Android's diagnostic log (logcat), which ADB and crash reports can read. Those logs are gone now - only operational messages remain, and only in debug builds. DeepSeek Harness got the same treatment; Antigravity never had this issue. Usage tracking: the live status card used to stay at zero for everything except Claude's OpenAI-format gateway. Direct Anthropic and OpenRouter routes plus the entire DeepSeek Harness agent now report real token counts, and the daily-request failover can actually fire when a tracked provider hits its limit. Antigravity's CLI does not expose per-request usage - the card now says 'Usage not tracked for this route' instead of pretending everything is at zero. Packaging: the Antigravity runtime bundle is now verified at build time; a future build without the embedded asset fails with the exact command to fetch it. Metadata: README download links and the F-Droid version pin now match the source. Same signing key - installs directly over v1.0.13 with one tap.",
+  "versionCode": 16,
+  "versionName": "1.0.15",
+  "notes": "Ollama Cloud finally connects: the connection test used to try only the OpenAI-style /v1/chat/completions endpoint and reject your key when that path answered 401, even though the same key works against Ollama Cloud's native /api/chat endpoint. The test now tries the native endpoint as a fallback, and the runtime gateway does the same on every prompt - translating the native response back to OpenAI shape so Claude Code keeps working without noticing which path actually answered. The misleading hint about a 'local Ollama install' when the Cloud key was rejected is gone - it now points to ollama.com/keys without implying the app is talking to a local server. Model discovery also probes Ollama's public /api/tags catalog when the /v1/models list comes back empty, so the model picker should never look blank again on a fresh Ollama Cloud account. Same signing key - installs directly over v1.0.14 with one tap.",
   "artifacts": {
     "online": {
-      "url": "https://github.com/ferdausfs/Mobile-Harness/releases/download/v1.0.14/mobile-harness-online-v1.0.14.apk",
-      "sha256": "7bc7d991864f44455620b9ae36ae4549c9f632372652c44b957e6b055506f52d",
-      "sizeBytes": 87642867
+      "url": "https://github.com/ferdausfs/Mobile-Harness/releases/download/v1.0.15/mobile-harness-online-v1.0.15.apk",
+      "sha256": "0baa5b1530de2e293d9e27e502bddbf4298bea593acecb7acd86e31aa1860adb",
+      "sizeBytes": 87644551
     }
   }
 }

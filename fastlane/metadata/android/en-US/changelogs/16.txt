@@ -1,0 +1,7 @@
+Ollama Cloud finally connects: the connection test used to try only the OpenAI-style /v1/chat/completions endpoint and reject your key when that path answered 401, even though the same key works against Ollama Cloud's native /api/chat endpoint. The test now tries the native endpoint as a fallback, and the runtime gateway (LocalFormatGateway) does the same on every prompt - translating the native response back to OpenAI shape so Claude Code keeps working without noticing which path actually answered.
+
+The misleading hint that mentioned a "local Ollama install" when the Cloud key was rejected is gone - it now points to ollama.com/keys without implying the app is talking to a local server.
+
+Model discovery also probes Ollama's public /api/tags catalog when the /v1/models list comes back empty, so the model picker should never look blank again on a fresh Ollama Cloud account.
+
+Same signing key - installs directly over v1.0.14 with one tap.

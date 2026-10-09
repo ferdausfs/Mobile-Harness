@@ -328,12 +328,77 @@ internal class LocalFormatGateway(
         val fallbackBase = openAiCompatibleBase(base)
         if (fallbackBase != null) {
             val (code, text) = postJson(fallbackBase + "/chat/completions", routed)
-            reportUsage(code, text)
-            return code to text
+            if (code in 200..299) {
+                reportUsage(code, text)
+                return code to text
+            }
+            lastCode = code
+            lastBody = text
+        }
+        // Ollama Cloud's native /api/chat endpoint. Some account-scoped keys
+        // reach this endpoint when the OpenAI shim at /v1 is gated or returns
+        // auth errors. The native endpoint accepts the same body shape (model,
+        // messages, max_tokens ignored) but returns its own envelope which we
+        // translate back to the OpenAI Chat Completions shape so the upstream
+        // parser does not need to know which path actually served the request.
+        if (isOllamaHost(base)) {
+            val nativeBase = base.removeSuffix("/v1").removeSuffix("/api")
+            val nativeBody = toOllamaNativeBody(routed)
+            val (code, text) = postJson("$nativeBase/api/chat", nativeBody)
+            if (code in 200..299) {
+                val translated = translateOllamaNativeToOpenAi(text)
+                reportUsage(code, translated)
+                return code to translated
+            }
+            // Keep the OpenAI-shaped error so the parser surfaces a familiar message.
+            if (code > 0) {
+                lastCode = code
+                lastBody = text
+            }
         }
         reportUsage(lastCode, lastBody)
         return lastCode to lastBody
     }
+
+    private fun isOllamaHost(baseUrl: String): Boolean = runCatching {
+        java.net.URI(baseUrl).host.orEmpty().equals("ollama.com", ignoreCase = true)
+    }.getOrDefault(false)
+
+    /**
+     * Ollama's native /api/chat endpoint accepts a body very close to OpenAI's
+     * chat-completions shape; we only need to add `stream: false` so it returns
+     * a single JSON envelope instead of newline-delimited chunks.
+     */
+    private fun toOllamaNativeBody(openAiBody: JSONObject): JSONObject {
+        val native = JSONObject(openAiBody.toString())
+        native.put("stream", false)
+        return native
+    }
+
+    /**
+     * Convert an Ollama native /api/chat response envelope to the OpenAI Chat
+     * Completions shape so the upstream stream parser and the usage reporter
+     * do not need a separate code path.
+     *
+     * Ollama native:  {"message":{"role":"assistant","content":"..."}, "done":true, "eval_count":N, ...}
+     * OpenAI target:   {"choices":[{"message":{"role":"assistant","content":"..."}}], "usage":{...}}
+     */
+    private fun translateOllamaNativeToOpenAi(body: String): String = runCatching {
+        val root = JSONObject(body)
+        val message = root.optJSONObject("message")
+        if (message == null) return@runCatching body
+        val choices = JSONArray().put(JSONObject().put("index", 0).put("message", message).put("finish_reason", "stop"))
+        val usage = JSONObject().apply {
+            val prompt = root.optInt("prompt_eval_count", 0)
+            val completion = root.optInt("eval_count", 0)
+            if (prompt > 0) put("prompt_tokens", prompt)
+            if (completion > 0) put("completion_tokens", completion)
+            if (prompt > 0 || completion > 0) put("total_tokens", prompt + completion)
+        }
+        JSONObject().put("choices", choices).apply {
+            if (usage.length() > 0) put("usage", usage)
+        }.toString()
+    }.getOrDefault(body)
 
     /** OpenAI Responses API: a different envelope from Chat Completions. */
     private fun callResponsesProvider(body: JSONObject): Pair<Int, String> {

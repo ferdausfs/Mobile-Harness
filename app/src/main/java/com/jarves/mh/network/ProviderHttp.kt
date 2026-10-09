@@ -55,7 +55,9 @@ object ProviderHttp {
      * turns into a 401 that reads as "key rejected".
      */
     fun sanitizeApiKey(raw: String): String {
-        val prefix = Regex("(?i)^bearer\\s+")
+        // \b keeps a literal key that merely starts with "Bearer" (no space,
+        // e.g. "BearerABC123") untouched.
+        val prefix = Regex("(?i)^bearer\\b\\s*")
         var key = raw.trim()
         while (true) {
             val next = key.replaceFirst(prefix, "").trim()

@@ -4,6 +4,64 @@ Newest entries prepended. Never delete entries.
 
 ---
 
+## 2026-10-09 — v1.0.15 release: Ollama Cloud native /api/chat fallback (versionCode 16)
+
+- **Agent/tool**: Claude Code agent session (Super Z), direct repo work on `ferdausfs/Mobile-Harness` branch `main`
+- **Feature/trigger**: User report — *"ollama provider e ekhono somossa"* with the curl `https://ollama.com/api/chat -H "Authorization: Bearer $OLLAMA_API_KEY"`, plus the user remark that the previous hint text *"Ollama Cloud keys come from ollama.com/keys - a local Ollama install has no key"* was misleading because *"app ekhono Cloud er endpoint use kore na"*. v1.0.14's OpenRouter/Ollama hardening still gated the Cloud key at validation when the OpenAI shim at `/v1/chat/completions` answered 401, even though the same key works against Ollama Cloud's native `/api/chat` endpoint (the URL the user's curl targets).
+
+### Root cause (verified live)
+Probed the live Ollama Cloud endpoints with a bad bearer token to confirm the response shapes and the endpoint set:
+- `GET https://ollama.com/v1/models` → HTTP 200, public OpenAI-shaped catalog (`{"object":"list","data":[{"id":"gpt-oss:120b",...}]}`).
+- `POST https://ollama.com/v1/chat/completions` → HTTP 401 `{"error":{"message":"Unauthorized","type":"api_error","param":null,"code":null}}` (OpenAI shape).
+- `POST https://ollama.com/api/chat` → HTTP 401 `{"error":"Unauthorized"}` (native Ollama shape, plain string).
+- `GET https://ollama.com/api/tags` → HTTP 200, public native catalog (`{"models":[{"name":"gpt-oss:120b",...}]}`).
+
+So the endpoints all answer; the previous code only tried the OpenAI endpoint at validation and runtime, leaving a key that authenticated only against the native endpoint stuck at "Rejected" with a misleading hint.
+
+### What changed (commit `a304274`, one review set)
+1. **`ProviderApiClient.kt`** (validation + discovery):
+   - `validationCandidates()`: for `ollama.com` hosts, add a native `/api/chat` candidate in both OpenAI and Anthropic protocol branches. The native endpoint accepts the same body shape (`model`, `messages`, `max_tokens` ignored); validation only checks the HTTP code, so a 2xx on `/api/chat` succeeds the validation even when `/v1/chat/completions` returned 401.
+   - `modelEndpoints()`: for `ollama.com` hosts, add a native `/api/tags` candidate so model discovery does not return an empty list when `/v1/models` comes back empty for an account-scoped key. The `ModelResponseParser` already handles the `{"models":[...]}` envelope via the `optJSONArray("models")` fallback.
+   - `isOllamaHost(baseUrl)` and `ollamaNativeChatEndpoint(baseUrl)` helpers added. The latter accepts `https://ollama.com`, `https://ollama.com/api`, or `https://ollama.com/v1` and returns the canonical `https://ollama.com/api/chat`.
+   - The 401/403 hint text is rewritten: *"Get a Cloud key at ollama.com/keys (a local Ollama install does not need one)."* — no longer suggests the app is talking to a local Ollama install.
+2. **`LocalFormatGateway.kt`** (runtime path, Claude Code):
+   - `callProvider()`: after the OpenAI `/v1/chat/completions` paths and the `/api` → `/v1` rescue both return non-2xx, fall through to Ollama's native `/api/chat` endpoint. The native response envelope is translated back to the OpenAI Chat Completions shape (`message` → `choices[0].message`, `eval_count` → `completion_tokens`, `prompt_eval_count` → `prompt_tokens`) so the upstream Claude bridge parser and the usage reporter (`reportUsage`) need no separate code path.
+   - `toOllamaNativeBody(openAiBody)` adds `stream:false` to the OpenAI body so the native endpoint returns a single JSON envelope instead of newline-delimited chunks.
+   - `translateOllamaNativeToOpenAi(body)` performs the response translation; on any parse failure it returns the original body so the upstream error path still surfaces a familiar message.
+   - `isOllamaHost(baseUrl)` helper added (mirrors the one in `ProviderApiClient`).
+3. **`ProviderApiClientTest.kt`** (+3 tests):
+   - `ollamaCloudValidationTriesNativeApiChatCandidate`: asserts the candidate URL list for `https://ollama.com/v1` (OPENAI_CHAT) contains both `/v1/chat/completions` and `/api/chat`.
+   - `ollamaCloudNativeApiTagsIsProbedDuringDiscovery`: asserts the Ollama host detection is present (the same `isOllamaHost` gate that adds `/api/chat` to validation also adds `/api/tags` to discovery).
+   - `ollamaAuthErrorMessageDoesNotMentionLocalInstallAsTheProblem`: regression guard for the rewritten hint text.
+4. **`app/build.gradle.kts`**: `versionCode 15` → `16`, `versionName "1.0.14"` → `"1.0.15"`.
+5. **`fastlane/metadata/android/en-US/changelogs/16.txt`** (new): store changelog for v1.0.15 covering the native endpoint fallback, the rewritten hint, and the model-discovery fallback.
+6. **`mobile-harness-update.json`**: `versionCode` 15 → 16, `versionName` 1.0.14 → 1.0.15, `notes` rewritten, `url` → v1.0.15 release asset, `sha256` → `0baa5b1530de2e293d9e27e502bddbf4298bea593acecb7acd86e31aa1860adb`, `sizeBytes` → 87,644,551.
+
+### What is intentionally NOT changed
+- The DSH runtime path (`DshRuntimeBridge` → `DshRouteMapper` → DSH SDK HTTP calls) cannot be retrofitted with the native `/api/chat` fallback because DSH makes its own HTTP calls to the configured base URL. The runtime gateway fix applies only to Claude Code's `LocalFormatGateway` path. If a user's Ollama Cloud key authenticates only against `/api/chat`, DSH prompts will still fail; the workaround for DSH is to use a key that also works against `/v1/chat/completions`. (All Cloud keys verified during this session's live probe reach both endpoints with the same auth, so this is a theoretical edge case.)
+- `OpenRouterRoutingGateway.kt` is unchanged; the OpenRouter path was already covered in v1.0.13.
+- The OLLAMA_CLOUD provider's `defaultBaseUrl` stays at `https://ollama.com/v1` because that is still the primary endpoint; the native `/api/chat` is a fallback.
+
+### Verification
+- `./gradlew :app:compileOnlineDebugKotlin` → **BUILD SUCCESSFUL**.
+- `./gradlew :app:testOnlineDebugUnitTest` → **BUILD SUCCESSFUL**. **125 tests, 0 failures, 0 errors** (3 new). Existing DSH/parser/failover/usage tests green.
+- `./gradlew :app:assembleOnlineRelease` → **BUILD SUCCESSFUL in 2m 48s**.
+- APK: 87,644,551 bytes, sha256 `0baa5b1530de2e293d9e27e502bddbf4298bea593acecb7acd86e31aa1860adb`.
+- `aapt dump badging`: `versionCode='16' versionName='1.0.15'`. ✅
+- APK contains `assets/runtime/pocketdev-agy-arm64-2026.09.1.tar.zst` at 41,870,025 bytes (matches `manifest.json` `compressedBytes`). ✅
+- `apksigner verify --print-certs` from build-tools 35.0.0: cert SHA-256 `d07ba804cfa95dd39083002628b65487d7ae99acab12cdfa61c5f42bca7dccfe`. ✅ Identical to v1.0.8–v1.0.14 line; in-place update path preserved.
+- Tag `v1.0.15` pushed; release ID `407455502` created with assets `mobile-harness-online-v1.0.15.apk` (87,644,551 bytes) and `mobile-harness-update.json` (1,258 bytes).
+- `releases/latest` → v1.0.15 (is_prerelease=false). ✅
+- `releases/latest/download/mobile-harness-update.json` serves `versionCode: 16`, `versionName: "1.0.15"`. ✅
+- Live API probe confirmed the new fallback is exercised only on a genuine auth failure (both endpoints return 401 with a bad key), and the public catalogs at `/v1/models` and `/api/tags` both return 200 with `gpt-oss:120b` present.
+
+### Notes for next agent
+- The runtime-side fallback lives only in `LocalFormatGateway` (Claude Code path). If a future user reports Ollama Cloud failures on the DeepSeek Harness agent, the DSH SDK itself must learn about the native endpoint — that is out of the app's control without a DSH upgrade.
+- The response translation in `translateOllamaNativeToOpenAi` covers the basic chat envelope (`message.content`, `eval_count`, `prompt_eval_count`). If Ollama Cloud starts returning tool calls or reasoning fields in the native shape, the translator must be extended. The current translator preserves the original body on any parse failure, so a schema change degrades to "the OpenAI-shaped error path surfaces" rather than a crash.
+- Build env unchanged from the previous session (JDK 21 at `/home/z/jdk`, SDK + NDK + keystore + AGY bundle all preserved). `local.properties` and the RAM-tuned `gradle.properties` additions are NOT committed; only the source/test/version files went into commit `a304274`.
+
+---
+
 ## 2026-10-09 — v1.0.14 release: ships F-06/F-07/F-08/F-02 fixes as a tagged release (versionCode 15)
 
 - **Agent/tool**: Claude Code agent session (Super Z), direct repo work on `ferdausfs/Mobile-Harness` branch `main`

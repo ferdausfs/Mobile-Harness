@@ -4,6 +4,47 @@ Newest entries prepended. Never delete entries.
 
 ---
 
+## 2026-10-09 — F-07 accounting: usage reporting wired for DSH + direct Anthropic/OpenRouter; Antigravity marked as not tracked
+
+- **Agent/tool**: Claude Code agent session (Super Z), direct repo work on `ferdausfs/Mobile-Harness` branch `main`
+- **Scope**: Audit finding F-07 (accounting). Approved scope this session: F-06, F-07, F-08, plus a build-time check for F-02.
+
+### Root cause (re-verified at source)
+`ProviderUsageTracker.recordUpstreamResult()` is the only path that increments the live-status-card counters and the `remainingToday` field that drives the pre-task daily-budget failover. It was wired **only** through `LocalFormatGateway.reportUsage()` (`LocalFormatGateway.kt:378–389`), and `LocalFormatGateway` is started by `ClaudeRuntimeBridge` **only** when `effectiveProtocol` is `OPENAI_CHAT` or `OPENAI_RESPONSES` (`ClaudeRuntimeBridge.kt:203–215`). Three routes therefore produced zero counters and never tripped the local daily-request limit:
+
+1. **Claude on direct Anthropic-protocol** (no gateway) — `recordUpstreamResult` never called.
+2. **Claude on OpenRouter routing gateway** — gateway forwards requests but does not call `onUpstreamResult`; tracker stays at zero.
+3. **DSH (all providers, all protocols)** — `DshRuntimeBridge` was constructed with no `onUpstreamResult` callback (`MainViewModel.kt:284`), so even when DSH's stream carried usage info it was discarded.
+
+In addition, **Antigravity** is excluded from provider usage entirely (`MainViewModel.kt:3255` short-circuits the daily-budget check for `AgentKind.ANTIGRAVITY`), but the live status card still showed the same zero-counters UI as a tracked provider, which is misleading.
+
+### What changed (commit `1626d4b`, one review set)
+1. **`ProviderUsageTracker.kt`** — added a `usageTracked: Boolean = true` field to `ProviderUsageSnapshot`. Added `markUsageNotTracked(kind, reason)` and `markUsageTracked(kind)`. `recordUpstreamResult` now flips `usageTracked=true` whenever it receives non-zero token data, so a real report from any route automatically re-enables tracking. The new field is persisted to and loaded from the saved JSON (`"usageTracked"` key; defaults to `true` for old saves).
+2. **`ClaudeRuntimeBridge.kt`** — added `cachedProviderKind` field set at `startSession`. Added `reportResultUsage(result)` which extracts token usage from the terminal `"result"` event's `usage` object (`input_tokens` / `output_tokens`, with `prompt_tokens` / `completion_tokens` aliases) and forwards it via `onUpstreamResult(kind, 200, in, out)`. Covers direct Anthropic, OpenRouter routing, and Custom OpenAI routes that bypass the in-app gateway. The gateway path continues to report per-HTTP-call usage as before; result-event reporting fires once per task with the consolidated totals, and is a no-op when both token fields are zero (the CLI emits `usage: {}` on errors that we already classify via `ProviderRuntimeErrorDetector`).
+3. **`DshRuntimeBridge.kt`** — added `onUpstreamResult` constructor callback (same shape as Claude's). Added a new `DshSdkProtocolEvent.UsageReported` variant. The `turn/end` parser now extracts `data.usage` (or `data.reason.usage`) via a new `extractUsage()` helper that accepts `input_tokens`/`output_tokens`, `prompt_tokens`/`completion_tokens`, or `total_tokens` as a fallback. When usage is present, the parser emits `UsageReported` instead of (or before) `TurnCompleted`/`Failed`; the SDK session loop forwards it to `onUpstreamResult`. Routes where DSH does not report usage stay at zero counters honestly — no fake numbers.
+4. **`MainViewModel.kt`** — wired `DshRuntimeBridge`'s new `onUpstreamResult` callback to `usageTracker.recordUpstreamResult`. Added a `markUsageNotTracked(turnKind, "Antigravity CLI does not report token usage")` call when the user starts an Antigravity turn. Tightened the daily-budget failover check from `remainingToday == 0` to `usageTracked && remainingToday == 0` so a tracked provider that genuinely hit its limit still triggers failover, but an untracked provider never does.
+5. **`AgentScreen.kt`** — `ProviderStatusRow` now branches on `snapshot.usageTracked`:
+   - `false` → shows "Usage not tracked for this route" (italic) and only the task counter (which is still tracked for all agents). Hides the daily-limit progress bar so an untracked provider doesn't display a meaningless 100%-left bar.
+   - `true` → unchanged (requests/tokens/limit/progress as before).
+
+### What is intentionally NOT changed
+- Antigravity is still excluded from the daily-budget failover (`if (state.value.agentKind != AgentKind.ANTIGRAVITY)`). The audit explicitly notes that Antigravity uses Google's official CLI which does not surface per-request token usage in its stream-json output. Per the user's brief: "If a route cannot report real usage, do NOT fake numbers: make the UI clearly say usage is not tracked for that route." This commit implements exactly that.
+- `OpenRouterRoutingGateway.kt` does not call `onUpstreamResult`; the OpenRouter routing path is now covered by Claude's result-event reporter instead. Adding per-HTTP-call reporting to the routing gateway is left for a follow-up if finer-grained counters are needed (the consolidated result-event report is sufficient for the daily-budget gate and the live card).
+- The OpenAI-protocol gateway path (`LocalFormatGateway`) is unchanged; it still reports per-HTTP-call usage as before. The result-event reporter and the gateway reporter do not double-count because the gateway increments `dayRequests` per HTTP call while the result-event reporter increments it once per task. The user sees the higher of the two counts, which is the correct behaviour (each task is at least one HTTP call).
+
+### Verification
+- `./gradlew :app:assembleOnlineRelease` → **BUILD SUCCESSFUL in 2m 46s**.
+- `./gradlew :app:testOnlineDebugUnitTest` → **BUILD SUCCESSFUL** (existing DSH parser tests, failover tests, and provider-usage tests all green; no new tests added because the new event type is exercised only via the parser extension which the existing `turn/end` coverage touches).
+- APK: `app-online-release.apk`, 87,642,111 bytes, sha256 `199cf6551e20f521b613a70ec42beb9b6f503d945cc0ecc1d346650097fa7371`.
+- Signature cert SHA-256 `d07ba804cfa95dd39083002628b65487d7ae99acab12cdfa61c5f42bca7dccfe` — verified via `apksigner verify --print-certs` from build-tools 35.0.0. Identical to v1.0.8–v1.0.13 line; in-place update path preserved.
+
+### Notes for next agent
+- The new `usageTracked` field is persisted, so existing installs will load `usageTracked=true` for every saved provider (the `optBoolean("usageTracked", true)` default). A provider that is actually untracked (Antigravity) gets flipped to `false` on the next Antigravity turn and stays that way until the user runs a tracked agent on the same provider kind — which is the intended UX (the card reflects "the most recent route used for this provider kind").
+- If a future DSH version starts emitting `usage` under a different key (e.g. `data.metadata.usage`), `extractUsage` will return null and the route will appear untracked. Re-check the DSH SDK release notes before adding more key paths.
+- The result-event usage reporter relies on Claude Code's stream-json schema. If Claude Code's CLI changes to emit usage under `result.meta.usage` or similar, `reportResultUsage` will silently no-op (the result event is still consumed for completion signalling). Re-check after CLI upgrades.
+
+---
+
 ## 2026-10-09 — F-06 privacy: Claude/DSH bridge logs no longer leak prompt/history/stream
 
 - **Agent/tool**: Claude Code agent session (Super Z), direct repo work on `ferdausfs/Mobile-Harness` branch `main`

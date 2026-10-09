@@ -42,6 +42,7 @@ class ProviderApiClient {
         }
 
         var authError = false
+        var edgeBlocked = false
         var lastMessage = "This provider did not expose a model list. You can enter a custom model name."
         var lastProviderMessage: String? = null
         for (endpoint in modelEndpoints(baseUrl, protocol)) {
@@ -53,7 +54,14 @@ class ProviderApiClient {
             val response = request(endpoint, "GET", discoveryKey, protocol = protocol)
             when {
                 response.code == 401 || response.code == 403 -> {
-                    authError = true
+                    // A 403 with a non-JSON body is an edge client block, not the
+                    // provider's auth layer rejecting the key - keep the two apart
+                    // so the refresh message does not blame a working key.
+                    if (ProviderHttp.isEdgeBlock(response.code, response.body)) {
+                        edgeBlocked = true
+                    } else {
+                        authError = true
+                    }
                     lastProviderMessage = providerErrorMessage(response.body)
                 }
                 response.code in 200..299 -> {
@@ -69,7 +77,12 @@ class ProviderApiClient {
             }
         }
         ModelDiscoveryResult.Failure(
-            if (authError) "Check the saved API key, then try refreshing again." else lastMessage,
+            when {
+                edgeBlocked -> "The provider refused the app's connection before the key was checked (HTTP 403). " +
+                    "This is a connection block, not a key problem."
+                authError -> "Check the saved API key, then try refreshing again."
+                else -> lastMessage
+            },
             lastProviderMessage,
         )
     }
@@ -116,21 +129,7 @@ class ProviderApiClient {
                 )
                 response.code == 401 || response.code == 403 -> {
                     sawAuthFailure = true
-                    val host = runCatching { URL(baseUrl).host }.getOrDefault("")
-                    val hint = if (host.equals("ollama.com", ignoreCase = true)) {
-                        " Get a Cloud key at ollama.com/keys (a local Ollama install does not need one)."
-                    } else ""
-                    // Name the endpoint that rejected the key. A key pasted under
-                    // the wrong provider (an Ollama Cloud key checked against
-                    // DeepSeek, for example) otherwise reads as "your key is
-                    // invalid" with no hint that the provider card, not the key,
-                    // is what needs changing.
-                    val attribution = if (host.isNotBlank()) "$host rejected this key. " else ""
-                    bestFailure = ConnectionValidation.Failure(
-                        "${attribution}Check this API key or select another saved key.$hint",
-                        providerErrorMessage(response.body),
-                        "Rejected",
-                    )
+                    bestFailure = authValidationFailure(response.code, response.body, baseUrl)
                 }
                 response.code == 404 || response.code == 405 || response.code == 501 -> {
                     // Wrong path or unsupported method on this wire format; try the next candidate.
@@ -184,6 +183,44 @@ class ProviderApiClient {
                 failure
             }
         }
+    }
+
+    /**
+     * Builds the failure for a 401/403 answer, split by body shape:
+     *
+     * - 401, or a 403 carrying a JSON auth-error body, is the provider's
+     *   auth layer evaluating and rejecting the key (Anthropic's genuine 403s
+     *   are JSON) - reported as "rejected this key".
+     * - A 403 with a non-JSON/HTML body is an edge/CDN client block: the
+     *   request was refused BEFORE the key was evaluated (ollama.com's Google
+     *   Frontend does this to blocked User-Agents), so it must not be
+     *   reported as a key problem.
+     */
+    internal fun authValidationFailure(code: Int, body: String, baseUrl: String): ConnectionValidation.Failure {
+        val host = runCatching { URL(baseUrl).host }.getOrDefault("")
+        if (ProviderHttp.isEdgeBlock(code, body)) {
+            val who = if (host.isNotBlank()) host else "The provider"
+            return ConnectionValidation.Failure(
+                "$who refused the app's connection before checking the key (HTTP 403). " +
+                    "This is a connection block, not a key problem.",
+                providerErrorMessage(body),
+                "Blocked",
+            )
+        }
+        val hint = if (host.equals("ollama.com", ignoreCase = true)) {
+            " Get a Cloud key at ollama.com/keys (a local Ollama install does not need one)."
+        } else ""
+        // Name the endpoint that rejected the key. A key pasted under
+        // the wrong provider (an Ollama Cloud key checked against
+        // DeepSeek, for example) otherwise reads as "your key is
+        // invalid" with no hint that the provider card, not the key,
+        // is what needs changing.
+        val attribution = if (host.isNotBlank()) "$host rejected this key. " else ""
+        return ConnectionValidation.Failure(
+            "${attribution}Check this API key or select another saved key.$hint",
+            providerErrorMessage(body),
+            "Rejected",
+        )
     }
 
     /** Wire-format candidates tried in order so any OpenAI- or Anthropic-style provider validates. */

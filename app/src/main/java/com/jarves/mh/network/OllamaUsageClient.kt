@@ -33,6 +33,11 @@ object OllamaUsageClient {
         val usage = request("$BASE/usage", "GET", apiKey, body = null)
         if (!usage.first.let { it in 200..299 }) {
             val message = when {
+                // A 403 with a non-JSON/HTML body is an edge client block - the
+                // key was never evaluated, so do not blame it.
+                ProviderHttp.isEdgeBlock(usage.first, usage.second) ->
+                    "Ollama refused the app's connection before checking the key (HTTP 403). " +
+                        "This is a connection block, not a key problem."
                 usage.first == 401 || usage.first == 403 -> "Ollama rejected this API key."
                 usage.first == 0 -> usage.second.takeIf(String::isNotBlank)?.let { "Ollama usage check failed: $it" }
                     ?: "Ollama usage endpoint is unreachable."

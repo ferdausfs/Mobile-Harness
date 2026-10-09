@@ -1,0 +1,7 @@
+Fixed the Ollama Cloud "key rejected" false alarm. The app was sending Android's default Dalvik User-Agent, and ollama.com's edge server blocks that header with a 403 before ever looking at the key - so a perfectly valid key was reported as "ollama.com rejected this key" even though the same key worked in Termux curl. Every provider request now identifies itself as the app instead (validation, model refresh, the connection test, the usage card, and the runtime gateways that carry your actual chats).
+
+Error messages now tell the two failure kinds apart: if a provider's edge refuses the app's connection before checking the key, the message says exactly that (a connection block, not a key problem); "rejected this key" now only appears when the provider's own auth layer really evaluated and declined the key. This applies to every provider, not just Ollama.
+
+Also hardened key handling across the board: pasted keys are cleaned of stray whitespace and accidental "Bearer " prefixes before use, a saved key's secret can never be silently replaced under its existing name (a different key becomes its own new entry), and a newly added key is activated immediately instead of waiting for a second tap. The stale "API key removed" status line that lingered after removing a key is gone, and failed checks now update the on-screen status instead of only the key badge.
+
+Same signing key - installs directly over v1.0.16 with one tap.

@@ -4,6 +4,51 @@ Newest entries prepended. Never delete entries.
 
 ---
 
+## 2026-10-09 — F-08 metadata: README + F-Droid yml aligned with v1.0.13 / versionCode 14
+
+- **Agent/tool**: Claude Code agent session (Super Z), direct repo work on `ferdausfs/Mobile-Harness` branch `main`
+- **Scope**: Audit finding F-08 (release hygiene). Approved scope this session: F-06, F-07, F-08, plus a build-time check for F-02.
+
+### Root cause (re-verified against the live release API)
+`README.md` shipped three inconsistent version signals:
+1. Badge: `Release v1.0.11` linking to tag `v1.0.11` (one major behind source).
+2. Top-of-page download buttons:
+   - `https://github.com/ferdausfs/Mobile-Harness/releases/download/v1.0.4/mobile-harness-online-v1.0.11.apk`
+   - `https://github.com/ferdausfs/Mobile-Harness/releases/download/v1.0.4/mobile-harness-offline-v1.0.11.apk`
+   Both mixed the `v1.0.4` path prefix with `v1.0.11` filenames — the `v1.0.4` tag has never hosted these filenames, so both URLs 404.
+3. Inline system-requirements block: `Package Version : v1.0.4` (the original 1.0.4 packaging release).
+
+The F-Droid metadata (`fdroid/com.jarves.mh.yml`) pinned `CurrentVersion: 1.0.11` / `CurrentVersionCode: 12`, while the source declared `versionCode = 14` / `versionName = "1.0.13"` (`app/build.gradle.kts:80–81`) and the live update manifest (`mobile-harness-update.json`) already served `versionCode 14`.
+
+Verified via the GitHub Releases API (`GET /repos/ferdausfs/Mobile-Harness/releases`): the `v1.0.13` release exists and hosts `mobile-harness-online-v1.0.13.apk` + `mobile-harness-update.json`. No `mobile-harness-offline-*.apk` has ever been published to any release (checked v1.0.5 through v1.0.13).
+
+### What changed (commit `9672a9a`, one review set)
+- **`README.md`**:
+  - Badge `Release v1.0.11` → `Release v1.0.13`, link target tag `v1.0.13`.
+  - Top Download Online APK URL → `https://github.com/ferdausfs/Mobile-Harness/releases/download/v1.0.13/mobile-harness-online-v1.0.13.apk` (real release asset).
+  - Removed the "Download Offline APK" link entirely. The Offline Edition card now reads "Source build only · No offline APK is currently published. Build it locally with `./gradlew :app:assembleOfflineRelease` after staging the runtime bundles under `dist/runtime-bundles/`." This points the user at the real build path instead of a 404.
+  - Inline editions table download button: same URL fix as the top of the page.
+  - System-requirements block: `Package Version : v1.0.4` → `Package Version : v1.0.13 (versionCode 14)` to match `app/build.gradle.kts`.
+- **`fdroid/com.jarves.mh.yml`**:
+  - Added a new `Builds:` entry for `versionName: 1.0.13` / `versionCode: 14` / `commit: v1.0.13` (kept the existing v1.0.11 and v1.0.2 entries for historical build reproducibility).
+  - `CurrentVersion: 1.0.11` → `1.0.13`; `CurrentVersionCode: 12` → `14`. The in-app update manifest (`mobile-harness-update.json`) has served versionCode 14 since the v1.0.13 release shipped, so the F-Droid metadata now matches both the source and the update channel.
+
+### What is intentionally NOT changed
+- `mobile-harness-update.json` (already at `versionCode: 14` / `versionName: "1.0.13"` since the v1.0.13 release). No change needed there.
+- The changelog files under `fastlane/metadata/android/en-US/changelogs/` (they are historical per-release store copy; `13.txt` and `14.txt` already exist for the v1.0.12 and v1.0.13 releases respectively).
+- The `docs/PLAY_STORE_CHECKLIST.md` etc. — they describe the Play submission process, not version pins.
+
+### Verification
+- `./gradlew :app:assembleOnlineRelease` → **BUILD SUCCESSFUL in 16s** (no compile delta; the APK is byte-identical to the F-07 commit because no `app/` files moved).
+- APK sha256 (re-verified, unchanged from F-07): `26fe99639c82e9d734020d35bd536a5de5f48c056db3d4af576f41a02461e61a`, 87,642,111 bytes, signed with cert SHA-256 `d07ba804cfa95dd39083002628b65487d7ae99acab12cdfa61c5f42bca7dccfe`.
+- Visual review of the README diff confirmed by re-reading lines 13, 21–25, 58–74, and 167–171.
+
+### Notes for next agent
+- The offline APK path is intentionally a dead end until someone publishes one. If you do publish an offline APK in the future, restore the "Download Offline APK" link with the matching tag and filename — do NOT re-add the broken `v1.0.4/...-v1.0.11.apk` form.
+- The F-Droid yml uses literal `versionCode` and `versionName` (not `${}` placeholders) so the static parser at fdroiddata can detect the version. Keep that style for any future entries.
+
+---
+
 ## 2026-10-09 — F-07 accounting: usage reporting wired for DSH + direct Anthropic/OpenRouter; Antigravity marked as not tracked
 
 - **Agent/tool**: Claude Code agent session (Super Z), direct repo work on `ferdausfs/Mobile-Harness` branch `main`

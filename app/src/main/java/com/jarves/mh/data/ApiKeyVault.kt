@@ -45,7 +45,10 @@ class ApiKeyVault(context: Context) {
         }.getOrDefault(false)
     }
 
-    /** Returns null when the secret is blank or the key cannot be stored securely. */
+    /**
+     * Adds a new pool entry and makes it the ACTIVE key. Returns null when
+     * the secret is blank or the key cannot be stored securely.
+     */
     @Synchronized
     fun add(providerId: String, name: String, secret: String): ApiKeyInfo? {
         if (secret.isBlank()) return null
@@ -54,13 +57,15 @@ class ApiKeyVault(context: Context) {
             val entry = ApiKeyInfo(
                 id = UUID.randomUUID().toString(),
                 name = name.trim().ifBlank { "API key ${entries.size + 1}" }.take(60),
-                isActive = entries.isEmpty(),
             )
             putEncrypted(secretKey(providerId, entry.id), secret)
-            entries += entry.copy(isActive = false)
+            entries += entry
             savePool(providerId, entries)
-            if (entries.size == 1) setActiveId(providerId, entry.id)
-            entry.copy(isActive = entries.size == 1)
+            // A newly added key becomes the active one: users expect the key
+            // they just added to be the one the next request uses, without a
+            // separate activation tap.
+            setActiveId(providerId, entry.id)
+            entry.copy(isActive = true)
         }.getOrNull()
     }
 

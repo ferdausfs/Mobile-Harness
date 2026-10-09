@@ -4,6 +4,40 @@ Newest entries prepended. Never delete entries.
 
 ---
 
+## 2026-10-09 — v1.0.17 release: F-09..F-15 fix set — app User-Agent everywhere + honest 401/403 messages + key-pool hardening (versionCode 18)
+
+- **Agent/tool**: Super Z agent session, direct repo work on `ferdausfs/Mobile-Harness` branch `main`. User approved ALL items F-09..F-15 from the review report in one batch, with a separate commit per item for easy revert.
+- **Trigger**: User approved the 2026-10-09 review report ("Review report approved… report-er SHOB item approved (F-09 theke F-15)… protita item-er jonno ALADA commit… Build + test chalao, fail hole PUSH KORBA NA… Version bump v1.0.17 (versionCode 18)… APK release publish").
+
+### Commits (each item separately revertable)
+| Item | Commit | Change |
+|------|--------|--------|
+| review log | `6fe1891` | AGENT_LOG review-only entry (committed first) |
+| F-09 (P0) | `368df9e` | new shared `ProviderHttp.APP_USER_AGENT` ("MobileHarness/&lt;version&gt; (Android)") set on `ProviderApiClient.request()`, `LocalFormatGateway.postJson()`, `OllamaUsageClient.request()`; OpenCode Zen keeps its dedicated `opencode/1.18.20` UA via `ProviderHttp.userAgentFor()` — not overridden |
+| F-10 (P1) | `d56f78a` | 403 + non-JSON/HTML body → "«host» refused the app's connection before checking the key (HTTP 403). This is a connection block, not a key problem." label `Blocked`; 401 or 403-with-JSON-auth-error keeps "rejected this key" / `Rejected`. Applied in `validate()` (new internal `authValidationFailure()`), `discoverModels()` refresh, `OllamaUsageClient.fetch()` |
+| F-11 (P1) | `fe07265` | `ProviderHttp.sanitizeApiKey()` (trim + repeated case-insensitive "Bearer " prefix strip, word-boundary guarded so literal keys like `BearerABC123` stay intact) at all four request choke points |
+| F-12 (P1) | `11c60cf` | OpenRouter routing gateway upstream requests send the app UA |
+| F-13 (P2) | `9e87e3c` | AgentScreen: add/activate/remove key clears the Model-section status (no more lingering "API key removed from …"); a failed Check updates the status as well as the credentials badge |
+| F-14 (P2) | `a022e02` | `ApiKeyVault.put()` no longer silently overwrites the active entry's secret: empty pool → "Primary"; same secret → idempotent no-op; different secret → NEW pool entry ("API key N") + activated. Pure `resolvePut()` decision function extracted for JVM tests. Existing saved keys are never rewritten |
+| F-15 (P2) | `d391983` | `ApiKeyVault.add()` always activates the new entry (the Agent screen already refreshes the API-key field from the vault) |
+| tests | `495c4b8` | 12 new tests: `ProviderHttpTest` (UA mapping / sanitize matrix / edge-block classification), `ProviderApiClientTransportTest` (loopback raw-socket HTTP server — UA + sanitized Bearer actually on the wire; 403-HTML → Blocked, 401-JSON → Rejected, genuine JSON 403 → Rejected), `ApiKeyVaultPutTest` (resolvePut no-overwrite contract). Also fixes sanitizeApiKey for a "   Bearer  "-only paste (word-boundary regex) |
+| version | `0d6b488` | v1.0.17 / versionCode 18: `app/build.gradle.kts`, changelog `18.txt`, `mobile-harness-update.json` (sha256 `09f166bd…9a883`, 87,649,607 bytes) |
+
+### Verification
+- `:app:testOnlineDebugUnitTest` → **142 tests, 0 failures, 0 skipped** (130 previous + 12 new; one intermediate failure — sanitize of a bare "Bearer" paste — was caught by the new tests and fixed before commit).
+- `:app:assembleOnlineRelease` (signed, Temurin JDK 21 + Android SDK env) → BUILD SUCCESSFUL; `aapt` reports `versionCode='18' versionName='1.0.17'`; `apksigner` cert SHA-256 `d07ba804…ca7dccfe` = the v1.0.8–v1.0.16 line (in-place update path preserved); runtime bundle `pocketdev-agy-arm64-2026.09.1.tar.zst` (41,870,025 bytes) present.
+- **Live proof with the user's own key** (same request, only UA differs): `MobileHarness/1.0.17 (Android)` → **HTTP 200**; old default `Dalvik/2.1.0 (…)` → **HTTP 403**. The P0 fix resolves the reported bug end to end.
+- Pushed `main` `c1791b5..0d6b488` **only after** the full build+test passed (user rule: fail → no push). Tag `v1.0.17` on `0d6b488`.
+- GitHub release **407540642** created with assets `mobile-harness-online-v1.0.17.apk` + `mobile-harness-update.json`; `releases/latest` → v1.0.17; downloaded asset sha256 matches the local build byte-for-byte.
+- Release pipeline note: this repo has no GitHub Actions workflows — releases are published through the GitHub Releases API with a locally built signed APK, exactly as v1.0.14–v1.0.16 were.
+
+### Expected user-visible behavior on v1.0.17
+- Ollama Cloud + saved key + `gpt-oss:120b` → Check → "Connection successful. Claude Code settings are ready." (the 403 edge block is gone).
+- If any provider edge ever blocks the app again, the message says "refused the app's connection before checking the key… not a key problem" instead of blaming the key.
+- Adding a key activates it immediately; removing/switching keys no longer leaves stale status text; a re-checked key never rewrites another key's stored secret.
+
+---
+
 ## 2026-10-09 — REVIEW ONLY (no code changes): Ollama Cloud "key rejected" root cause = missing User-Agent → ollama.com edge 403
 
 - **Agent/tool**: Super Z agent session, review-only on `ferdausfs/Mobile-Harness` branch `main` @ `c1791b5` (v1.0.16). Working tree left clean; this log entry is the only local (uncommitted) edit.

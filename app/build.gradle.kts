@@ -37,6 +37,39 @@ val prepareBundledAgentAssets = tasks.register<Sync>("prepareBundledAgentAssets"
     into(generatedRuntimeAssets.map { it.dir("shared/runtime") })
 }
 
+// Fail the build fast if the Antigravity runtime asset is missing from the
+// staging directory. The `prepareBundledAgentAssets` Sync task silently copies
+// nothing when the source file is absent, which produces an APK that crashes
+// at install time on Antigravity (the embedded path has no online fallback).
+// See audit finding F-02: the AGY bundle is gitignored and must be supplied
+// separately; this guard makes a missing bundle a build error instead of a
+// runtime error.
+val ensureBundledAgentAssetsPresent = tasks.register("ensureBundledAgentAssetsPresent") {
+    doLast {
+        val agyBundle = runtimeBundleDir.file("pocketdev-agy-arm64-2026.09.1.tar.zst").asFile
+        check(agyBundle.isFile) {
+            """
+            Missing required runtime asset: ${agyBundle.relativeTo(rootDir)}
+
+            The Antigravity runtime bundle 'pocketdev-agy-arm64-2026.09.1.tar.zst'
+            is gitignored and must be supplied separately before building any
+            flavor. Antigravity installation is forced to use the embedded asset
+            (RuntimeInstaller.installRuntimeOverlay with forceEmbedded = true),
+            so an APK built without this file will install cleanly and then fail
+            at the first Antigravity install with a generic IOException.
+
+            Obtain it from the runtime release:
+              curl -L -o dist/runtime-bundles/pocketdev-agy-arm64-2026.09.1.tar.zst \
+                https://github.com/ferdausfs/Mobile-Harness/releases/download/runtime-2026.09.4/pocketdev-agy-arm64-2026.09.1.tar.zst
+
+            Verify against dist/runtime-bundles/manifest.json (sha256
+            a659ab9188956fc4721ca86fb21b5118e0e489f47a5e02ae6b4f2fb423659d78)
+            before rebuilding.
+            """.trimIndent()
+        }
+    }
+}
+
 val prepareOfflineRuntimeAssets = tasks.register<Sync>("prepareOfflineRuntimeAssets") {
     from(
         runtimeBundleDir.file("pocketdev-core-arm64-2026.09.5.tar.zst"),
@@ -46,6 +79,34 @@ val prepareOfflineRuntimeAssets = tasks.register<Sync>("prepareOfflineRuntimeAss
         runtimeBundleDir.file("pocketdev-dsh-arm64-2026.09.1.tar.zst"),
     )
     into(generatedRuntimeAssets.map { it.dir("offline/runtime") })
+}
+
+// The offline flavor requires the additional 5 runtime bundles to be staged
+// too. Same fail-fast contract as the AGY guard above.
+val ensureOfflineRuntimeAssetsPresent = tasks.register("ensureOfflineRuntimeAssetsPresent") {
+    doLast {
+        val missing = listOf(
+            "pocketdev-core-arm64-2026.09.5.tar.zst",
+            "pocketdev-claude-arm64-2026.09.1.tar.zst",
+            "pocketdev-python-arm64-2026.09.2.tar.zst",
+            "pocketdev-android-arm64-2026.09.1.tar.zst",
+            "pocketdev-dsh-arm64-2026.09.1.tar.zst",
+        ).mapNotNull { name ->
+            val f = runtimeBundleDir.file(name).asFile
+            if (!f.isFile) name else null
+        }
+        check(missing.isEmpty()) {
+            """
+            Missing required offline runtime asset(s) under ${runtimeBundleDir.asFile.relativeTo(rootDir)}/:
+              ${missing.joinToString("\n              ")}
+
+            All five offline bundles are gitignored and must be supplied
+            separately before building the offline flavor. Obtain them from
+            the runtime-2026.09.4 GitHub release and verify each sha256
+            against dist/runtime-bundles/manifest.json before rebuilding.
+            """.trimIndent()
+        }
+    }
 }
 
 fun buildConfigString(value: String): String =
@@ -157,6 +218,9 @@ android {
     packaging.jniLibs.useLegacyPackaging = true
     androidResources.noCompress += "zst"
 }
+
+prepareBundledAgentAssets.configure { dependsOn(ensureBundledAgentAssetsPresent) }
+prepareOfflineRuntimeAssets.configure { dependsOn(ensureOfflineRuntimeAssetsPresent) }
 
 tasks.matching { it.name.startsWith("mergeOffline") && it.name.endsWith("Assets") }
     .configureEach { dependsOn(prepareOfflineRuntimeAssets) }

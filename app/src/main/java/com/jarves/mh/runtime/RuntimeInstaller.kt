@@ -975,7 +975,24 @@ class RuntimeInstaller(private val context: Context) {
         if (useEmbedded) {
             onProgress(RuntimeInstallProgress("Loading ${bundle.label} bundle", from, 0, bundle.compressedBytes))
             val temporary = File(downloads, "${bundle.fileName}.part")
-            context.assets.open("runtime/${bundle.fileName}").use { input ->
+            // The bundled asset is required for the embedded path; if the APK
+            // was built without it (audit finding F-02), the AssetManager.open
+            // call below would throw a generic IOException that the UI surfaces
+            // as a vague "Loading ${bundle.label} bundle" failure. Detect the
+            // missing-asset case explicitly and tell the user what to do:
+            // reinstall from a correctly-built APK.
+            val assetPath = "runtime/${bundle.fileName}"
+            val assetPresent = runCatching {
+                context.assets.open(assetPath).use { it.read() }
+                true
+            }.getOrDefault(false)
+            check(assetPresent) {
+                "The ${bundle.label} runtime bundle is missing from this APK. " +
+                    "This build was packaged without the required asset '$assetPath'. " +
+                    "Reinstall from a release APK that was built with the AGY bundle staged " +
+                    "under dist/runtime-bundles/ (see scripts/runtime-bundles/README.md)."
+            }
+            context.assets.open(assetPath).use { input ->
                 FileOutputStream(temporary).use { output ->
                     val buffer = ByteArray(256 * 1024)
                     var copied = 0L

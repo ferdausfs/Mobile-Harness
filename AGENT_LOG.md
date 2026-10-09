@@ -4,6 +4,36 @@ Newest entries prepended. Never delete entries.
 
 ---
 
+## 2026-10-09 — v1.0.14 release: ships F-06/F-07/F-08/F-02 fixes as a tagged release (versionCode 15)
+
+- **Agent/tool**: Claude Code agent session (Super Z), direct repo work on `ferdausfs/Mobile-Harness` branch `main`
+- **Feature/trigger**: User report — "version updated koro.. ekhon ami v1.0.13 use korsi.. ja kina ekhono bug e bora" — the four audit fixes from the previous session were on `main` but had not been packaged as a release, so users on v1.0.13 still had the unfixed binary. Build v1.0.14 (versionCode 15) and publish it as a GitHub release.
+
+### What changed (one commit `43ffe98`, plus a tag)
+- `app/build.gradle.kts`: `versionCode = 14` / `versionName = "1.0.13"` → `versionCode = 15` / `versionName = "1.0.14"`.
+- `fastlane/metadata/android/en-US/changelogs/15.txt` (new): store changelog for v1.0.14 covering F-06 (privacy), F-07 (usage accounting), F-02 (packaging), and F-08 (metadata). Written in the same plain-English style as 13.txt / 14.txt.
+- `mobile-harness-update.json`: `versionCode` 14 → 15, `versionName` 1.0.13 → 1.0.14, `notes` rewritten to summarise the four fixes, `url` → v1.0.14 release asset, `sha256` → `7bc7d991864f44455620b9ae36ae4549c9f632372652c44b957e6b055506f52d`, `sizeBytes` → 87,642,867.
+
+No code changes — the four audit fixes from commits `408801f` (F-06), `1626d4b` (F-07), `9672a9a` (F-08), and `8ed5afe` (F-02) are already on `main` and were verified there. This release just bumps the version and publishes the APK + manifest.
+
+### Verification
+- `./gradlew :app:assembleOnlineRelease` → **BUILD SUCCESSFUL in 2m 50s**.
+- `./gradlew :app:testOnlineDebugUnitTest` → **BUILD SUCCESSFUL** (all tests pass; the version bump is metadata-only).
+- APK: `app-online-release.apk` → 87,642,867 bytes, sha256 `7bc7d991864f44455620b9ae36ae4549c9f632372652c44b957e6b055506f52d`.
+- `aapt dump badging`: `versionCode='15' versionName='1.0.14'`. ✅
+- APK contains `assets/runtime/pocketdev-agy-arm64-2026.09.1.tar.zst` at 41,870,025 bytes (matches `manifest.json` `compressedBytes`). ✅
+- `apksigner verify --print-certs` from build-tools 35.0.0: cert SHA-256 `d07ba804cfa95dd39083002628b65487d7ae99acab12cdfa61c5f42bca7dccfe`. ✅ Identical to v1.0.8–v1.0.13 line; in-place update path preserved. A user on v1.0.13 updates with one tap.
+- Tag `v1.0.14` pushed; release ID `407434884` created with assets `mobile-harness-online-v1.0.14.apk` (87,642,867 bytes) and `mobile-harness-update.json` (1,464 bytes).
+- `releases/latest` → v1.0.14 (is_prerelease=false). ✅
+- `releases/latest/download/mobile-harness-update.json` serves `versionCode: 15`, `versionName: "1.0.14"`. ✅
+
+### Notes for next agent
+- Build env was preserved from the previous session (JDK 21 at `/home/z/jdk`, Android SDK + NDK + build-tools 35.0.0/36.0.0, submodules initialized, AGY bundle in `dist/runtime-bundles/`, keystore at `/home/z/my-project/keystores/mobile-harness-release.jks`). `local.properties` and the RAM-tuned additions to `gradle.properties` are NOT committed (gitignored or excluded); only `app/build.gradle.kts`, `15.txt`, and `mobile-harness-update.json` went into commit `43ffe98`.
+- The v1.0.13 release (versionCode 14) and its tag are untouched. Users on v1.0.13 see the v1.0.14 update through the in-app updater (same signing key → no reinstall required).
+- The F-Droid yml (`fdroid/com.jarves.mh.yml`) was NOT bumped to v1.0.14 / 15 in this commit; F-Droid's own repo process rebuilds from source using its pinned metadata, so leaving the yml at 1.0.13 / 14 is correct until F-Droid's maintainers update their metadata. (If the maintainer wants to push the yml forward, add a `Builds:` entry for `versionName: 1.0.14` / `versionCode: 15` / `commit: v1.0.14` and bump `CurrentVersion`/`CurrentVersionCode`.)
+
+---
+
 ## 2026-10-09 — F-02 packaging: build fails fast when AGY bundle missing; APK missing-asset path now reports clearly
 
 - **Agent/tool**: Claude Code agent session (Super Z), direct repo work on `ferdausfs/Mobile-Harness` branch `main`

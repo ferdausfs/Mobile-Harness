@@ -3,6 +3,7 @@ package com.jarves.mh.runtime
 import android.content.Context
 import android.util.Log
 import androidx.core.content.ContextCompat
+import com.jarves.mh.BuildConfig
 import com.jarves.mh.model.ChatMessage
 import com.jarves.mh.model.ChangeItem
 import com.jarves.mh.model.DiffLine
@@ -219,8 +220,10 @@ class ClaudeRuntimeBridge(
                 localGatewayUrl = formatGateway?.url ?: openRouterGateway?.url,
                 effectiveProtocol = effectiveProtocol,
             )
-            Log.d("ClaudeBridge", "Provider: ${provider.kind}, Model: ${provider.model}, BaseUrl: ${provider.baseUrl}")
-            Log.d("ClaudeBridge", "Launch environment keys: ${launch.environment.keys}")
+            if (BuildConfig.DEBUG) {
+                Log.d("ClaudeBridge", "Provider: ${provider.kind}, Model: ${provider.model}, BaseUrl: ${provider.baseUrl}")
+                Log.d("ClaudeBridge", "Launch environment keys: ${launch.environment.keys}")
+            }
 
             // Build a context-aware prompt that includes conversation history
             val guestWorkspacePath = "/workspace/$projectSlug"
@@ -240,7 +243,10 @@ class ClaudeRuntimeBridge(
                 add("--max-turns")
                 add("25")
             }
-            Log.d("ClaudeBridge", "Launching command: $command")
+            // Never log the full command: it contains contextPrompt (user prompt + history).
+            if (BuildConfig.DEBUG) {
+                Log.d("ClaudeBridge", "Launching claude (model=${launch.environment["ANTHROPIC_MODEL"] ?: provider.model})")
+            }
             val process = installer.process(
                 installed.proot,
                 installed.rootfs,
@@ -273,7 +279,7 @@ class ClaudeRuntimeBridge(
                         outputOffset += count
                         for (line in outputLines.append(bytes, count)) {
                             if (line.isBlank()) continue
-                            Log.d("ClaudeBridge", "OUTPUT: $line")
+                            // Never log raw stream output: it contains assistant text, tool calls, and provider content.
                             ProviderRuntimeErrorDetector.detect(line)?.let { reason ->
                                 process.destroyForcibly()
                                 throw ProviderSessionException(reason)
@@ -287,12 +293,12 @@ class ClaudeRuntimeBridge(
                         }
                     }
                 }
+                // Trailing output not logged: stream content is sensitive (assistant text + tool data).
                 outputLines.drain()?.takeIf(String::isNotBlank)?.let { line ->
-                    Log.d("ClaudeBridge", "TRAILING OUTPUT: $line")
                     if (!consumeClaudeEvent(sessionId, line)) lastDiagnostic = line.takeLast(500)
                 }
                 val exit = process.waitFor()
-                Log.d("ClaudeBridge", "Process exited with code $exit")
+                if (BuildConfig.DEBUG) Log.d("ClaudeBridge", "Process exited with code $exit")
                 permissionWatcher.cancelAndJoin()
                 pending.values.filter { it.request.sessionId == sessionId }.forEach { permission ->
                     permission.response.writeText("deny")
@@ -300,7 +306,7 @@ class ClaudeRuntimeBridge(
                 }
                 val changed = changedFiles(workspace, before)
                 if (changed.isNotEmpty()) {
-                    Log.d("ClaudeBridge", "Changed files: $changed")
+                    if (BuildConfig.DEBUG) Log.d("ClaudeBridge", "Changed files: $changed")
                     saveChangedPaths(projectId, changed)
                     val details = loadPendingChanges(projectId)
                     eventBus.emit(RuntimeEvent.FilesChanged(sessionId, details))
@@ -320,7 +326,7 @@ class ClaudeRuntimeBridge(
                 }
             }
         }.onFailure { error ->
-            Log.e("ClaudeBridge", "Session failed", error)
+            if (BuildConfig.DEBUG) Log.e("ClaudeBridge", "Session failed", error)
             // The failed attempt may already have modified files (the error
             // detector aborts the process before the success path computes
             // changes). Persist them against the task's first baseline so the
@@ -473,7 +479,7 @@ class ClaudeRuntimeBridge(
                         .ifBlank { command.orEmpty() }
                         .ifBlank { "$toolName running in project" }
 
-                    Log.d("ClaudeBridge", "Auto-approving permission request $approvalId for $toolName ($paths)")
+                    if (BuildConfig.DEBUG) Log.d("ClaudeBridge", "Auto-approving permission request $approvalId for $toolName")
                     val response = File(file.parentFile, "$approvalId.response")
                     response.writeText("allow")
 
@@ -1119,7 +1125,7 @@ class ClaudeRuntimeBridge(
                     .putExtra(RuntimeExecutionService.EXTRA_DETAIL, detail),
             )
         }.onFailure { error ->
-            Log.w("ClaudeBridge", "Could not post task result notification", error)
+            if (BuildConfig.DEBUG) Log.w("ClaudeBridge", "Could not post task result notification", error)
             context.stopService(android.content.Intent(context, RuntimeExecutionService::class.java))
         }
     }

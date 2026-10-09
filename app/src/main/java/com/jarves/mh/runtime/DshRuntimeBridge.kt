@@ -3,6 +3,7 @@ package com.jarves.mh.runtime
 import android.content.Context
 import android.util.Log
 import androidx.core.content.ContextCompat
+import com.jarves.mh.BuildConfig
 import com.jarves.mh.model.ChangeItem
 import com.jarves.mh.model.ChatMessage
 import com.jarves.mh.model.DevStack
@@ -147,7 +148,7 @@ class DshRuntimeBridge(
             val guestWorkspacePath = "/workspace/$projectSlug"
             val contextPrompt = buildContextPrompt(prompt, conversationHistory, guestWorkspacePath, projectKind)
             val command = listOf("/usr/local/bin/dsh", "--profile", "sdk")
-            Log.d("DshBridge", "Route: ${route.name}, Model: ${provider.model}")
+            if (BuildConfig.DEBUG) Log.d("DshBridge", "Route: ${route.name}, Model: ${provider.model}")
             val process = installer.process(
                 installed.proot,
                 installed.rootfs,
@@ -171,10 +172,10 @@ class DshRuntimeBridge(
                 prompt = contextPrompt,
             )
             val exit = process.waitFor()
-            Log.d("DshBridge", "SDK process exited with code $exit")
+            if (BuildConfig.DEBUG) Log.d("DshBridge", "SDK process exited with code $exit")
             val changed = checkpoints.changedFiles(workspace, before)
             if (changed.isNotEmpty()) {
-                Log.d("DshBridge", "Changed files: $changed")
+                if (BuildConfig.DEBUG) Log.d("DshBridge", "Changed files: $changed")
                 checkpoints.saveChangedPaths(projectId, changed)
                 val details = checkpoints.buildChangeDetails(projectId, workspace, checkpoints.readChangedPaths(projectId))
                 eventBus.emit(RuntimeEvent.FilesChanged(sessionId, details))
@@ -193,7 +194,7 @@ class DshRuntimeBridge(
                 error(sdkResult.failure.ifBlank { "DeepSeek Harness stopped with exit code $exit" })
             }
         }.onFailure { error ->
-            Log.e("DshBridge", "Session failed", error)
+            if (BuildConfig.DEBUG) Log.e("DshBridge", "Session failed", error)
             // An exception thrown mid-stream (between the baseline snapshot and
             // the exit handling) skips the normal change computation. Persist
             // the failed attempt's edits so a failover retry — which
@@ -697,7 +698,7 @@ class DshRuntimeBridge(
                     .putExtra(RuntimeExecutionService.EXTRA_DETAIL, detail),
             )
         }.onFailure { error ->
-            Log.w("DshBridge", "Could not post task result notification", error)
+            if (BuildConfig.DEBUG) Log.w("DshBridge", "Could not post task result notification", error)
             context.stopService(android.content.Intent(context, RuntimeExecutionService::class.java))
         }
     }

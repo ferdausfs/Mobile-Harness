@@ -18,9 +18,18 @@ class ApiKeyVault(context: Context) {
     private val alias = "pocket-provider-key"
 
     /**
-     * Stores/replaces the active pool entry's secret. Returns false when the
-     * secret is blank or AndroidKeyStore fails — callers surface that instead
-     * of crashing mid-onboarding on flaky keystore devices.
+     * Stores a secret for [providerId] WITHOUT ever silently swapping an
+     * existing pooled key's secret:
+     *
+     * - empty pool -> creates the first "Primary" entry (active);
+     * - the active entry already stores this exact secret -> idempotent no-op;
+     * - a DIFFERENT secret -> added as its own NEW pool entry (default name
+     *   "API key N") and activated; every previously saved key keeps its
+     *   secret untouched.
+     *
+     * Returns false when the secret is blank or AndroidKeyStore fails —
+     * callers surface that instead of crashing mid-onboarding on flaky
+     * keystore devices.
      */
     @Synchronized
     fun put(providerId: String, secret: String): Boolean {
@@ -28,11 +37,10 @@ class ApiKeyVault(context: Context) {
         return runCatching {
             val entries = ensurePool(providerId)
             val active = entries.firstOrNull { it.id == activeId(providerId) } ?: entries.firstOrNull()
-            if (active == null) {
-                add(providerId, "Primary", secret) != null
-            } else {
-                putEncrypted(secretKey(providerId, active.id), secret)
-                true
+            val activeSecret = active?.let { getEncrypted(secretKey(providerId, it.id)) }
+            when (val action = resolvePut(entries.size, activeSecret, secret)) {
+                PutAction.NoOp -> true
+                is PutAction.AddEntry -> add(providerId, action.name, secret) != null
             }
         }.getOrDefault(false)
     }
@@ -180,3 +188,24 @@ class ApiKeyVault(context: Context) {
 data class ApiKeyInfo(val id: String, val name: String, val isActive: Boolean = false)
 
 data class ApiKeyCredential(val id: String, val name: String, val secret: String, val isActive: Boolean)
+
+/** Decision produced by [resolvePut] — a pure function so the no-silent-overwrite contract is unit-testable. */
+internal sealed interface PutAction {
+    /** The active entry already stores this exact secret; nothing to do. */
+    data object NoOp : PutAction
+
+    /** Store the secret as a NEW pool entry (never overwrite an existing one). */
+    data class AddEntry(val name: String) : PutAction
+}
+
+/**
+ * Resolves what [ApiKeyVault.put] must do for a pool of [poolSize] entries
+ * whose active entry currently holds [activeSecret] when asked to store
+ * [secret]. A different secret NEVER overwrites the active entry — it becomes
+ * its own new entry, keeping every existing saved key intact.
+ */
+internal fun resolvePut(poolSize: Int, activeSecret: String?, secret: String): PutAction = when {
+    poolSize == 0 -> PutAction.AddEntry("Primary")
+    activeSecret == secret -> PutAction.NoOp
+    else -> PutAction.AddEntry("API key ${poolSize + 1}")
+}

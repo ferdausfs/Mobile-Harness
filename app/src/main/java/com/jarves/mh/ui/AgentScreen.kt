@@ -2209,17 +2209,39 @@ private fun ProviderStatusRow(
             Text(stateLabel, fontSize = 11.sp, color = stateColor, fontWeight = FontWeight.SemiBold)
         }
         Spacer(Modifier.height(3.dp))
-        Text(
-            buildString {
-                append("Today · ${s.dayTasks} task${if (s.dayTasks == 1) "" else "s"}")
-                append(" · ${s.dayRequests} request${if (s.dayRequests == 1) "" else "s"}")
-                append(" · ${ProviderUsageTracker.formatTokens(s.dayTokens)} tokens")
-                if (s.totalTokens > 0) append(" · ${ProviderUsageTracker.formatTokens(s.totalTokens)} all-time")
-            },
-            fontSize = 11.sp,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        if (s.dailyRequestLimit > 0) {
+        if (!s.usageTracked) {
+            // The active runtime cannot report real per-request usage data
+            // (e.g. Antigravity's CLI stream). Show that explicitly instead
+            // of zero counters that would mislead the user.
+            Text(
+                "Usage not tracked for this route",
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
+            )
+            if (s.dayTasks > 0 || s.totalTasks > 0L) {
+                Text(
+                    buildString {
+                        append("Today · ${s.dayTasks} task${if (s.dayTasks == 1) "" else "s"}")
+                        if (s.totalTasks > 0L) append(" · ${s.totalTasks} all-time")
+                    },
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        } else {
+            Text(
+                buildString {
+                    append("Today · ${s.dayTasks} task${if (s.dayTasks == 1) "" else "s"}")
+                    append(" · ${s.dayRequests} request${if (s.dayRequests == 1) "" else "s"}")
+                    append(" · ${ProviderUsageTracker.formatTokens(s.dayTokens)} tokens")
+                    if (s.totalTokens > 0) append(" · ${ProviderUsageTracker.formatTokens(s.totalTokens)} all-time")
+                },
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        if (s.usageTracked && s.dailyRequestLimit > 0) {
             Spacer(Modifier.height(5.dp))
             LinearProgressIndicator(
                 progress = { s.limitFraction },

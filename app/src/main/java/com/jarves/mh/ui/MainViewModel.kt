@@ -281,7 +281,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             usageTracker.recordUpstreamResult(kind, code, inputTokens, outputTokens)
         },
     )
-    private val dshRuntime = DshRuntimeBridge(application) { profile -> vault.get(profile.kind.name) }
+    private val dshRuntime = DshRuntimeBridge(
+        application,
+        { profile -> vault.get(profile.kind.name) },
+        onUpstreamResult = { kind, code, inputTokens, outputTokens ->
+            usageTracker.recordUpstreamResult(kind, code, inputTokens, outputTokens)
+        },
+    )
     private val installer = RuntimeInstaller(application)
     private val antigravityRuntime = AntigravityRuntimeBridge(
         application,
@@ -3246,8 +3252,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // Soft daily budget: when the active provider's locally tracked requests
         // are exhausted, hand the turn to the failover chain before starting.
         val turnKind = state.value.provider.kind
+        // Antigravity's CLI does not expose per-request usage; skip the daily-
+        // budget failover for it so we never swap off a healthy provider on
+        // bogus zero counters.
         if (state.value.agentKind != AgentKind.ANTIGRAVITY) {
-            if (usageTracker.snapshot(turnKind).remainingToday == 0) {
+            val turnSnapshot = usageTracker.snapshot(turnKind)
+            val exhausted = turnSnapshot.usageTracked && turnSnapshot.remainingToday == 0
+            if (exhausted) {
                 val candidate = nextFailoverCandidate(
                     chain = state.value.failoverProviders,
                     currentKind = turnKind,
@@ -3280,6 +3291,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
             usageTracker.recordTurnStart(state.value.provider.kind)
+        }
+        // Antigravity's CLI stream does not expose per-request token usage, so
+        // the live status card would otherwise show misleading zero counters
+        // and a misleading daily-budget countdown. Mark the active provider
+        // as not tracked for this route; if the user later switches to a
+        // different agent, the bridge's first real report will set it back.
+        if (state.value.agentKind == AgentKind.ANTIGRAVITY) {
+            usageTracker.markUsageNotTracked(turnKind, "Antigravity CLI does not report token usage")
         }
         activeRuntimeRequest = RuntimeRetryRequest(
             runtime = activeRuntime(),

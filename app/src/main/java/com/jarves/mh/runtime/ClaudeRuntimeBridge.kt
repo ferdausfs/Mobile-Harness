@@ -133,6 +133,12 @@ class ClaudeRuntimeBridge(
     @Volatile private var taskStartedAtElapsedRealtime: Long = 0L
     @Volatile private var lastForegroundProgressAt: Long = 0L
     @Volatile private var foregroundResultPosted: Boolean = false
+    /**
+     * Provider kind of the in-flight session, captured at startSession so the
+     * result-event usage reporter can route its callback without needing the
+     * original profile object (which is not visible to consumeClaudeJsonEvent).
+     */
+    @Volatile private var cachedProviderKind: ProviderKind = ProviderKind.ANTHROPIC
 
     /** Per-session stream state; see [sessionStates]. */
     private class SessionStreamState {
@@ -154,6 +160,7 @@ class ClaudeRuntimeBridge(
         finishedSessions.remove(sessionId)
         activeSessionId = sessionId
         activeProjectSlug = projectSlug
+        cachedProviderKind = provider.kind
         taskStartedAtElapsedRealtime = android.os.SystemClock.elapsedRealtime()
         lastForegroundProgressAt = 0L
         foregroundResultPosted = false
@@ -605,12 +612,44 @@ class ClaudeRuntimeBridge(
                     val message = json.optString("result").ifBlank { "Claude Code reported an error" }
                     throw IllegalStateException(message)
                 }
+                // Claude Code's terminal `result` event carries authoritative usage
+                // counters from the underlying provider exchange. Report them so the
+                // live status card and the daily-budget failover see real counts
+                // even when the route does not pass through the in-app format
+                // gateway (direct Anthropic, OpenRouter routing, Custom OpenAI).
+                // The in-app gateway path already reports per-HTTP-call usage; to
+                // avoid double counting we only emit non-zero token totals here, and
+                // the success branch below records at most one request per task.
+                reportResultUsage(json)
                 // The structured result is Claude Code's authoritative terminal event.
                 // Update the UI immediately instead of waiting for a PRoot/Node wrapper
                 // that may remain alive after the answer has already completed.
                 emitCompletedOnce(sessionId)
                 terminateActiveProcessGracefully()
             }
+        }
+    }
+
+    /**
+     * Extracts token usage from a Claude Code `result` event and reports it via
+     * [onUpstreamResult]. The Claude CLI's stream-json schema nests usage under
+     * the `usage` object with `input_tokens` / `output_tokens` (and cache
+     * variants that we collapse into input for accounting purposes).
+     */
+    private fun reportResultUsage(result: JSONObject) {
+        val listener = onUpstreamResult ?: return
+        val usage = result.optJSONObject("usage") ?: return
+        val input = usage.optInt("input_tokens").takeIf { it > 0 }
+            ?: usage.optInt("prompt_tokens")
+        val output = usage.optInt("output_tokens").takeIf { it > 0 }
+            ?: usage.optInt("completion_tokens")
+        if (input <= 0 && output <= 0) return
+        runCatching {
+            // The result event represents the consolidated upstream exchange
+            // for the whole task. We pass code 200 so the tracker increments its
+            // request counter once per task even when multiple provider calls
+            // happened underneath.
+            listener(cachedProviderKind, 200, input, output)
         }
     }
 

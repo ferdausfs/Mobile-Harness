@@ -32,6 +32,15 @@ data class ProviderUsageSnapshot(
     /** Raw JSON returned by the provider's usage/account endpoints (Ollama Cloud). */
     val remoteUsageJson: String? = null,
     val remoteUsageFetchedAtMillis: Long = 0,
+    /**
+     * False when the active runtime/provider route cannot report real per-request
+     * usage data (Antigravity CLI does not expose token counts in its stream).
+     * When false, the live status card shows "Usage not tracked for this route"
+     * instead of misleading zero counters. True once at least one real
+     * [recordUpstreamResult] call has supplied non-zero token data, or once
+     * [markUsageTracked] has explicitly affirmed tracking for the route.
+     */
+    val usageTracked: Boolean = true,
 ) {
     val dayTokens: Long get() = dayInputTokens + dayOutputTokens
     val totalTokens: Long get() = totalInputTokens + totalOutputTokens
@@ -87,6 +96,8 @@ class ProviderUsageTracker(private val preferences: AppPreferencesBridge) {
      * exactly when a provider hits its limit.
      */
     fun recordUpstreamResult(kind: ProviderKind, code: Int, inputTokens: Int, outputTokens: Int) = mutate(kind) { current ->
+        // Any real report from a runtime confirms this route is observable.
+        val tracked = current.usageTracked || inputTokens > 0 || outputTokens > 0
         when {
             code in 200..299 -> current.copy(
                 dayRequests = current.dayRequests + 1,
@@ -98,6 +109,7 @@ class ProviderUsageTracker(private val preferences: AppPreferencesBridge) {
                 state = ProviderLiveState.ACTIVE,
                 lastMessage = "OK · ${formatTokens(inputTokens.toLong() + outputTokens)} tokens",
                 lastUpdateAtMillis = now(),
+                usageTracked = tracked,
             )
             code == 429 || code == 402 -> current.copy(
                 state = ProviderLiveState.LIMIT,
@@ -123,8 +135,34 @@ class ProviderUsageTracker(private val preferences: AppPreferencesBridge) {
                 state = if (code == 0) ProviderLiveState.ERROR else current.state,
                 lastMessage = "HTTP $code",
                 lastUpdateAtMillis = now(),
+                usageTracked = tracked,
             )
         }
+    }
+
+    /**
+     * Mark a provider's usage as not trackable by the current runtime route.
+     * Used when the runtime cannot report real per-request usage data (for
+     * example, Antigravity's CLI stream does not include token counts). The
+     * live status card displays "Usage not tracked for this route" instead
+     * of showing misleading zero counters; daily-budget failover is also
+     * skipped for untracked providers.
+     */
+    fun markUsageNotTracked(kind: ProviderKind, reason: String) = mutate(kind) { current ->
+        current.copy(
+            usageTracked = false,
+            lastMessage = reason.take(120).ifBlank { "Usage not tracked for this route" },
+            lastUpdateAtMillis = now(),
+        )
+    }
+
+    /**
+     * Mark a provider's usage as observable. Used when a runtime starts that
+     * is known to report real usage (Claude Code result event, DSH turn/end,
+     * or any route proxied through the in-app gateway).
+     */
+    fun markUsageTracked(kind: ProviderKind) = mutate(kind) { current ->
+        current.copy(usageTracked = true, lastUpdateAtMillis = now())
     }
 
     /** The runtime reported a session failure; classify it for the live card. */
@@ -233,6 +271,7 @@ class ProviderUsageTracker(private val preferences: AppPreferencesBridge) {
                 put("limit", value.dailyRequestLimit)
                 put("remoteJson", value.remoteUsageJson ?: "")
                 put("remoteAt", value.remoteUsageFetchedAtMillis)
+                put("usageTracked", value.usageTracked)
             })
         }
         root.put("providers", providers)
@@ -263,6 +302,7 @@ class ProviderUsageTracker(private val preferences: AppPreferencesBridge) {
                 dailyRequestLimit = item.optInt("limit"),
                 remoteUsageJson = item.optString("remoteJson").ifBlank { null },
                 remoteUsageFetchedAtMillis = item.optLong("remoteAt"),
+                usageTracked = item.optBoolean("usageTracked", true),
             )
         }
         rolloverIfNeededLocked()

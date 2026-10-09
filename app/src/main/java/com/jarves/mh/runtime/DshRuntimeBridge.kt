@@ -43,6 +43,8 @@ import org.json.JSONObject
 class DshRuntimeBridge(
     private val context: Context,
     private val secretFor: (ProviderProfile) -> String?,
+    /** Receives upstream usage data extracted from the DSH SDK stream for live usage tracking. */
+    private val onUpstreamResult: ((kind: ProviderKind, code: Int, inputTokens: Int, outputTokens: Int) -> Unit)? = null,
 ) : RuntimeBridge {
     private val installer = RuntimeInstaller(context)
     private val checkpoints = WorkspaceCheckpoints(context.filesDir)
@@ -61,6 +63,11 @@ class DshRuntimeBridge(
     @Volatile private var taskStartedAtElapsedRealtime: Long = 0L
     @Volatile private var lastForegroundProgressAt: Long = 0L
     @Volatile private var foregroundResultPosted: Boolean = false
+    /**
+     * Provider kind of the in-flight session, captured at startSession so the
+     * SDK stream parser can route usage reports back to the tracker.
+     */
+    @Volatile private var cachedProviderKind: ProviderKind = ProviderKind.DEEPSEEK
 
     private class DshSessionState {
         @Volatile var userStopRequested: Boolean = false
@@ -72,6 +79,7 @@ class DshRuntimeBridge(
         finishedSessions.remove(sessionId)
         activeSessionId = sessionId
         activeProjectSlug = projectSlug
+        cachedProviderKind = provider.kind
         taskStartedAtElapsedRealtime = android.os.SystemClock.elapsedRealtime()
         lastForegroundProgressAt = 0L
         foregroundResultPosted = false
@@ -348,6 +356,12 @@ class DshRuntimeBridge(
                     eventBus.emit(RuntimeEvent.AssistantDelta(sessionId, protocolEvent.text))
                 }
                 is DshSdkProtocolEvent.Failed -> failure = protocolEvent.message
+                is DshSdkProtocolEvent.UsageReported -> {
+                    sawActivity = true
+                    runCatching {
+                        onUpstreamResult?.invoke(cachedProviderKind, 200, protocolEvent.inputTokens, protocolEvent.outputTokens)
+                    }
+                }
                 DshSdkProtocolEvent.TurnCompleted -> sawActivity = true
                 DshSdkProtocolEvent.ShutdownAcknowledged -> closeInput()
                 DshSdkProtocolEvent.Ignored -> Unit
@@ -836,6 +850,13 @@ internal sealed interface DshSdkProtocolEvent {
     data class ToolStarted(val callId: String, val name: String, val detail: String) : DshSdkProtocolEvent
     data class ToolCompleted(val callId: String, val name: String, val summary: String) : DshSdkProtocolEvent
     data class AssistantText(val text: String) : DshSdkProtocolEvent
+    /**
+     * Token usage extracted from a stream event (typically `turn/end`'s `data`
+     * object). The DSH SDK exposes usage under `data.usage` with
+     * `input_tokens` / `output_tokens` (and cache variants); when absent the
+     * parser does not emit this event and the route is considered untracked.
+     */
+    data class UsageReported(val inputTokens: Int, val outputTokens: Int) : DshSdkProtocolEvent
     data class Failed(val message: String) : DshSdkProtocolEvent
     data object TurnCompleted : DshSdkProtocolEvent
     data object ShutdownAcknowledged : DshSdkProtocolEvent
@@ -935,13 +956,23 @@ internal class DshSdkProtocolParser(private val expectedSessionId: String) {
             }
             "turn/end" -> {
                 val reason = data.optJSONObject("reason")
+                // Extract token usage when the SDK reports it. DSH's turn/end
+                // payload carries usage under `data.usage` (or, for some routes,
+                // `data.reason.usage`). We accept both shapes and the standard
+                // input_tokens / output_tokens as well as the OpenAI-style
+                // prompt_tokens / completion_tokens aliases.
+                val usage = data.optJSONObject("usage")
+                    ?: reason?.optJSONObject("usage")
+                val usageEvent = usage?.let { extractUsage(it) }
                 when (reason?.optString("kind")) {
-                    "error" -> DshSdkProtocolEvent.Failed(
+                    "error" -> if (usageEvent != null) usageEvent
+                    else DshSdkProtocolEvent.Failed(
                         reason.optJSONObject("error")?.optString("message").orEmpty()
                             .meaningfulDshText("DeepSeek Harness turn failed"),
                     )
-                    "blocked" -> DshSdkProtocolEvent.Failed("DeepSeek Harness was blocked from completing the task")
-                    else -> DshSdkProtocolEvent.TurnCompleted
+                    "blocked" -> if (usageEvent != null) usageEvent
+                    else DshSdkProtocolEvent.Failed("DeepSeek Harness was blocked from completing the task")
+                    else -> usageEvent ?: DshSdkProtocolEvent.TurnCompleted
                 }
             }
             else -> DshSdkProtocolEvent.Ignored
@@ -1028,5 +1059,29 @@ internal class DshSdkProtocolParser(private val expectedSessionId: String) {
                 }
             }
         }.joinToString("\n")
+    }
+
+    /**
+     * Pulls token usage out of a DSH SDK `usage` object. Returns null if no
+     * usable token fields are present (so the caller can fall back to the
+     * normal turn-completed event without recording fake zeros).
+     *
+     * The DSH SDK uses `input_tokens` / `output_tokens` for Anthropic-shaped
+     * routes and `prompt_tokens` / `completion_tokens` for OpenAI-shaped ones;
+     * we accept either pair, plus a `total_tokens` fallback when only that is
+     * present.
+     */
+    private fun extractUsage(usage: JSONObject): DshSdkProtocolEvent.UsageReported? {
+        val input: Int = usage.optInt("input_tokens").takeIf { it > 0 }
+            ?: usage.optInt("prompt_tokens").takeIf { it > 0 }
+            ?: 0
+        val output: Int = usage.optInt("output_tokens").takeIf { it > 0 }
+            ?: usage.optInt("completion_tokens").takeIf { it > 0 }
+            ?: 0
+        if (input <= 0 && output <= 0) {
+            val total = usage.optInt("total_tokens").takeIf { it > 0 } ?: return null
+            return DshSdkProtocolEvent.UsageReported(total, 0)
+        }
+        return DshSdkProtocolEvent.UsageReported(input, output)
     }
 }

@@ -1,0 +1,9 @@
+Privacy: Claude Code's launcher used to log your full prompt and conversation history plus every line of streaming output to Android's diagnostic log (logcat), which ADB and crash reports can read. Those logs are gone now - only operational messages (exit code, changed files) remain, and only in debug builds. DeepSeek Harness got the same treatment. Antigravity never had this issue.
+
+Usage tracking: the live status card used to stay at zero requests and zero tokens for everything except Claude's OpenAI-format gateway. Direct Anthropic and OpenRouter routes, plus the entire DeepSeek Harness agent, now report real token counts back to the card, and the daily-request failover can actually fire when a tracked provider hits its limit. Antigravity's CLI does not expose per-request usage - the card now says "Usage not tracked for this route" instead of pretending everything is at zero.
+
+Packaging: the Antigravity runtime bundle is now verified at build time. If a future build ever ships without the embedded asset, the build fails with the exact command to fetch it, instead of producing an APK that crashes on the first Antigravity install. The runtime also detects a missing asset in an already-installed APK and tells you to reinstall, instead of throwing a vague IOException.
+
+Metadata: the README download links and version badge now point at the real current release (the old ones mixed v1.0.4 paths with v1.0.11 filenames and 404'd). F-Droid metadata matches the source versionCode 15.
+
+Same signing key - installs directly over v1.0.13 with one tap.

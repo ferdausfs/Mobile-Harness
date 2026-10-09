@@ -4,6 +4,50 @@ Newest entries prepended. Never delete entries.
 
 ---
 
+## 2026-10-09 — F-06 privacy: Claude/DSH bridge logs no longer leak prompt/history/stream
+
+- **Agent/tool**: Claude Code agent session (Super Z), direct repo work on `ferdausfs/Mobile-Harness` branch `main`
+- **Scope**: Audit finding F-06 (privacy). Approved scope this session: F-06, F-07, F-08, plus a build-time check for F-02. F-03/F-04/F-05 explicitly out of scope (product/security decisions).
+
+### Root cause (re-verified at source)
+`ClaudeRuntimeBridge.kt` emitted three categories of sensitive data to logcat via `Log.d` with no `BuildConfig.DEBUG` guard, while release `isMinifyEnabled = false` (`app/build.gradle.kts:130`) kept those statements live in shipped APKs:
+1. `Launching command: $command` — the `command` list contained `contextPrompt` as the `-p` argument. `contextPrompt` is built from the user's current prompt **plus** recent conversation history (`buildContextPrompt(prompt, conversationHistory, …)`).
+2. `OUTPUT: $line` / `TRAILING OUTPUT: $line` — every raw stream-json line emitted by the Claude CLI. These lines contain assistant text, tool inputs/outputs (file contents, shell commands), and provider-side error messages.
+3. `Provider: …, BaseUrl: …` / `Launch environment keys: …` — provider identity and the env-var names passed to the CLI (not values, but still metadata).
+
+`DshRuntimeBridge.kt` had less sensitive `Log.d` calls (route name, model, exit code, changed-files list) but the same pattern of being live in release builds.
+
+`AntigravityRuntimeBridge.kt` was checked — no `Log.d/i/v/w/e` calls at all. No change.
+
+### What changed (commit `408801f`, one review set)
+- `ClaudeRuntimeBridge.kt`:
+  - Wrapped every `Log.d` in `if (BuildConfig.DEBUG)`. For the launch log, replaced `Launching command: $command` with `Launching claude (model=…)` — the full command line is no longer logged even in debug, because `contextPrompt` is part of it. (A debug build still gets the model and provider info; a release build gets nothing.)
+  - Removed the `OUTPUT:` and `TRAILING OUTPUT:` `Log.d` calls entirely. There is no safe redaction possible for raw stream-json: lines may be tool-result messages that embed file contents. The error detector and the `consumeClaudeEvent` parser still receive the line as before; only the log statement is gone.
+  - Guarded `Log.e("ClaudeBridge", "Session failed", error)` and `Log.w("ClaudeBridge", "Could not post task result notification", error)` with `BuildConfig.DEBUG`. The user-facing failure message is still surfaced through `friendlyError(error)` + `RuntimeEvent.RuntimeFailure`, so release users still see what failed — only the stacktrace stops entering logcat.
+  - Added `import com.jarves.mh.BuildConfig`.
+- `DshRuntimeBridge.kt`:
+  - Same `BuildConfig.DEBUG` guard applied to its three `Log.d` calls (route/model, exit code, changed files) and the two `Log.e`/`Log.w` failure paths. DSH does not currently log raw stream content, so nothing was deleted — just gated.
+  - Added `import com.jarves.mh.BuildConfig`.
+
+### What is intentionally NOT changed
+- `LocalFormatGateway.kt:87` `Log.w("FormatGateway", "Provider returned HTTP ${upstream.first}: ${providerError(upstream.second)}")` — logs only HTTP status + provider-side error string (no user prompt, no response body). Operational, left unguarded.
+- `RuntimeInstaller.kt` install-progress logs (`Log.i` about stripped macOS metadata, `Log.e`/`Log.w` about Linux compat link repair and UTF-8 decode failures) — operational, no prompt data. Left unguarded.
+- All other `Log.d` calls in the project (no others exist in the three runtime bridges or `LocalFormatGateway`/`OpenRouterRoutingGateway`).
+- The README's "zero plain-text leaks" claim is now actually true for prompt/history/stream content for Claude+DSH. It was not true before this commit. The README itself was not edited as part of F-06 (F-08 handles README/version metadata separately).
+
+### Verification
+- `./gradlew :app:assembleOnlineRelease` → **BUILD SUCCESSFUL in 2m 35s**.
+- APK: `app/build/outputs/apk/online/release/app-online-release.apk`, 87,636,107 bytes, sha256 `c70d594a7d8fba64aae58c2222648a05856ea9ef986af55662f29d90549f9eb1`.
+- Signature cert SHA-256 `d07ba804cfa95dd39083002628b65487d7ae99acab12cdfa61c5f42bca7dccfe` — verified via `apksigner verify --print-certs` from build-tools 35.0.0. Identical to v1.0.8–v1.0.13 line; in-place update path preserved.
+- Not run this commit: unit tests (F-06 is a log-statement change; no test asserts log output; running full `testOnlineDebugUnitTest` is deferred to F-07/F-08/F-02 to avoid four rebuild cycles).
+
+### Notes for next agent
+- The "Launching claude" debug log still includes `launch.environment["ANTHROPIC_MODEL"]` and `provider.model` — model identity, not prompt content. If you ever expand it, do not include the `command` list (it contains `-p contextPrompt`).
+- Build env bootstrap this session: JDK 21 at `/home/z/jdk` (Temurin 21.0.5+11, freshly downloaded — env was wiped), SDK at `/home/z/android-sdk` (platform-tools, platform-36 r02, build-tools 35.0.0 + 36.0.0, licenses written directly), NDK r26b at `/home/z/android-ndk`. Submodules initialized. AGY bundle in `dist/runtime-bundles/` (sha256 `a659ab91…d78`, matches manifest.json). Keystore fetched from private gist `4b76689e972c864d8a6e187503b174c4` to `/home/z/my-project/keystores/mobile-harness-release.jks`. `local.properties`, `gradle.properties.orig`, `gradle.properties.local`-merged-into-`gradle.properties` are all gitignored or excluded from commits (only the runtime source files went into commit `408801f`).
+- The `gradle.properties` file in the working tree was tuned for this 4 GB box (`-Xmx2400m -XX:+UseSerialGC`, `kotlin.compiler.execution.strategy=in-process`, `--no-daemon`, workers.max=1). It is NOT committed; the committed `gradle.properties` is unchanged.
+
+---
+
 ---
 
 ## 2026-10-08 — v1.0.13 release: OpenRouter + Ollama Cloud provider fixes (dual-wire validation/runtime, reasoning-model hardening)

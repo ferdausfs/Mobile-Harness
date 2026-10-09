@@ -1093,21 +1093,24 @@ fun AgentScreen(
                             newKeyName = ""
                             newApiKey = ""
                             apiKey = getSavedApiKey(selectedKind)
-                            status = "API key added for ${selectedKind.title}."
-                            statusOk = true
+                            // The visible key list already shows the change; a
+                            // status line here used to linger and read as a
+                            // stale error after later actions.
+                            status = null
+                            statusProviderMessage = null
                         },
                         onActivateKey = { keyId ->
                             savedKeys = onActivateApiKey(selectedKind, keyId)
                             apiKey = getSavedApiKey(selectedKind)
-                            status = "Active API key changed for ${selectedKind.title}."
-                            statusOk = true
+                            status = null
+                            statusProviderMessage = null
                         },
                         onRemoveKey = { keyId ->
                             savedKeys = onRemoveApiKey(selectedKind, keyId)
                             apiKey = getSavedApiKey(selectedKind)
                             keyConnectionStatuses = keyConnectionStatuses - keyId
-                            status = "API key removed from ${selectedKind.title}."
-                            statusOk = true
+                            status = null
+                            statusProviderMessage = null
                         },
                         onOpenModelSheet = {
                             showModels = true
@@ -1164,11 +1167,16 @@ fun AgentScreen(
                                         if (activeKeyId != null) {
                                             keyConnectionStatuses = keyConnectionStatuses +
                                                 (activeKeyId to KeyConnectionStatus(result.message, false, result.providerMessage, result.label))
-                                        } else {
-                                            status = result.message
-                                            statusOk = false
-                                            statusProviderMessage = result.providerMessage
                                         }
+                                        // Keep the Model-section status in sync with the
+                                        // check result: previously only the credentials
+                                        // badge updated, and the section kept whatever
+                                        // text add/activate/remove last set (the user read
+                                        // a stale "API key removed from …" as the app
+                                        // deleting their key).
+                                        status = result.message
+                                        statusOk = false
+                                        statusProviderMessage = result.providerMessage
                                     }
                                 }
                                 isValidating = false

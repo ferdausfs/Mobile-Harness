@@ -4,6 +4,73 @@ Newest entries prepended. Never delete entries.
 
 ---
 
+## 2026-10-09 — F-02 packaging: build fails fast when AGY bundle missing; APK missing-asset path now reports clearly
+
+- **Agent/tool**: Claude Code agent session (Super Z), direct repo work on `ferdausfs/Mobile-Harness` branch `main`
+- **Scope**: Audit finding F-02 (packaging). Approved scope this session: F-06, F-07, F-08, plus a build-time check for F-02.
+
+### Root cause (re-verified at source)
+Antigravity installation is forced to use the embedded-asset path:
+```kotlin
+installRuntimeOverlay(
+    bundle = AGY_BUNDLE,
+    message = "Installing Antigravity CLI $AGY_VERSION",
+    from = fraction,
+    to = 0.995f,
+    onProgress = onProgress,
+    forceEmbedded = true,
+)
+```
+(`RuntimeInstaller.kt:575–583`). The embedded branch (`RuntimeInstaller.kt:974–998` before this commit) opens `assets/runtime/${bundle.fileName}` via `context.assets.open(...)` and **does not fall through to the online download branch** if the asset is missing. If the asset is absent, `AssetManager.open` throws a generic `IOException` that the UI surfaces as a vague "Loading Antigravity CLI bundle" failure.
+
+The build task that stages the asset — `prepareBundledAgentAssets` in `app/build.gradle.kts:35–38` — is a Gradle `Sync` task that copies its `from(...)` source into the generated assets dir. **A Gradle `Sync` task silently copies nothing when the source file does not exist** (it just creates the destination dir as empty). Therefore a `./gradlew :app:assembleOnlineRelease` invocation with `dist/runtime-bundles/pocketdev-agy-arm64-2026.09.1.tar.zst` absent produced a clean-looking APK that lacked the AGY asset entirely and would crash on the first Antigravity install.
+
+The audit notes that the local checkout (and any fresh clone) has only `manifest.json` in `dist/runtime-bundles/`; the `.tar.zst` archives are gitignored (`.gitignore:59–64`) and must be supplied separately. So an unwary developer building from a fresh clone would silently produce a broken APK.
+
+### What changed (commit `8ed5afe`, one review set)
+1. **`app/build.gradle.kts`** — added two verification tasks:
+   - `ensureBundledAgentAssetsPresent` — fails the build with a clear message when `pocketdev-agy-arm64-2026.09.1.tar.zst` is absent. The message names the file, the reason (gitignored, must be supplied separately), the exact `curl` command to fetch it from the `runtime-2026.09.4` GitHub release, and the expected sha256 from `manifest.json` (`a659ab9188956fc4721ca86fb21b5118e0e489f47a5e02ae6b4f2fb423659d78`).
+   - `ensureOfflineRuntimeAssetsPresent` — same contract for the five offline-flavor bundles (`pocketdev-core-arm64-2026.09.5.tar.zst`, `pocketdev-claude-arm64-2026.09.1.tar.zst`, `pocketdev-python-arm64-2026.09.2.tar.zst`, `pocketdev-android-arm64-2026.09.1.tar.zst`, `pocketdev-dsh-arm64-2026.09.1.tar.zst`). Lists every missing file in one error so the developer can fetch them all at once.
+   - Wired `prepareBundledAgentAssets.dependsOn(ensureBundledAgentAssetsPresent)` and `prepareOfflineRuntimeAssets.dependsOn(ensureOfflineRuntimeAssetsPresent)`. The check runs at the start of every `prepareBundledAgentAssets`/`prepareOfflineRuntimeAssets` invocation, which is upstream of every `merge*Assets` and lint task. A clean checkout can no longer silently produce a broken APK.
+2. **`app/src/main/java/com/jarves/mh/runtime/RuntimeInstaller.kt`** — `obtainRuntimeBundle`'s embedded branch now does an explicit presence check via `context.assets.open(assetPath).use { it.read() }` inside a `runCatching` before the main copy. If the asset is missing (e.g. an old APK that was built before the build-time guard landed, or a hand-modified APK), the user sees "The Antigravity runtime bundle is missing from this APK. This build was packaged without the required asset 'runtime/pocketdev-agy-arm64-2026.09.1.tar.zst'. Reinstall from a release APK that was built with the AGY bundle staged under dist/runtime-bundles/…" instead of a raw `IOException` stacktrace. This is a redundant defense — the build-time guard already prevents new builds from reaching this state — but it makes the failure mode legible for any pre-F-02 APK that is already in the wild.
+
+### Verification
+- **Build with AGY present** → `./gradlew :app:assembleOnlineRelease` → **BUILD SUCCESSFUL in 2m 42s**. APK contains `assets/runtime/pocketdev-agy-arm64-2026.09.1.tar.zst` at 41,870,025 bytes (matches `manifest.json`'s `compressedBytes`).
+- **Fail-fast test** (manually moved the AGY bundle aside and rebuilt) → **BUILD FAILED in 14s** with the exact intended error:
+  ```
+  Missing required runtime asset: dist/runtime-bundles/pocketdev-agy-arm64-2026.09.1.tar.zst
+  
+  The Antigravity runtime bundle 'pocketdev-agy-arm64-2026.09.1.tar.zst'
+  is gitignored and must be supplied separately before building any
+  flavor. Antigravity installation is forced to use the embedded asset
+  (RuntimeInstaller.installRuntimeOverlay with forceEmbedded = true),
+  so an APK built without this file will install cleanly and then fail
+  at the first Antigravity install with a generic IOException.
+  
+  Obtain it from the runtime release:
+    curl -L -o dist/runtime-bundles/pocketdev-agy-arm64-2026.09.1.tar.zst \
+      https://github.com/ferdausfs/Mobile-Harness/releases/download/runtime-2026.09.4/pocketdev-agy-arm64-2026.09.1.tar.zst
+  
+  Verify against dist/runtime-bundles/manifest.json (sha256
+  a659ab9188956fc4721ca86fb21b5118e0e489f47a5e02ae6b4f2fb423659d78)
+  before rebuilding.
+  ```
+  Restoring the bundle and rebuilding succeeded (BUILD SUCCESSFUL in 15s, all tasks up-to-date from the prior build).
+- **Unit tests** → `./gradlew :app:testOnlineDebugUnitTest` → **BUILD SUCCESSFUL** (all green; the new check is additive and does not break any existing flow).
+- APK (with the new code + AGY present): 87,642,863 bytes, sha256 `e326258073bf3162bf72a7ffdc2977cb608215fe20f5c00778f2d34a0561a772`. Signed with cert SHA-256 `d07ba804cfa95dd39083002628b65487d7ae99acab12cdfa61c5f42bca7dccfe` (apksigner verify --print-certs from build-tools 35.0.0).
+
+### What is intentionally NOT changed
+- The `forceEmbedded = true` flag itself (audit notes this is the product decision to always ship the AGY bundle in the APK rather than download it on demand). Out of scope.
+- The `prepareBundledAgentAssets` `Sync` task is unchanged; the guard runs before it. (Switching `Sync` to `Copy` would also fail loudly on a missing source, but that is a larger behaviour change and the explicit guard gives a much better error message.)
+- The online-download branch of `obtainRuntimeBundle` (used by core/claude/python/android/dsh in the online flavor) is unchanged; those bundles are downloaded from the runtime release on first use when not present in the APK.
+
+### Notes for next agent
+- This closes the F-02 packaging risk: a build from a clean checkout can no longer silently produce an APK without the AGY bundle. Any future Antigravity-related install failure on a current-build APK is now either (a) the user has a pre-F-02 APK — the runtime check tells them to reinstall — or (b) a genuine runtime/PRoot error, not a packaging error.
+- The build-time guard depends on the AGY bundle being present locally. CI workflows (when added) must stage the AGY bundle from the runtime-2026.09.4 release before `assembleOnlineRelease` runs, or the build will fail with the message above. This is the intended behaviour.
+- The runtime-side check opens the asset twice (once in `runCatching` to test presence, once for the real copy). The asset is at most ~42 MB for AGY, and `AssetManager.open` does not buffer the whole file — only `it.read()` reads one byte to confirm the asset resolves. Negligible overhead; if this ever becomes a concern, swap to `assets.list("runtime")?.contains(bundle.fileName) == true`.
+
+---
+
 ## 2026-10-09 — F-08 metadata: README + F-Droid yml aligned with v1.0.13 / versionCode 14
 
 - **Agent/tool**: Claude Code agent session (Super Z), direct repo work on `ferdausfs/Mobile-Harness` branch `main`

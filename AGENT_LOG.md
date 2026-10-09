@@ -4,6 +4,30 @@ Newest entries prepended. Never delete entries.
 
 ---
 
+## 2026-10-09 — REVIEW ONLY (no code changes): Ollama Cloud "key rejected" root cause = missing User-Agent → ollama.com edge 403
+
+- **Agent/tool**: Super Z agent session, review-only on `ferdausfs/Mobile-Harness` branch `main` @ `c1791b5` (v1.0.16). Working tree left clean; this log entry is the only local (uncommitted) edit.
+- **Trigger**: User report on v1.0.16 — Ollama Cloud card, `https://ollama.com/api`, `gpt-oss:120b`, saved key "004" Active, but "ollama.com rejected this key. Check this API key or select another saved key…", Model section showing stale "API key removed from Ollama Cloud.", hero "Not tested". Same key returns HTTP 200 via Termux curl. Review scope: key save/use/test only; report deliverable at `/home/z/my-project/download/REVIEW-REPORT-ollama-cloud-api-key-2026-10-09.md`.
+
+### Root cause (live-proven with the user's own valid key)
+The app's three provider-facing HTTP clients set no `User-Agent`; Android `HttpURLConnection` sends `Dalvik/2.1.0 (…)`, and **ollama.com's edge (server: Google Frontend) returns HTTP 403 (134-byte HTML page) to any request with a Dalvik UA** — before the key is ever evaluated. `ProviderApiClient.validate()` treats `401 || 403` identically (label "Rejected", "ollama.com rejected this key"), so an edge client-block is misreported as a key rejection. Evidence: same request with curl/okhttp/Java/browser/empty/custom/node/undici/axios/OpenAI-JS UAs → 200 (with the real key) or 401 (dummy key); only Dalvik → 403; HTTP/1.1 vs HTTP/2 ruled out; trailing-whitespace key → 401 (proves the stored-key-integrity path is not the live bug). Only ollama.com blocks Dalvik — all other providers (Anthropic, OpenRouter, DeepSeek, Kimi, OpenCode Zen, NVIDIA NIM) treat both UAs identically.
+
+### Findings register (for the fix phase; nothing implemented yet)
+- **P0 / F-09**: missing User-Agent in `ProviderApiClient.request()` (validation/discovery/ping), `LocalFormatGateway.postJson()` (runtime use path — even a passing check would 403 at inference), `OllamaUsageClient.request()` (usage card). Repo precedent: opencode.ai UA special-case and `GitHubClient` "PocketDev-Android".
+- **P1 / F-10**: 403-with-HTML-body (edge block) must not be reported as "key rejected" — split by body shape (Anthropic's genuine 403 is JSON and must stay "rejected").
+- **P1 / F-11**: defensive `trim()` + strip accidental "Bearer " prefix at a single choke point (fallback `getSavedApiKey` and `request()` currently untrimmed; proven whitespace → 401).
+- **P1 / F-12**: same UA for `OpenRouterRoutingGateway` (latent consistency).
+- **P2 / F-13**: stale `status` in AgentScreen ("API key removed from …" persists; active-key check failures never update the Model-section status) — the user misread it as the app deleting their key.
+- **P2 / F-14**: `ApiKeyVault.put()` silently overwrites the ACTIVE entry's secret (called from `finishOnboarding`/`updateProvider`).
+- **P2 / F-15**: newly added keys are not auto-activated when the pool is non-empty; the `apiKey` field keeps the OLD active secret until manual activation.
+- Verified CORRECT (do not churn): native-first endpoint order, Bearer header format, URL construction, `resolvedBaseUrl`, AES/GCM vault roundtrip, add-time trim, "004" is just a label, DSH runtime unaffected (node UAs pass).
+
+### Verification
+- Probes (reproducible): `/home/z/my-project/scripts/ollama_probe.sh`, `ollama_ua_matrix.sh`, `provider_ua_matrix.sh`. Docs checked: docs.ollama.com/api/authentication (Bearer required, x-api-key alone unsupported), /api/introduction (host https://ollama.com), /cloud.
+- No build run (no code changed). Fix phase awaits user approval: full files, unique-named ZIP, no wrapper folder, tests for UA presence + 403/401 message split, then v1.0.17 release pipeline.
+
+---
+
 ## 2026-10-09 — v1.0.16 release: Ollama Cloud native-first endpoint + key-check attribution (versionCode 17)
 
 - **Agent/tool**: Super Z agent session, direct repo work on `ferdausfs/Mobile-Harness` branch `main`

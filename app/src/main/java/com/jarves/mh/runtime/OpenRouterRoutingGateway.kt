@@ -94,6 +94,9 @@ internal class OpenRouterRoutingGateway(
                 connection.setRequestProperty("Content-Type", "application/json")
                 connection.setRequestProperty("Accept", headers["accept"] ?: "application/json")
                 connection.setRequestProperty("Authorization", "Bearer $apiKey")
+                // Never send Android's default Dalvik User-Agent: provider
+                // edges may block it (ollama.com answers 403 before auth).
+                connection.setRequestProperty("User-Agent", com.jarves.mh.network.ProviderHttp.APP_USER_AGENT)
                 connection.setRequestProperty("anthropic-version", headers["anthropic-version"] ?: "2023-06-01")
                 headers["anthropic-beta"]?.let { connection.setRequestProperty("anthropic-beta", it) }
                 connection.outputStream.use { it.write(routedBody) }

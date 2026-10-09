@@ -129,6 +129,9 @@ object OllamaUsageClient {
             connection.readTimeout = 20_000
             connection.setRequestProperty("Accept", "application/json")
             connection.setRequestProperty("Authorization", "Bearer $apiKey")
+            // Never send Android's default Dalvik User-Agent: ollama.com's
+            // edge blocks it with 403 before the key is checked.
+            connection.setRequestProperty("User-Agent", ProviderHttp.APP_USER_AGENT)
             if (body != null) {
                 connection.setRequestProperty("Content-Type", "application/json")
                 connection.doOutput = true

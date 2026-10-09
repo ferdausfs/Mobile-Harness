@@ -1,6 +1,7 @@
 package com.jarves.mh.runtime
 
 import com.jarves.mh.model.ProviderProfile
+import com.jarves.mh.network.ProviderHttp
 import android.util.Log
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
@@ -434,6 +435,9 @@ internal class LocalFormatGateway(
             connection.doOutput = true
             connection.setRequestProperty("Content-Type", "application/json")
             connection.setRequestProperty("Authorization", "Bearer $apiKey")
+            // Never send Android's default Dalvik User-Agent: ollama.com's
+            // edge blocks it with 403 before the key is checked.
+            connection.setRequestProperty("User-Agent", ProviderHttp.APP_USER_AGENT)
             connection.outputStream.use { it.write(body.toString().toByteArray()) }
             val code = connection.responseCode
             val stream = if (code in 200..299) connection.inputStream else connection.errorStream

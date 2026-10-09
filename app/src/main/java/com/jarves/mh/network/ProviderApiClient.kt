@@ -275,12 +275,18 @@ class ProviderApiClient {
                 readTimeout = readTimeoutMs
                 setRequestProperty("Accept", "application/json")
                 setRequestProperty("Content-Type", "application/json")
+                // Always identify the app: Android's default Dalvik
+                // User-Agent is blocked by some provider edges (ollama.com
+                // answers 403 before the key is ever checked). OpenCode Zen
+                // keeps its dedicated client UA through userAgentFor().
+                setRequestProperty("User-Agent", ProviderHttp.userAgentFor(endpoint))
                 if (apiKey.isNotBlank()) {
                     setRequestProperty("Authorization", "Bearer $apiKey")
                 }
                 if (endpoint.startsWith("https://opencode.ai/zen/")) {
-                    // OpenCode Zen expects requests to identify the OpenCode client and session.
-                    setRequestProperty("User-Agent", "opencode/1.18.20")
+                    // OpenCode Zen expects requests to identify the OpenCode
+                    // client and session; the UA itself comes from
+                    // userAgentFor() above.
                     setRequestProperty("x-session-id", "session-${UUID.randomUUID()}")
                 }
                 if (apiKey.isNotBlank() && protocol != ProviderProtocol.OPENAI_CHAT && protocol != ProviderProtocol.OPENAI_RESPONSES) {

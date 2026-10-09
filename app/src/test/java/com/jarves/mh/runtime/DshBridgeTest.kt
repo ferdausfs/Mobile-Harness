@@ -245,6 +245,24 @@ class DshRouteMapperTest {
     }
 
     @Test
+    fun ollamaCloudRouteResolvesToOpenAiV1Tree() {
+        // The provider's fixed base is the native /api root (what Ollama's
+        // cloud documentation documents), but DSH speaks the OpenAI wire, so
+        // the route must resolve to https://ollama.com/v1 — even when a stale
+        // saved profile still stores the old /v1 default.
+        val route = DshRouteMapper.forProfile(ProviderProfile(ProviderKind.OLLAMA_CLOUD, baseUrl = "https://ollama.com/v1", model = "gpt-oss:120b"))
+        assertEquals("mh-ollama", route.name)
+        assertEquals("openai-completions", route.custom?.api)
+        assertEquals("https://ollama.com/v1", route.custom?.baseUrl)
+        // The same normalization applies to a Custom API profile on an
+        // OpenAI wire pointing at any Ollama base form.
+        val custom = DshRouteMapper.forProfile(
+            ProviderProfile(ProviderKind.CUSTOM, baseUrl = "https://ollama.com/api", model = "m", dshApi = "openai-completions"),
+        )
+        assertEquals("https://ollama.com/v1", custom.custom?.baseUrl)
+    }
+
+    @Test
     fun openRouterHonorsDetectedWireAndDefaultsToAnthropic() {
         val detected = DshRouteMapper.forProfile(
             ProviderProfile(ProviderKind.LLM_ROUTER, baseUrl = "https://openrouter.ai/api/v1", model = "m", dshApi = "openai-completions"),

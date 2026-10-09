@@ -1,0 +1,7 @@
+Ollama Cloud now speaks Ollama's own API first: the provider's endpoint is the native https://ollama.com/api root that Ollama's cloud documentation documents, not the OpenAI-compatibility /v1 path. The connection test tries the native /api/chat endpoint first (then /v1 as a fallback), the Claude Code runtime gateway does the same on every prompt, and model discovery reads the native /api/tags catalog first - so a key that works anywhere on ollama.com now validates and runs.
+
+Key checks now say which service rejected them. If a key is tested against the wrong provider card - an Ollama Cloud key pasted under DeepSeek, for example - the error names the endpoint that answered (api.deepseek.com rejected this key) instead of a generic "invalid key", so it is obvious the provider selection, not the key, needs to change.
+
+Saved Ollama Cloud setups migrate automatically: the fixed endpoint resolves to the new native root even if an older version stored the old /v1 URL, and the DeepSeek Harness route keeps using Ollama's OpenAI-compatible /v1 tree, which is the only wire that agent's SDK speaks.
+
+Same signing key - installs directly over v1.0.15 with one tap.

@@ -44,34 +44,51 @@ class ProviderApiClientTest {
     }
 
     @Test
-    fun ollamaCloudValidationTriesNativeApiChatCandidate() {
+    fun ollamaCloudValidationTriesNativeApiChatFirst() {
         val client = ProviderApiClient()
+        // Both saved base forms (the old /v1 default and the new /api default)
+        // must resolve to the same candidate list with the documented native
+        // /api/chat endpoint first.
+        listOf("https://ollama.com/v1", "https://ollama.com/api").forEach { base ->
+            val candidates = client.validationCandidates(
+                baseUrl = base,
+                protocol = ProviderProtocol.OPENAI_CHAT,
+            )
+            val urls = candidates.map { it.url }
+            assert(urls.first() == "https://ollama.com/api/chat") {
+                "Expected native /api/chat first for base $base. Got: $urls"
+            }
+            assert(urls.any { it == "https://ollama.com/v1/chat/completions" }) {
+                "Expected /v1/chat/completions fallback for base $base. Got: $urls"
+            }
+            assert(urls.any { it == "https://ollama.com/v1/messages" }) {
+                "Expected Anthropic shim fallback for base $base. Got: $urls"
+            }
+        }
+    }
+
+    @Test
+    fun ollamaCloudNativeBaseIsReportedForCustomDetection() {
+        val client = ProviderApiClient()
+        // A Custom API profile pointing at ollama.com root: a validation
+        // success on the native endpoint attributes the /api base so the saved
+        // profile keeps working on both agents.
         val candidates = client.validationCandidates(
-            baseUrl = "https://ollama.com/v1",
-            protocol = ProviderProtocol.OPENAI_CHAT,
+            baseUrl = "https://ollama.com",
+            protocol = ProviderProtocol.ANTHROPIC_GATEWAY,
         )
-        val urls = candidates.map { it.url }
-        // Primary OpenAI endpoint still tried first.
-        assert(urls.any { it == "https://ollama.com/v1/chat/completions" }) {
-            "Expected /v1/chat/completions candidate. Got: $urls"
-        }
-        // Ollama native /api/chat endpoint also tried as a fallback for keys
-        // that cannot reach the OpenAI shim.
-        assert(urls.any { it == "https://ollama.com/api/chat" }) {
-            "Expected /api/chat candidate for Ollama Cloud. Got: $urls"
-        }
+        val native = candidates.first()
+        assert(native.url == "https://ollama.com/api/chat") { "Got: ${native.url}" }
+        assert(native.baseUrl == "https://ollama.com/api") { "Got: ${native.baseUrl}" }
     }
 
     @Test
     fun ollamaCloudNativeApiTagsIsProbedDuringDiscovery() {
         val client = ProviderApiClient()
-        // Reflect into the private modelEndpoints via a test seam: the public
-        // discoverModels path accepts the base URL and protocol. We assert that
-        // the candidate list (visible via validationCandidates for the same
-        // host) extends to the native /api/chat endpoint, which is the same
-        // host-detection used to add /api/tags in modelEndpoints.
+        // The Ollama host detection that puts /api/chat first in validation
+        // also routes model discovery at the native /api/tags catalog.
         val candidates = client.validationCandidates(
-            baseUrl = "https://ollama.com/v1",
+            baseUrl = "https://ollama.com/api",
             protocol = ProviderProtocol.OPENAI_CHAT,
         )
         assert(candidates.any { it.url.contains("ollama.com/api/chat") }) {

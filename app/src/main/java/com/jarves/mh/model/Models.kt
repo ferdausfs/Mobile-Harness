@@ -45,7 +45,7 @@ enum class ProviderKind(
         "Ollama Cloud",
         "OpenAI-compatible models on Ollama's cloud GPUs",
         ProviderProtocol.OPENAI_CHAT,
-        "https://ollama.com/v1",
+        "https://ollama.com/api",
         "gpt-oss:120b",
         fixedBaseUrl = true,
         fixedProtocol = true,

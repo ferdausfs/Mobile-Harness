@@ -1891,7 +1891,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     suspend fun discoverModels(profile: ProviderProfile, secret: String): ModelDiscoveryResult {
         val key = secret.ifBlank { vault.get(profile.kind.name).orEmpty() }
-        return providerApi.discoverModels(profile.baseUrl, key, providerProtocolForAgent(profile, _state.value.agentKind))
+        // resolvedBaseUrl: fixed providers (Ollama Cloud) ignore stored URL drift.
+        return providerApi.discoverModels(profile.resolvedBaseUrl, key, providerProtocolForAgent(profile, _state.value.agentKind))
     }
 
     suspend fun validateProvider(
@@ -1901,7 +1902,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     ): ConnectionValidation {
         val key = secret.ifBlank { vault.get(profile.kind.name).orEmpty() }
         val result = providerApi.validate(
-            profile.baseUrl,
+            profile.resolvedBaseUrl,
             profile.model,
             key,
             providerProtocolForAgent(profile, _state.value.agentKind),
@@ -1954,7 +1955,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val key = vault.get(profile.kind.name).orEmpty()
             val result = providerApi.validate(
-                profile.baseUrl,
+                profile.resolvedBaseUrl,
                 profile.model,
                 key,
                 providerProtocolForAgent(profile, _state.value.agentKind),

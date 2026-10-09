@@ -120,8 +120,14 @@ class ProviderApiClient {
                     val hint = if (host.equals("ollama.com", ignoreCase = true)) {
                         " Get a Cloud key at ollama.com/keys (a local Ollama install does not need one)."
                     } else ""
+                    // Name the endpoint that rejected the key. A key pasted under
+                    // the wrong provider (an Ollama Cloud key checked against
+                    // DeepSeek, for example) otherwise reads as "your key is
+                    // invalid" with no hint that the provider card, not the key,
+                    // is what needs changing.
+                    val attribution = if (host.isNotBlank()) "$host rejected this key. " else ""
                     bestFailure = ConnectionValidation.Failure(
-                        "Check this API key or select another saved key.$hint",
+                        "${attribution}Check this API key or select another saved key.$hint",
                         providerErrorMessage(response.body),
                         "Rejected",
                     )
@@ -183,27 +189,31 @@ class ProviderApiClient {
     /** Wire-format candidates tried in order so any OpenAI- or Anthropic-style provider validates. */
     internal fun validationCandidates(baseUrl: String, protocol: ProviderProtocol): List<EndpointCandidate> = buildList {
         val base = baseUrl.trim().trimEnd('/')
+        if (isOllamaHost(base)) {
+            // Ollama Cloud: the documented native /api/chat endpoint is the
+            // primary wire for cloud keys; the OpenAI-compatible /v1 shim and
+            // the Anthropic Messages shim follow as fallbacks. The native
+            // endpoint accepts the same body shape (model, messages;
+            // max_tokens ignored) and validation only checks the HTTP code,
+            // so a 2xx on /api/chat verifies the key even when /v1 answers 401.
+            val root = ollamaRoot(base)
+            add(EndpointCandidate("$root/api/chat", ProviderProtocol.OPENAI_CHAT, "$root/api"))
+            add(EndpointCandidate("$root/v1/chat/completions", ProviderProtocol.OPENAI_CHAT, "$root/v1"))
+            add(EndpointCandidate("$root/v1/messages", ProviderProtocol.ANTHROPIC_GATEWAY, "$root/v1"))
+            return@buildList
+        }
         add(EndpointCandidate(messagesEndpoint(base, protocol), protocol, base))
         when (protocol) {
             ProviderProtocol.OPENAI_CHAT, ProviderProtocol.OPENAI_RESPONSES -> {
                 if (!base.endsWith("/v1")) add(EndpointCandidate("$base/v1/${if (protocol == ProviderProtocol.OPENAI_CHAT) "chat/completions" else "responses"}", protocol, "$base/v1"))
                 // Ollama-style native /api bases expose OpenAI compatibility on /v1.
                 if (base.endsWith("/api")) add(EndpointCandidate("${base.removeSuffix("/api")}/v1/${if (protocol == ProviderProtocol.OPENAI_CHAT) "chat/completions" else "responses"}", protocol, "${base.removeSuffix("/api")}/v1"))
-                // Ollama Cloud also exposes a native /api/chat endpoint that some
-                // account-scoped keys reach when the OpenAI shim is gated. The
-                // native endpoint accepts the same body shape (model, messages,
-                // max_tokens ignored); it returns its own response envelope which
-                // we do not parse during validation — a 2xx HTTP code is enough.
-                if (isOllamaHost(base)) add(EndpointCandidate(ollamaNativeChatEndpoint(base), protocol, base))
                 // A chosen OpenAI format that 404s may actually be an Anthropic-style gateway.
                 add(EndpointCandidate(anthropicMessagesEndpoint(base), ProviderProtocol.ANTHROPIC_GATEWAY, base))
             }
             ProviderProtocol.ANTHROPIC, ProviderProtocol.ANTHROPIC_GATEWAY, ProviderProtocol.CLAUDE_LOGIN -> {
                 // An Anthropic attempt that 404s may actually be an OpenAI-compatible gateway.
                 openAiChatCandidates(base).forEach { add(EndpointCandidate(it.url, ProviderProtocol.OPENAI_CHAT, it.baseUrl)) }
-                // Ollama Cloud accounts configured through Custom API on the
-                // Anthropic wire also accept their native /api/chat endpoint.
-                if (isOllamaHost(base)) add(EndpointCandidate(ollamaNativeChatEndpoint(base), ProviderProtocol.OPENAI_CHAT, base))
             }
             ProviderProtocol.OPENROUTER -> {
                 // OpenRouter serves both wire formats. If its Anthropic Messages
@@ -218,18 +228,17 @@ class ProviderApiClient {
     }.getOrDefault(false)
 
     /**
-     * Ollama's native chat endpoint. Accepts a base in either form
+     * Ollama Cloud host root: accepts a base in either form
      * (https://ollama.com, https://ollama.com/api, https://ollama.com/v1)
-     * and returns the canonical /api/chat URL.
+     * and returns the bare host root the /api and /v1 trees hang off.
      */
-    private fun ollamaNativeChatEndpoint(baseUrl: String): String {
+    private fun ollamaRoot(baseUrl: String): String {
         val base = baseUrl.trim().trimEnd('/')
-        val root = when {
+        return when {
             base.endsWith("/api") -> base.removeSuffix("/api")
             base.endsWith("/v1") -> base.removeSuffix("/v1")
             else -> base
         }
-        return "$root/api/chat"
     }
 
     private fun openAiChatCandidates(base: String): List<EndpointCandidate> = buildList {
@@ -296,6 +305,13 @@ class ProviderApiClient {
 
     private fun modelEndpoints(baseUrl: String, protocol: ProviderProtocol): List<String> {
         val base = baseUrl.trim().trimEnd('/')
+        // Ollama Cloud: the native /api/tags catalog is public and complete;
+        // the OpenAI /v1/models list can come back empty for account-scoped
+        // keys, so the native catalog is tried first.
+        if (isOllamaHost(base)) {
+            val root = ollamaRoot(base)
+            return listOf("$root/api/tags", "$root/v1/models")
+        }
         val withoutAnthropic = base.removeSuffix("/anthropic")
         val candidates = when (protocol) {
             ProviderProtocol.OPENROUTER -> buildList {
@@ -308,11 +324,6 @@ class ProviderApiClient {
                 if (!base.endsWith("/v1")) add("$base/v1/models")
                 // Ollama-style native /api bases expose the OpenAI catalog at /v1.
                 if (base.endsWith("/api")) add("${base.removeSuffix("/api")}/v1/models")
-                // Ollama Cloud's native catalog at /api/tags is public (no key) and
-                // returns a different envelope that ModelResponseParser already
-                // handles via the "models" array fallback. Useful when /v1/models
-                // is gated or returns an empty list for an account-scoped key.
-                if (isOllamaHost(base)) add("${base.removeSuffix("/v1").removeSuffix("/api")}/api/tags")
             }
             else -> listOf("$base/v1/models", "$base/models", "$withoutAnthropic/models", "$withoutAnthropic/v1/models")
         }

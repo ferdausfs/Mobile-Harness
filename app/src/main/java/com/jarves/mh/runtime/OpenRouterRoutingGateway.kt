@@ -25,8 +25,10 @@ internal fun applyOpenRouterRouting(source: JSONObject, profile: ProviderProfile
 /** Loopback proxy used because coding-agent CLIs do not expose OpenRouter's provider body field. */
 internal class OpenRouterRoutingGateway(
     private val profile: ProviderProfile,
-    private val apiKey: String,
+    apiKey: String,
 ) : AutoCloseable {
+    /** Keys are normalized once: stray whitespace or a copied "Bearer " prefix must not reach the provider. */
+    private val apiKey: String = com.jarves.mh.network.ProviderHttp.sanitizeApiKey(apiKey)
     private val running = AtomicBoolean(true)
     private val server = ServerSocket(0, 8, InetAddress.getByName("127.0.0.1"))
     val url: String = "http://127.0.0.1:${server.localPort}"

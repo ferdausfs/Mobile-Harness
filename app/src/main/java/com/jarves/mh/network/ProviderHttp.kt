@@ -46,4 +46,21 @@ object ProviderHttp {
      * auth-error body and stay on the "rejected key" path.
      */
     fun isEdgeBlock(code: Int, body: String): Boolean = code == 403 && !looksLikeJson(body)
+
+    /**
+     * Normalizes a pasted API key before it is sent: surrounding whitespace is
+     * dropped and an accidental "Bearer " prefix (from copying a whole
+     * Authorization header line instead of just the key) is stripped -
+     * repeatedly and case-insensitively. A stray space or prefix otherwise
+     * turns into a 401 that reads as "key rejected".
+     */
+    fun sanitizeApiKey(raw: String): String {
+        val prefix = Regex("(?i)^bearer\\s+")
+        var key = raw.trim()
+        while (true) {
+            val next = key.replaceFirst(prefix, "").trim()
+            if (next == key) return key
+            key = next
+        }
+    }
 }

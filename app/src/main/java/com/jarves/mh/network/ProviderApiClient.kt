@@ -304,6 +304,10 @@ class ProviderApiClient {
         connectTimeoutMs: Int = 12_000,
         readTimeoutMs: Int = 20_000,
     ): HttpResult {
+        // Choke point for every provider request the app itself makes: keys
+        // are normalized here (whitespace + accidental "Bearer " prefix) so a
+        // paste artifact cannot turn into a 401 "key rejected".
+        val apiKey = ProviderHttp.sanitizeApiKey(apiKey)
         val connection = URL(endpoint).openConnection() as HttpURLConnection
         return try {
             connection.apply {

@@ -18,11 +18,13 @@ import org.json.JSONObject
 /** Small loopback-only Anthropic-to-OpenAI compatibility bridge for Claude Code. */
 internal class LocalFormatGateway(
     private val profile: ProviderProfile,
-    private val apiKey: String,
+    apiKey: String,
     private val protocol: com.jarves.mh.model.ProviderProtocol = com.jarves.mh.model.ProviderProtocol.OPENAI_CHAT,
     /** Receives every upstream HTTP result for live usage tracking (code, input tokens, output tokens). */
     private val onUpstreamResult: ((code: Int, inputTokens: Int, outputTokens: Int) -> Unit)? = null,
 ) : AutoCloseable {
+    /** Keys are normalized once: stray whitespace or a copied "Bearer " prefix must not reach the provider. */
+    private val apiKey: String = ProviderHttp.sanitizeApiKey(apiKey)
     private val running = AtomicBoolean(true)
     private val server = ServerSocket(0, 8, InetAddress.getByName("127.0.0.1"))
     val url: String = "http://127.0.0.1:${server.localPort}"

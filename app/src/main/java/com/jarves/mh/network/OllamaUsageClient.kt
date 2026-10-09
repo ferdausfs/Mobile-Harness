@@ -27,6 +27,9 @@ object OllamaUsageClient {
     )
 
     fun fetch(apiKey: String): Result {
+        // Normalize once: stray whitespace or a copied "Bearer " prefix must
+        // not reach the provider.
+        val apiKey = ProviderHttp.sanitizeApiKey(apiKey)
         if (apiKey.isBlank()) {
             return Result(ok = false, body = "", httpCode = 0, error = "No Ollama API key saved.")
         }

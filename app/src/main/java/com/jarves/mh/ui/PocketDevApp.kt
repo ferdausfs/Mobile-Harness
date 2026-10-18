@@ -2118,6 +2118,16 @@ private fun RootScreenHost(
                     onRefreshAntigravityModels = viewModel::refreshAntigravityModels,
                     onSetAntigravityModel = viewModel::setAntigravityModel,
                     onSetAntigravityEffort = viewModel::setAntigravityEffort,
+                    zaiState = state.zaiWeb,
+                    onZaiCheckConnection = viewModel::zaiCheckConnection,
+                    onZaiSignIn = viewModel::zaiOpenSignIn,
+                    onZaiDisconnect = viewModel::zaiDisconnect,
+                    onZaiTest = viewModel::zaiTestConnection,
+                    onZaiRunTask = viewModel::zaiRunTask,
+                    onZaiCancel = viewModel::zaiCancel,
+                    onZaiCloseSignIn = viewModel::zaiCloseSignIn,
+                    onZaiSignedInViaSheet = viewModel::zaiSignedInViaSheet,
+                    onZaiClearResult = viewModel::zaiClearResult,
                 )
                 RootScreen.SETTINGS -> SettingsScreen(
                     state = state,

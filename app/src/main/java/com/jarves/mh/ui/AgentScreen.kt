@@ -100,6 +100,8 @@ import com.jarves.mh.data.ProviderLiveState
 import com.jarves.mh.data.ProviderUsageSnapshot
 import com.jarves.mh.data.ProviderUsageTracker
 import com.jarves.mh.model.AgentKind
+import com.jarves.mh.zweb.ZaiRunPhase
+import com.jarves.mh.zweb.ZaiWebUiState
 import com.jarves.mh.model.DSH_PROTOCOL_PROVIDERS
 import com.jarves.mh.model.ProviderKind
 import com.jarves.mh.model.ProviderProfile
@@ -188,6 +190,17 @@ fun AgentScreen(
     onRefreshAntigravityModels: () -> Unit = {},
     onSetAntigravityModel: (String) -> Unit = {},
     onSetAntigravityEffort: (String) -> Unit = {},
+    // Z.ai Web tab (isolated zweb feature — not a CLI agent)
+    zaiState: ZaiWebUiState = ZaiWebUiState(),
+    onZaiCheckConnection: () -> Unit = {},
+    onZaiSignIn: () -> Unit = {},
+    onZaiDisconnect: () -> Unit = {},
+    onZaiTest: () -> Unit = {},
+    onZaiRunTask: (String) -> Unit = {},
+    onZaiCancel: () -> Unit = {},
+    onZaiCloseSignIn: () -> Unit = {},
+    onZaiSignedInViaSheet: () -> Unit = {},
+    onZaiClearResult: () -> Unit = {},
 ) {
     val scope = rememberCoroutineScope()
     var selectedKind by rememberSaveable(state.provider.kind) { mutableStateOf(state.provider.kind) }
@@ -223,6 +236,9 @@ fun AgentScreen(
     var antigravitySearch by rememberSaveable { mutableStateOf("") }
     var antigravityCode by rememberSaveable { mutableStateOf("") }
     var viewedAgent by rememberSaveable { mutableStateOf(state.agentKind) }
+    // The Z.ai tab is not an AgentKind: it is a separate view flag so the three
+    // CLI tabs and AgentTabPolicy keep behaving exactly as before.
+    var viewingZai by rememberSaveable { mutableStateOf(false) }
 
     // Follow the active agent whenever it changes elsewhere (onboarding,
     // Settings, or the switch after a successful install) so the highlighted
@@ -325,12 +341,20 @@ fun AgentScreen(
     }
 
     // ── Live connection status calculations ──
-    val isAntigravity = state.agentKind == AgentKind.ANTIGRAVITY
+    val isAntigravity = state.agentKind == AgentKind.ANTIGRAVITY && !viewingZai
     val antigravityTesting = isAntigravity && state.apiPingStatus == ApiPingStatus.PINGING
     val antigravityHelloFailed = isAntigravity && state.apiPingStatus == ApiPingStatus.FAILED
     val pillLoading = antigravityTesting || (!isAntigravity && state.apiPingStatus == ApiPingStatus.PINGING)
 
-    val (dot, label, pillBg) = if (isAntigravity) {
+    val (dot, label, pillBg) = if (viewingZai) {
+        when {
+            zaiState.checkingConnection -> Triple(PocketOrange, "Checking", PocketOrange.copy(alpha = 0.13f))
+            zaiState.busy -> Triple(PocketOrange, "Working", PocketOrange.copy(alpha = 0.13f))
+            zaiState.signedIn == true -> Triple(Color(0xFF58C9A3), "Online", Color(0xFF58C9A3).copy(alpha = 0.13f))
+            zaiState.signedIn == false -> Triple(MaterialTheme.colorScheme.error, "Sign in", MaterialTheme.colorScheme.error.copy(alpha = 0.12f))
+            else -> Triple(MaterialTheme.colorScheme.onSurfaceVariant, "Not tested", MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f))
+        }
+    } else if (isAntigravity) {
         when {
             antigravityTesting -> Triple(PocketOrange, "Testing…", PocketOrange.copy(alpha = 0.13f))
             state.antigravityAuth.status != AntigravityAuthStatus.SIGNED_IN || antigravityHelloFailed ->
@@ -778,10 +802,10 @@ fun AgentScreen(
                         Column {
                             Text("AI Agent", fontWeight = FontWeight.Bold, fontSize = 17.sp)
                             Text(
-                                if (isAntigravity) {
-                                    "Antigravity · ${formatAntigravityModelName(state.antigravityModel)}"
-                                } else {
-                                    "${state.agentKind.title} · ${model.ifBlank { selectedKind.title }}"
+                                when {
+                                    viewingZai -> "Z.ai Web · chat.z.ai"
+                                    isAntigravity -> "Antigravity · ${formatAntigravityModelName(state.antigravityModel)}"
+                                    else -> "${state.agentKind.title} · ${model.ifBlank { selectedKind.title }}"
                                 },
                                 fontSize = 11.sp,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -858,6 +882,7 @@ fun AgentScreen(
                                             // Tabs stay responsive at all times: every tap is
                                             // classified by AgentTabPolicy and either acts or is
                                             // explained by a toast — never a silent no-op.
+                                            viewingZai = false
                                             when (
                                                 agentTabTapAction(
                                                     agent,
@@ -907,6 +932,38 @@ fun AgentScreen(
                                                 Spacer(Modifier.width(3.dp))
                                                 Box(Modifier.size(5.dp).background(PocketOrange, CircleShape))
                                             }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // ── Fourth segment: Z.ai (Web agent, not a CLI engine) ──
+                            // Outside the AgentKind loop on purpose: AgentTabPolicy only
+                            // classifies CLI agent taps; this tab has no install/run semantics.
+                            val zaiSelected = viewingZai
+                            Surface(
+                                shape = RoundedCornerShape(12.dp),
+                                color = if (zaiSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.12f) else Color.Transparent,
+                                border = if (zaiSelected) BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.45f)) else null,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clickable { viewingZai = true },
+                            ) {
+                                Box(
+                                    modifier = Modifier.padding(vertical = 12.dp, horizontal = 4.dp),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(
+                                            "Z.ai",
+                                            fontWeight = if (zaiSelected) FontWeight.Bold else FontWeight.Medium,
+                                            fontSize = 12.sp,
+                                            color = if (zaiSelected) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = 1,
+                                        )
+                                        if (zaiState.runPhase == ZaiRunPhase.NEEDS_LOGIN && zaiState.signedIn != true) {
+                                            Spacer(Modifier.width(3.dp))
+                                            Box(Modifier.size(5.dp).background(MaterialTheme.colorScheme.error, CircleShape))
                                         }
                                     }
                                 }
@@ -1019,9 +1076,22 @@ fun AgentScreen(
                 }
             }
 
-            // ── 2. Primary Configuration Card (Antigravity OR Provider) ──
+            // ── 2. Primary Configuration Card (Z.ai Web OR Antigravity OR Provider) ──
             item {
-                if (!viewedAgentInstalled) {
+                if (viewingZai) {
+                    AgentZaiCard(
+                        state = state,
+                        onCheckConnection = onZaiCheckConnection,
+                        onSignIn = onZaiSignIn,
+                        onDisconnect = onZaiDisconnect,
+                        onTest = onZaiTest,
+                        onRunTask = onZaiRunTask,
+                        onCancel = onZaiCancel,
+                        onCloseSignIn = onZaiCloseSignIn,
+                        onSignedInViaSheet = onZaiSignedInViaSheet,
+                        onClearResult = onZaiClearResult,
+                    )
+                } else if (!viewedAgentInstalled) {
                     // Installation/selection guidance is the install card shown
                     // directly below the tabs.
                 } else if (viewedAgent != state.agentKind) {
@@ -1233,13 +1303,15 @@ fun AgentScreen(
                 }
             }
 
-            // ── 3. Runtime Updates Card ──
+            // ── 3. Runtime Updates Card (CLI agents only — hidden on the Z.ai tab) ──
             item {
-                AgentUpdateBlock(
-                    state = state,
-                    onCheck = onCheckAgentUpdates,
-                    onUpdate = onUpdateAgent,
-                )
+                if (!viewingZai) {
+                    AgentUpdateBlock(
+                        state = state,
+                        onCheck = onCheckAgentUpdates,
+                        onUpdate = onUpdateAgent,
+                    )
+                }
             }
 
             // ── 4. Subtle Footer ──

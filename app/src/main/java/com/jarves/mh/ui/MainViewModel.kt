@@ -63,6 +63,8 @@ import com.jarves.mh.runtime.supportsArm64Runtime
 import com.jarves.mh.runtime.AndroidAppInstaller
 import com.jarves.mh.update.AppUpdateInfo
 import com.jarves.mh.update.AppUpdater
+import com.jarves.mh.zweb.ZaiWebController
+import com.jarves.mh.zweb.ZaiWebUiState
 import java.io.File
 import java.io.RandomAccessFile
 import java.net.UnknownHostException
@@ -256,6 +258,8 @@ data class AppUiState(
     val appUpdateDownloadedBytes: Long = 0L,
     val appUpdateTotalBytes: Long = -1L,
     val appUpdateError: String? = null,
+    /** Z.ai Web tab (hidden-WebView agent). Owned by ZaiWebController, isolated from the CLI stack. */
+    val zaiWeb: ZaiWebUiState = ZaiWebUiState(),
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -3952,6 +3956,50 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             current.copy(projectChats = chats)
         }
         preferences.saveProjectChats(project.id, _state.value.projectChats)
+    }
+
+    // ── Z.ai Web tab (isolated zweb feature — not a CLI agent) ──
+
+    private val zaiWebController by lazy {
+        ZaiWebController(getApplication()) { zaiState ->
+            _state.update { it.copy(zaiWeb = zaiState) }
+        }
+    }
+
+    fun zaiCheckConnection() = zaiWebController.checkConnection()
+
+    fun zaiRunTask(task: String) = zaiWebController.runTask(task)
+
+    fun zaiTestConnection() = zaiWebController.runTest()
+
+    fun zaiCancel() = zaiWebController.cancel()
+
+    fun zaiOpenSignIn() = zaiWebController.openSignInSheet()
+
+    fun zaiCloseSignIn() = zaiWebController.closeSignInSheet()
+
+    fun zaiSignedInViaSheet() = zaiWebController.onSignedInViaSheet()
+
+    fun zaiDisconnect() = zaiWebController.disconnect()
+
+    fun zaiClearResult() {
+        val zai = _state.value.zaiWeb
+        _state.update {
+            it.copy(
+                zaiWeb = zai.copy(
+                    lastReply = null,
+                    lastFiles = emptyList(),
+                    lastFilesDir = null,
+                    runPhase = if (zai.runPhase == com.jarves.mh.zweb.ZaiRunPhase.DONE) com.jarves.mh.zweb.ZaiRunPhase.IDLE else zai.runPhase,
+                    runMessage = if (zai.runPhase == com.jarves.mh.zweb.ZaiRunPhase.DONE) null else zai.runMessage,
+                ),
+            )
+        }
+    }
+
+    override fun onCleared() {
+        zaiWebController.shutdown()
+        super.onCleared()
     }
 
     companion object {

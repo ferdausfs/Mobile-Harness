@@ -4,6 +4,50 @@ Newest entries prepended. Never delete entries.
 
 ---
 
+## 2026-10-18 — v1.0.20 release: Phase 1 sign-in bugfixes — login form auto-open, auto-close on connect, tab highlight fix (versionCode 21)
+
+- **Agent/tool**: Z.ai (GLM) agent session, direct repo work on `ferdausfs/Mobile-Harness` branch `main`. User pre-approved everything ("do not wait for me") and supplied device observations from v1.0.19: (A) "Sign in to Z.ai" opened the sheet on the chat.z.ai guest home — no visible sign-in control, so login was impossible; (B) "Claude Code" and "Z.ai" tabs highlighted simultaneously; (C) user wants Google login and worries Google blocks plain-WebView OAuth. Six tasks, one concern per commit, same signing key, v1.0.20 / versionCode 21.
+
+### Live probe (2026-10-18, headless Chromium, mobile viewport 412×915, Android WebView UA; curl for header-level checks)
+- **Root cause of (A) — `X-Requested-With`, not the cookie, not the UA.** A clean load of `https://chat.z.ai/auth` renders the login form fine even with the WebView UA (`; wv`, `Version/4.0`) and even with a guest `token` cookie present. **With the `X-Requested-With: com.jarves.mh` header that every Android WebView request carries, the page fails to boot**: the CDN (`z-cdn.chatglm.cn`) refuses the site's own JS/CSS (CORS headers dropped on XRW-carrying subresource requests → 66 console errors, blank body). Server HTML is byte-identical with/without XRW (curl diff) — the block is CDN-side per-request, client-side visible. On modern device WebViews subresource requests no longer carry XRW, which is why the device showed a *working home page* instead of a white screen; either way the auth route never rendered its form. **Could not reproduce the exact device variant in headless Chromium** (white screen vs home) — honest caveat; the fix targets the class, not the variant.
+- **Reliable login path (live-verified)**: guest home → `#sidebar-toggle-button` (`aria-label="Toggle Sidebar"`) → drawer shows a text "Sign in" button + icon button (`aria-label="Sign in"`) → click SPA-routes to `/auth` client-side and renders "Welcome to Z.ai" / Continue with Google|Email|Github / "Skip for now". No document reload involved, so the CDN gate never triggers on that path.
+- **Google OAuth (task 5)**: "Continue with Google" navigates same-window to `accounts.google.com/v3/signin/...` (client_id 800424391928-…, redirect_uri `https://chat.z.ai/oauth/google/callback`) and renders the normal sign-in form — **no `disallowed_useragent` block in headless Chromium, with or without the `wv` UA token**. Google's risk engine may still differ per device/account, so the sheet additionally strips the WebView UA markers (`; wv`, `Version/4.0`) → Chrome mobile UA for the sheet only; the hidden engine WebView keeps the default UA. On-device Google login remains the one flow the user must confirm.
+- Aliyun captcha markers unchanged; the sheet is a fully interactive visible WebView, so the puzzle is solvable in place (task 6: nothing to fix, verified by construction + probe).
+
+### What changed (each commit separately revertable)
+| Item | Commit | Change |
+|------|--------|--------|
+| config | `bec1b82` | `selectors.json` v2: new `sidebarToggle` (4 fallbacks, live-probed id first), `signInButton` (`text-button:=sign in` / `log in` + aria/href fallbacks), `loginFormMarker` (URL-independent text markers — the auth route can keep `/auth` in the URL bar while showing home content); all three added to `REQUIRED_GROUPS`. No selector hardcoded in Kotlin. |
+| scripts | `0beca44` | Shared picker gains `text-button:=` (visible clickable matched by innerText/aria, case-insensitive). `buildAuthProbeForPath` (config-driven path, reusable by the sheet). Sheet payload contract: `parseSheetSelectors`, `buildSheetProbeScript` (loginFormPresent/captchaPresent/sidebarFound/signInFound/url), `buildClickVisibleScript` (clicks first *visible* fallback of a group; url-contains entries never clicked; non-clickable groups rejected). `ZaiSheetUserAgent.chromeLike` strips the WebView markers. |
+| engine | `dbef463` | `openSignInSheet` serializes the four selector groups + `authProbePath` into `ZaiWebUiState.sheetAutomationJson`; closing clears it. The visible sheet therefore automates strictly from the JSON config, remote hot-updates included. |
+| UI | `632f46b` | `ZaiSignInSheet` rebuild: ~2s auth-probe poll → auto-close + "Connected" (X runs one final probe first — "logged in, then closed" is never lost); when the login form is absent on a chat.z.ai page, auto-clicks sidebarToggle then signInButton (3 rounds, then an orange hint line says what to tap by hand; Google account chooser pages are never touched); captcha notice line; live URL debug line (monospace, `doUpdateVisitedHistory` covers SPA routes); Chrome-like UA in the sheet only; probe fires on every page load (fast path after the OAuth redirect). |
+| tabs | `a04e26c` | Double-highlight fix (B): `agentTabSelected` / `zaiTabSelected` in AgentTabPolicy encode the mutually-exclusive highlight (`viewedAgent == agent` was true for the last CLI tab while the Z.ai flag was on). AgentScreen swapped two expressions; tap/install behavior untouched. |
+| version | `6cd8a60` | v1.0.20 / versionCode 21: `app/build.gradle.kts`, changelog `21.txt`, `mobile-harness-update.json` (sha256 `08861438…8300`, 87,866,007 bytes). |
+
+### Verification
+- `:app:testOnlineDebugUnitTest` → **212 tests, 0 failures, 0 skipped** (197 previous + 15 new: 6 sheet-script tests, 3 sheet-UA tests, 5 tab-selection tests, 1 bundled-config sign-in group test). Two real issues caught before push: a trailing comma inside a `when` expression (compile error) and the probe-scripts test fixture missing the three new required groups (folded into their origin commits via autosquash so every commit builds green).
+- `:app:assembleOnlineRelease` → **BUILD SUCCESSFUL**; `aapt`: versionCode '21' versionName '1.0.20'; APK 87,866,007 bytes, sha256 `088614381356c571a48425c9f526424b0dcf01cd277477c3d003de6f65798300`; `apksigner` cert SHA-256 `d07ba804…dccfe` — identical to the v1.0.8–v1.0.19 line; `assets/zweb/selectors.json` embedded at v2 (13 groups).
+- **Verified for real** (headless Chromium + curl): XRW asset-block mechanism; guest cookie does NOT gate /auth; sidebar→Sign-in SPA path renders the login form; Continue-with-Google target + normal Google form without disallowed_useragent; selectors in config v2. **Still a guess / needs the user's device**: whether the sheet's automation drives the real device's variant (home-at-/auth) to the form (selector fallbacks + hint line are the safety net), whether Google sign-in completes on-device under the Chrome-like UA, and the hidden-WebView end-to-end generation (unchanged from v1.0.19 — needs one manual sign-in).
+- Pushed `main` only after build+tests passed. Tag `v1.0.20` on `6cd8a60`. GitHub release published with `mobile-harness-online-v1.0.20.apk` (single named asset + manifest, no stray duplicate this time; round-trip sha256-verified).
+
+### Touched files
+`app/src/main/assets/zweb/selectors.json` (v2), `zweb/{ZaiWebConfig,ZaiProbeScripts,ZaiSheetUserAgent,ZaiWebState,ZaiWebEngine}.kt`, `ui/AgentZaiCard.kt` (sheet rebuild), `ui/AgentScreen.kt` (two expressions), `ui/AgentTabPolicy.kt`, `app/src/test/java/com/jarves/mh/zweb/{ZaiWebConfigTest,ZaiProbeScriptsTest,ZaiSheetUserAgentTest}.kt`, `app/src/test/java/com/jarves/mh/ui/AgentTabPolicyTest.kt`, `app/build.gradle.kts`, `fastlane/metadata/android/en-US/changelogs/21.txt` (new), `mobile-harness-update.json`, this file.
+
+### Pending items
+- **User manual actions**: install v1.0.20 over v1.0.19 → Z.ai tab → "Sign in to Z.ai": confirm the sheet lands on the login form (auto-opened if not), log in with Google (report whether Google accepts — this is the one unverified flow on device) or email, watch the sheet close itself and the card show "Connected", then "Test connection".
+- If any tap point drifts, bump `version` in `assets/zweb/selectors.json` on main — installed apps hot-refresh; no release needed.
+- **Phase 2**: foreground service (Android 14+ `foregroundServiceType`) so generation survives screen-off, task queue, notifications, visible-WebView handoff + resume after login/captcha.
+- **Phase 3**: real file-download fallback via `DownloadListener` + session cookies (probe the real `fileCard` selectors on a logged-in session first), zip output.
+- **Phase 4**: optional OpenRouter prompt rewriting + reply summarisation.
+
+### Notes for next agent
+- The sheet automation runs only on `https://chat.z.ai` URLs by design — do not remove that guard, or the automation will click around inside the Google account chooser.
+- `loginFormMarker` deliberately excludes `url-contains:` entries; keep it that way (the auth route can keep the `/auth` URL while rendering guest home).
+- Build env: reuse `/home/z/my-project/scripts/{bootstrap_env.sh,env.sh}`; `git submodule update --init --recursive`; AGY bundle under `dist/runtime-bundles/`. Heredoc gotcha: backticks in commit messages execute — use `git commit -F <file>` (one message this session was amended for exactly that).
+- Release housekeeping from v1.0.19: release 416307666 still carries the stray duplicate `app-online-release.apk` asset (token cannot DELETE assets) — harmless, manifest points at the named asset; delete manually if you want a tidy page.
+
+---
+
 ## 2026-10-18 — v1.0.19 release: Phase 1 of the "Z.ai Web" project — new Z.ai Web agent tab driven by a hidden WebView on chat.z.ai (versionCode 20)
 
 - **Agent/tool**: Z.ai (GLM) agent session, direct repo work on `ferdausfs/Mobile-Harness` branch `main`. User pre-approved Phase 1 in full (fourth "Z.ai" tab, isolated `com.jarves.mh.zweb` package, hidden-WebView automation, JSON selector config with remote hot-update, multi-signal finish detection, `FILE:` extraction, JVM tests) and instructed to proceed without waiting for approval.

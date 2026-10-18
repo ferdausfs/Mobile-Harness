@@ -20,6 +20,12 @@ data class ZaiWebUiState(
     val testRunning: Boolean = false,
     /** Opens the visible sign-in WebView overlay when true. */
     val signInSheetOpen: Boolean = false,
+    /**
+     * Selector groups + auth probe path for the sheet's auto-login automation,
+     * serialized by the engine from the loaded config. Null = automation
+     * unavailable (sheet degrades to hints only).
+     */
+    val sheetAutomationJson: String? = null,
     val configVersion: Int = 0,
 ) {
     val busy: Boolean

@@ -399,10 +399,27 @@ class ZaiWebEngine(
         update { it.copy(runPhase = ZaiRunPhase.CANCELED, runMessage = "Stopped. Z.ai may still finish this turn in the background.", testRunning = false) }
     }
 
-    /** Opens the visible sign-in overlay; rendering is up to the UI layer. */
-    fun openSignInSheet() = update { it.copy(signInSheetOpen = true) }
+    /**
+     * Opens the visible sign-in overlay; rendering is up to the UI layer.
+     * The sheet automation payload (selector groups + auth probe path from the
+     * loaded config) travels with the state so the UI never hardcodes selectors.
+     */
+    fun openSignInSheet() {
+        val automationJson = configLoader.load()?.let { config ->
+            runCatching {
+                val obj = JSONObject()
+                obj.put("loginFormMarker", JSONArray(config.selectorsFor("loginFormMarker")))
+                obj.put("captchaMarker", JSONArray(config.selectorsFor("captchaMarker")))
+                obj.put("sidebarToggle", JSONArray(config.selectorsFor("sidebarToggle")))
+                obj.put("signInButton", JSONArray(config.selectorsFor("signInButton")))
+                obj.put("authProbePath", config.authProbePath)
+                obj.toString()
+            }.getOrNull()
+        }
+        update { it.copy(signInSheetOpen = true, sheetAutomationJson = automationJson) }
+    }
 
-    fun closeSignInSheet() = update { it.copy(signInSheetOpen = false) }
+    fun closeSignInSheet() = update { it.copy(signInSheetOpen = false, sheetAutomationJson = null) }
 
     /** Re-checks sign-in after the user completed the visible sign-in flow. */
     suspend fun onSignedInViaSheet() {

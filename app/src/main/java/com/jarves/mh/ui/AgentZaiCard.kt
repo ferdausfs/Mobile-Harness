@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.border
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.InsertDriveFile
@@ -60,8 +61,13 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import android.view.ViewGroup
+import android.widget.Toast
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
 import com.jarves.mh.ui.theme.PocketOrange
 import com.jarves.mh.zweb.ZaiAuthProbeClassifier
+import com.jarves.mh.zweb.ZaiDiagnostics
 import com.jarves.mh.zweb.ZaiProbeScripts
 import com.jarves.mh.zweb.ZaiPromptBuilder
 import com.jarves.mh.zweb.ZaiRunPhase
@@ -183,6 +189,31 @@ fun AgentZaiCard(
                     icon = { Icon(Icons.Default.Warning, null, Modifier.size(14.dp), tint = MaterialTheme.colorScheme.error) },
                     text = message,
                     color = MaterialTheme.colorScheme.error,
+                )
+            }
+
+            // Probe errors are otherwise invisible: runPhase stays IDLE during a
+            // connection check, so the phase-keyed notice rows above never fire.
+            val isCheckError = zai.lastCheckOutcome != null &&
+                (zai.lastCheckOutcome!!.startsWith("probe-error") || zai.lastCheckOutcome!!.startsWith("check-error"))
+            if (isCheckError && zai.runPhase == ZaiRunPhase.IDLE && !zai.busy) {
+                zai.runMessage?.let { message ->
+                    ZaiNoticeRow(
+                        icon = { Icon(Icons.Default.Warning, null, Modifier.size(14.dp), tint = MaterialTheme.colorScheme.error) },
+                        text = message,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            }
+
+            // Sheet/engine disagreement: the sheet saw a signed-in session but the
+            // hidden engine's check says otherwise — never silently downgrade.
+            if (zai.signedIn == false && zai.sheetVerifiedAtMillis != null) {
+                ZaiNoticeRow(
+                    icon = { Icon(Icons.Default.Warning, null, Modifier.size(14.dp), tint = PocketOrange) },
+                    text = "The sign-in sheet saw a signed-in session, but the connection check says " +
+                        "\u201c${zai.lastCheckOutcome ?: "unknown"}\u201d. Expand Diagnostics below and copy the report.",
+                    color = PocketOrange,
                 )
             }
 
@@ -376,6 +407,79 @@ fun AgentZaiCard(
                 color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
                 modifier = Modifier.fillMaxWidth(),
             )
+
+            // ── Diagnostics (collapsed by default, copyable, no secrets) ──
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))
+            var diagnosticsOpen by remember { mutableStateOf(false) }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { diagnosticsOpen = !diagnosticsOpen }
+                    .padding(vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "Diagnostics",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(
+                    if (diagnosticsOpen) "Hide" else "Show",
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = PocketOrange,
+                )
+            }
+            if (diagnosticsOpen) {
+                val clipboard = LocalClipboardManager.current
+                val context = LocalContext.current
+                val cookieLines = remember(zai.lastCheckAtMillis, diagnosticsOpen) { collectDiagnosticsCookieLines() }
+                val report = remember(zai, cookieLines) {
+                    ZaiDiagnostics.build(
+                        ZaiDiagnostics.Data(
+                            generatedAtMillis = System.currentTimeMillis(),
+                            lastCheckAtMillis = zai.lastCheckAtMillis,
+                            lastCheckOutcome = zai.lastCheckOutcome,
+                            lastProbeSummary = zai.lastProbeSummary,
+                            signedIn = zai.signedIn,
+                            engineCreated = zai.engineLastUrl != null || zai.engineUserAgent != null,
+                            engineLastUrl = zai.engineLastUrl,
+                            engineUserAgent = zai.engineUserAgent,
+                            sheetLastUrl = zai.sheetLastUrl,
+                            sheetUserAgent = zai.sheetUserAgent,
+                            sheetProbeSummary = zai.sheetProbeSummary,
+                            sheetVerifiedAtMillis = zai.sheetVerifiedAtMillis,
+                            configVersion = zai.configVersion,
+                            cookieLines = cookieLines,
+                            previousRunOutcome = zai.previousRunOutcome,
+                            previousRunSignedIn = zai.previousRunSignedIn,
+                        ),
+                        nowMillis = System.currentTimeMillis(),
+                    )
+                }
+                SelectionContainer {
+                    Text(
+                        report,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 9.sp,
+                        lineHeight = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    TextButton(onClick = onCheckConnection) {
+                        Text("Re-run check", fontSize = 11.sp, color = PocketOrange)
+                    }
+                    TextButton(onClick = {
+                        clipboard.setText(AnnotatedString(report))
+                        Toast.makeText(context, "Report copied", Toast.LENGTH_SHORT).show()
+                    }) {
+                        Text("Copy report", fontSize = 11.sp, color = PocketOrange)
+                    }
+                }
+            }
         }
     }
 
@@ -403,6 +507,28 @@ private fun ZaiNoticeRow(icon: @Composable () -> Unit, text: String, color: Colo
         )
     }
 }
+
+/**
+ * Cookie NAMES (never values) present for chat.z.ai and z.ai, one line per
+ * domain. Uses the process-global CookieManager, which also sees HttpOnly
+ * cookies. Expiry attributes are not exposed by the Android WebView API —
+ * the report says so explicitly instead of guessing.
+ */
+private fun collectDiagnosticsCookieLines(): List<String> = runCatching {
+    val cookieManager = CookieManager.getInstance()
+    listOf("https://chat.z.ai/" to "chat.z.ai", "https://z.ai/" to "z.ai").flatMap { (url, label) ->
+        val names = cookieManager.getCookie(url)
+            ?.split(';')
+            ?.map { it.trim().substringBefore('=') }
+            ?.filter { it.isNotEmpty() }
+            .orEmpty()
+        if (names.isEmpty()) {
+            listOf("$label: (no cookies)")
+        } else {
+            listOf("$label: " + names.joinToString(", "))
+        }
+    }
+}.getOrDefault(listOf("cookie store unavailable"))
 
 /**
  * Full-screen visible WebView for the one-time chat.z.ai sign-in. Shares the

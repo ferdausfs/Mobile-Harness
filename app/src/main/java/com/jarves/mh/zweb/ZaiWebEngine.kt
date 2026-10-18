@@ -48,10 +48,13 @@ class ZaiWebEngine(
 ) {
 
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val ledger = ZaiSessionLedger(context)
 
     private var webView: WebView? = null
     private var runJob: Job? = null
     private var runNumber = 0
+
+    private var previousRunLoaded = false
 
     @Volatile
     private var canceled = false
@@ -140,15 +143,14 @@ class ZaiWebEngine(
      */
     suspend fun checkConnection() {
         canceled = false
+        loadPreviousRunOnce()
         update { it.copy(checkingConnection = true, runMessage = null) }
         val config = configLoader.load()
         if (config == null) {
-            update {
+            recordCheck(ZaiAuthProbeClassifier.ZaiCheckOutcome.CONFIG_MISSING, false) {
                 it.copy(
                     checkingConnection = false,
                     signedIn = false,
-                    lastCheckOutcome = ZaiAuthProbeClassifier.ZaiCheckOutcome.CONFIG_MISSING,
-                    lastCheckAtMillis = System.currentTimeMillis(),
                     runMessage = "Selector config unavailable.",
                 )
             }
@@ -164,50 +166,42 @@ class ZaiWebEngine(
             loadChatPage(view, config)
             val ready = waitForComposer(view, config)
             if (ready.blocked == PageBlock.LOGIN) {
-                update {
+                recordCheck(ZaiAuthProbeClassifier.ZaiCheckOutcome.LOGIN_PAGE, false) {
                     it.copy(
                         checkingConnection = false,
                         signedIn = false,
                         accountEmail = null,
-                        lastCheckOutcome = ZaiAuthProbeClassifier.ZaiCheckOutcome.LOGIN_PAGE,
-                        lastCheckAtMillis = System.currentTimeMillis(),
                     )
                 }
                 return
             }
             if (ready.blocked == PageBlock.CAPTCHA) {
-                update {
+                recordCheck(ZaiAuthProbeClassifier.ZaiCheckOutcome.CAPTCHA, null) {
                     it.copy(
                         checkingConnection = false,
                         signedIn = null,
-                        lastCheckOutcome = ZaiAuthProbeClassifier.ZaiCheckOutcome.CAPTCHA,
-                        lastCheckAtMillis = System.currentTimeMillis(),
                         runMessage = "chat.z.ai is showing a verification puzzle. Open Z.ai once, solve it, then check again.",
                     )
                 }
                 return
             }
             if (!ready.composerReady) {
-                update {
+                recordCheck(ZaiAuthProbeClassifier.ZaiCheckOutcome.PAGE_TIMEOUT, null) {
                     it.copy(
                         checkingConnection = false,
                         signedIn = null,
-                        lastCheckOutcome = ZaiAuthProbeClassifier.ZaiCheckOutcome.PAGE_TIMEOUT,
-                        lastCheckAtMillis = System.currentTimeMillis(),
                         runMessage = "chat.z.ai did not load in time — open Diagnostics and check your connection.",
                     )
                 }
                 return
             }
             val verdict = probeAuthVerdict(view, config)
-            update {
+            recordCheck(verdict.outcome, verdict.signedIn) {
                 it.copy(
                     checkingConnection = false,
                     signedIn = verdict.signedIn,
                     accountEmail = if (verdict.signedIn) it.accountEmail else null,
-                    lastCheckOutcome = verdict.outcome,
                     lastProbeSummary = ZaiAuthProbeClassifier.summary(verdict),
-                    lastCheckAtMillis = System.currentTimeMillis(),
                     runMessage = if (!verdict.signedIn && verdict.outcome == ZaiAuthProbeClassifier.ZaiCheckOutcome.PROBE_ERROR) {
                         "Could not verify the Z.ai session: ${verdict.errorText}"
                     } else {
@@ -220,16 +214,33 @@ class ZaiWebEngine(
             throw e
         } catch (e: Throwable) {
             Log.w(TAG, "checkConnection failed: ${e.message}")
-            update {
+            recordCheck("${ZaiAuthProbeClassifier.ZaiCheckOutcome.CHECK_ERROR}:${e.message}".take(160), null) {
                 it.copy(
                     checkingConnection = false,
                     signedIn = null,
-                    lastCheckOutcome = "${ZaiAuthProbeClassifier.ZaiCheckOutcome.CHECK_ERROR}:${e.message}".take(160),
-                    lastCheckAtMillis = System.currentTimeMillis(),
                     runMessage = "Connection check failed: ${e.message}",
                 )
             }
         }
+    }
+
+    /** Loads the previous run's outcome into the state once per process. */
+    private fun loadPreviousRunOnce() {
+        if (previousRunLoaded) return
+        previousRunLoaded = true
+        val (outcome, signedIn) = ledger.readPreviousRun()
+        update { it.copy(previousRunOutcome = outcome, previousRunSignedIn = signedIn) }
+    }
+
+    /** Publishes a finished check (outcome label + timestamp) and records it for the next run. */
+    private fun recordCheck(outcome: String, signedIn: Boolean?, extra: (ZaiWebUiState) -> ZaiWebUiState) {
+        update {
+            extra(it).copy(
+                lastCheckOutcome = outcome,
+                lastCheckAtMillis = System.currentTimeMillis(),
+            )
+        }
+        ledger.record(outcome, signedIn)
     }
 
     /**
@@ -541,6 +552,7 @@ class ZaiWebEngine(
                 sheetVerifiedAtMillis = null,
             )
         }
+        ledger.record(ZaiAuthProbeClassifier.ZaiCheckOutcome.SIGNED_OUT_BY_USER, false)
     }
 
     /** Destroys the hidden WebView; called when the owning view model goes away. */

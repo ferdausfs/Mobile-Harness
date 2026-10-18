@@ -3124,7 +3124,13 @@ private fun ProjectsScreen(
     val projects = state.projects
     val context = LocalContext.current
     val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
-        onInstallUpdate()
+        // The system page returns regardless of the user's choice; retry the
+        // install only when the permission is actually granted now.
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O ||
+            context.packageManager.canRequestPackageInstalls()
+        ) {
+            onInstallUpdate()
+        }
     }
     val importZipLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) onImportZip(uri)

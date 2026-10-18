@@ -1,9 +1,13 @@
 package com.jarves.mh.ui
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
@@ -32,6 +36,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
+import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.DarkMode
@@ -94,6 +99,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.jarves.mh.BuildConfig
+import com.jarves.mh.CrashGuard
 import com.jarves.mh.data.ApiKeyInfo
 import com.jarves.mh.model.AgentKind
 import com.jarves.mh.model.DEEPSEEK_HARNESS_PROVIDERS
@@ -389,6 +395,10 @@ fun SettingsScreen(
                     onCheckNow = onCheckAppUpdate,
                     onInstall = onInstallAppUpdate,
                 )
+            }
+
+            item {
+                CrashReportCard()
             }
 
             if (BuildConfig.DEBUG) {
@@ -953,7 +963,15 @@ private fun AppUpdateCard(
     // first and retry the install on the way back.
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
-    ) { onInstall() }
+    ) {
+        // The system page returns regardless of the user's choice; retry the
+        // install only when the permission is actually granted now.
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O ||
+            context.packageManager.canRequestPackageInstalls()
+        ) {
+            onInstall()
+        }
+    }
     val canInstall = Build.VERSION.SDK_INT < Build.VERSION_CODES.O ||
         context.packageManager.canRequestPackageInstalls()
 
@@ -1083,6 +1101,63 @@ private fun AppUpdateCard(
                 ) {
                     Text(if (failed) "Try again" else "Download and install")
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CrashReportCard() {
+    val context = LocalContext.current
+    var summary by remember { mutableStateOf(CrashGuard.summary(context)) }
+    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+
+    Surface(
+        shape = RoundedCornerShape(20.dp),
+        color = MaterialTheme.colorScheme.surface,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.BugReport, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.error)
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f)) {
+                    Text("Last crash", fontWeight = FontWeight.SemiBold)
+                    Text(
+                        summary ?: "No crash recorded",
+                        fontSize = 12.sp,
+                        color = if (summary == null) {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        } else {
+                            MaterialTheme.colorScheme.error
+                        },
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+            if (summary != null) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(
+                        onClick = {
+                            val report = CrashGuard.report(context) ?: return@OutlinedButton
+                            clipboard?.setPrimaryClip(
+                                ClipData.newPlainText("Mobile Harness crash report", report),
+                            )
+                            Toast.makeText(context, "Crash report copied", Toast.LENGTH_SHORT).show()
+                        },
+                    ) { Text("Copy report") }
+                    TextButton(onClick = {
+                        CrashGuard.clear(context)
+                        summary = null
+                    }) { Text("Clear") }
+                }
+                Text(
+                    "After a crash, copy this and send it to the developer. It contains the stack trace only — no API keys, no tokens.",
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
         }
     }

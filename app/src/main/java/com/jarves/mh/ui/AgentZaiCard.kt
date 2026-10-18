@@ -53,7 +53,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -62,9 +61,15 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import android.view.ViewGroup
 import com.jarves.mh.ui.theme.PocketOrange
+import com.jarves.mh.zweb.ZaiProbeScripts
 import com.jarves.mh.zweb.ZaiPromptBuilder
 import com.jarves.mh.zweb.ZaiRunPhase
+import com.jarves.mh.zweb.ZaiSheetUserAgent
 import com.jarves.mh.zweb.ZaiWebUiState
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlin.coroutines.resume
 
 /**
  * The "Z.ai" tab body: account card (sign in / status / disconnect), connection
@@ -373,6 +378,7 @@ fun AgentZaiCard(
 
     if (zai.signInSheetOpen) {
         ZaiSignInSheet(
+            automationJson = zai.sheetAutomationJson,
             onClose = onCloseSignIn,
             onSignedIn = onSignedInViaSheet,
         )
@@ -398,20 +404,110 @@ private fun ZaiNoticeRow(icon: @Composable () -> Unit, text: String, color: Colo
  * Full-screen visible WebView for the one-time chat.z.ai sign-in. Shares the
  * default CookieManager with the hidden engine WebView, so after this sheet
  * reports success the hidden browser is signed in too.
+ *
+ * v1.0.20 fixes (observed on a real device, then probed in a headless browser
+ * with a mobile viewport and a WebView user agent):
+ *
+ *  1. The page loaded at /auth can come up as the guest home instead of the
+ *     login form (how the site's own JS treats embedded WebViews). The sheet
+ *     therefore watches the page and, when the login form is not on screen,
+ *     opens the sidebar and taps "Sign in" itself — every lookup goes through
+ *     the selector config (sidebarToggle / signInButton / loginFormMarker
+ *     groups), never a hardcoded selector. When the automation cannot reach
+ *     the form, a clear hint line says what to tap by hand.
+ *  2. Signed-in detection is a ~2s poll of the session auth probe; on success
+ *     the sheet closes itself and the card shows "Connected". Closing via X
+ *     runs one final probe first, so "logged in, then closed" is never lost.
+ *     The current page URL is shown in a small debug line while open.
+ *  3. The sheet's WebView presents a Chrome-like UA (WebView markers stripped)
+ *     so Google's disallowed_useragent filter does not reject the OAuth flow.
+ *     Google's account chooser is a same-WebView navigation; anything the site
+ *     shows — including its captcha puzzle — stays fully interactive here.
  */
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
 private fun ZaiSignInSheet(
+    automationJson: String?,
     onClose: () -> Unit,
     onSignedIn: () -> Unit,
 ) {
-    val context = LocalContext.current
     var progress by remember { mutableStateOf(0) }
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
     var verified by remember { mutableStateOf(false) }
+    var sheetUrl by remember { mutableStateOf("") }
+    var showHint by remember { mutableStateOf(false) }
+    var captchaSeen by remember { mutableStateOf(false) }
+
+    val selectors = remember(automationJson) { ZaiProbeScripts.parseSheetSelectors(automationJson) }
+    val authProbeJs = remember(selectors) {
+        ZaiProbeScripts.buildAuthProbeForPath(selectors?.authProbePath ?: SHEET_FALLBACK_AUTH_PROBE_PATH)
+    }
+
+    // Session poll (~2s): auto-close on success; drive the login UI open otherwise.
+    LaunchedEffect(selectors) {
+        var autoRounds = 0
+        while (isActive) {
+            delay(SHEET_POLL_INTERVAL_MS)
+            val view = webViewRef ?: continue
+            if (verified) break
+
+            // 1. Session check — runs on every tick, on any page (a fetch to a
+            //    foreign origin simply fails and reads as signed-out).
+            if (parseSignedInResult(view.evalSheetJs(authProbeJs))) {
+                verified = true
+                CookieManager.getInstance().flush()
+                onSignedIn()
+                break
+            }
+
+            // 2. Login-form automation — only on chat.z.ai pages: never touch
+            //    the Google account chooser the user might be working in.
+            val sel = selectors ?: continue
+            if (!(view.url ?: "").startsWith("https://chat.z.ai")) continue
+            val st = parseSheetStateResult(
+                view.evalSheetJs(ZaiProbeScripts.buildSheetProbeScript(sel)),
+            ) ?: continue
+            if (st.captchaPresent) captchaSeen = true
+            if (st.loginFormPresent) {
+                // The form is on screen — nothing to automate; re-arm the rounds.
+                showHint = false
+                autoRounds = 0
+                continue
+            }
+            if (autoRounds < SHEET_AUTO_ROUNDS) {
+                autoRounds++
+                // Guest home: open the sidebar, then tap Sign in. Clicks are
+                // best-effort — each reports {ok:false} when nothing matched.
+                view.evalSheetJs(ZaiProbeScripts.buildClickVisibleScript(sel, "sidebarToggle"))
+                delay(SHEET_AUTO_STEP_DELAY_MS)
+                view.evalSheetJs(ZaiProbeScripts.buildClickVisibleScript(sel, "signInButton"))
+                delay(SHEET_AUTO_SETTLE_MS)
+            } else if (!showHint) {
+                showHint = true
+            }
+        }
+    }
+
+    fun closeWithFinalProbe() {
+        val view = webViewRef
+        if (view == null || verified) {
+            onClose()
+            return
+        }
+        // X pressed: one last session probe so "logged in, then closed" is never lost.
+        view.evaluateJavascript(authProbeJs) { result ->
+            if (parseSignedInResult(result)) {
+                verified = true
+                CookieManager.getInstance().flush()
+                onSignedIn()
+            } else {
+                onClose()
+            }
+        }
+    }
 
     Dialog(
-        onDismissRequest = onClose,
+        onDismissRequest = { closeWithFinalProbe() },
         properties = DialogProperties(usePlatformDefaultWidth = false),
     ) {
         Surface(
@@ -423,13 +519,17 @@ private fun ZaiSignInSheet(
                     Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    IconButton(onClick = onClose) {
+                    IconButton(onClick = { closeWithFinalProbe() }) {
                         Icon(Icons.Default.Close, contentDescription = "Close sign-in")
                     }
                     Column(Modifier.weight(1f)) {
                         Text("Sign in to Z.ai", fontWeight = FontWeight.Bold, fontSize = 16.sp)
                         Text(
-                            if (verified) "Signed in — you can close this" else "Log in with your Z.ai account below",
+                            when {
+                                verified -> "Signed in — connecting…"
+                                captchaSeen -> "Solve the puzzle below to continue"
+                                else -> "Log in below — the form opens automatically"
+                            },
                             fontSize = 11.sp,
                             color = if (verified) Color(0xFF2E9D72) else MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -442,26 +542,32 @@ private fun ZaiSignInSheet(
                     progress = { (progress / 100f).coerceIn(0f, 1f) },
                     modifier = Modifier.fillMaxWidth(),
                 )
+                if (sheetUrl.isNotBlank()) {
+                    Text(
+                        sheetUrl,
+                        fontSize = 9.sp,
+                        lineHeight = 12.sp,
+                        fontFamily = FontFamily.Monospace,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f),
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 2.dp),
+                    )
+                }
                 Box(Modifier.weight(1f)) {
                     AndroidViewWebView(
                         modifier = Modifier.fillMaxSize(),
                         onWebView = { webViewRef = it },
                         onProgress = { progress = it },
+                        onPageFinished = { url -> sheetUrl = url },
                         onVerify = {
-                            // Success check runs on every finished navigation to a
-                            // non-auth URL: session cookies then live in the shared
-                            // default CookieManager.
+                            // Fast path after every finished load (incl. the OAuth
+                            // redirect back to chat.z.ai): probe immediately instead
+                            // of waiting for the next poll tick.
                             val view = webViewRef
                             if (view != null && !verified) {
-                                view.evaluateJavascript(SHEET_AUTH_PROBE_JS) { result ->
-                                    val ok = runCatching {
-                                        org.json.JSONArray(result).optString(0)
-                                    }.getOrNull()?.let { raw ->
-                                        runCatching {
-                                            org.json.JSONObject(raw).optBoolean("signedIn")
-                                        }.getOrDefault(false)
-                                    } ?: false
-                                    if (ok && !verified) {
+                                view.evaluateJavascript(authProbeJs) { result ->
+                                    if (parseSignedInResult(result)) {
                                         verified = true
                                         CookieManager.getInstance().flush()
                                         onSignedIn()
@@ -469,6 +575,16 @@ private fun ZaiSignInSheet(
                                 }
                             }
                         },
+                    )
+                }
+                if (showHint && !verified) {
+                    Text(
+                        "Can't see the sign-in form? In the page, tap the sidebar button (top corner), " +
+                            "then tap \"Sign in\". If a puzzle appears, solve it right here.",
+                        fontSize = 10.sp,
+                        lineHeight = 14.sp,
+                        color = PocketOrange,
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 4.dp),
                     )
                 }
                 Text(
@@ -491,19 +607,59 @@ private fun ZaiSignInSheet(
     }
 }
 
-private const val SHEET_AUTH_PROBE_JS =
-    "(function(){return fetch('/api/v1/auths/',{credentials:'include',headers:{'Accept':'application/json'}})" +
-        ".then(function(r){return r.json();})" +
-        ".then(function(j){var role=(j&&j.role)||'';var email=(j&&j.email)||'';" +
-        "var guest=(role==='guest')||(/\\bguest[0-9.-]*@guest\\.com$/i.test(email));" +
-        "return JSON.stringify({signedIn:!!j&&!j.error&&!guest});})" +
-        ".catch(function(e){return JSON.stringify({signedIn:false});});})()"
+private const val SHEET_FALLBACK_AUTH_PROBE_PATH = "/api/v1/auths/"
+private const val SHEET_POLL_INTERVAL_MS = 2_000L
+private const val SHEET_AUTO_ROUNDS = 3
+private const val SHEET_AUTO_STEP_DELAY_MS = 1_400L
+private const val SHEET_AUTO_SETTLE_MS = 2_600L
+
+private suspend fun WebView.evalSheetJs(script: String): String? =
+    suspendCancellableCoroutine { cont ->
+        try {
+            evaluateJavascript(script) { result -> cont.resume(result) }
+        } catch (e: Throwable) {
+            cont.resume(null)
+        }
+    }
+
+/** evaluateJavascript wraps a returned string in one level of JSON quoting. */
+private fun String.sheetEvalPayload(): String? = runCatching {
+    org.json.JSONArray(this).optString(0)
+}.getOrNull()
+
+private fun parseSignedInResult(raw: String?): Boolean {
+    val inner = raw?.sheetEvalPayload() ?: return false
+    return runCatching { org.json.JSONObject(inner).optBoolean("signedIn") }.getOrDefault(false)
+}
+
+private data class SheetPageState(
+    val loginFormPresent: Boolean,
+    val captchaPresent: Boolean,
+    val sidebarFound: Boolean,
+    val signInFound: Boolean,
+    val url: String,
+)
+
+private fun parseSheetStateResult(raw: String?): SheetPageState? {
+    val inner = raw?.sheetEvalPayload() ?: return null
+    return runCatching {
+        val j = org.json.JSONObject(inner)
+        SheetPageState(
+            loginFormPresent = j.optBoolean("loginFormPresent"),
+            captchaPresent = j.optBoolean("captchaPresent"),
+            sidebarFound = j.optBoolean("sidebarFound"),
+            signInFound = j.optBoolean("signInFound"),
+            url = j.optString("url"),
+        )
+    }.getOrNull()
+}
 
 @Composable
 private fun AndroidViewWebView(
     modifier: Modifier,
     onWebView: (WebView) -> Unit,
     onProgress: (Int) -> Unit,
+    onPageFinished: (String) -> Unit,
     onVerify: () -> Unit,
 ) {
     androidx.compose.ui.viewinterop.AndroidView(
@@ -516,6 +672,11 @@ private fun AndroidViewWebView(
                 )
                 settings.javaScriptEnabled = true
                 settings.domStorageEnabled = true
+                // Chrome-like UA for the sign-in sheet only: Google rejects OAuth
+                // from UAs carrying the WebView markers (disallowed_useragent), and
+                // chat.z.ai serves both UAs identically (live-probed 2026-10-18).
+                // The hidden engine WebView keeps Android's default UA.
+                runCatching { settings.userAgentString = ZaiSheetUserAgent.chromeLike(settings.userAgentString) }
                 CookieManager.getInstance().setAcceptCookie(true)
                 CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
                 webChromeClient = object : android.webkit.WebChromeClient() {
@@ -530,9 +691,18 @@ private fun AndroidViewWebView(
 
                     override fun onPageFinished(view: WebView?, url: String?) {
                         super.onPageFinished(view, url)
-                        if (url != null && !url.contains("/auth")) {
-                            onVerify()
-                        }
+                        if (url.isNullOrBlank()) return
+                        onPageFinished(url)
+                        // Probe on EVERY finished load — after the OAuth redirect
+                        // back to chat.z.ai this is the fastest path to auto-close.
+                        onVerify()
+                    }
+
+                    override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
+                        super.doUpdateVisitedHistory(view, url, isReload)
+                        // SPA route changes (sidebar → Sign in) never reload the
+                        // document — track them so the debug line stays live.
+                        if (url != null) onPageFinished(url)
                     }
                 }
                 loadUrl("https://chat.z.ai/auth")

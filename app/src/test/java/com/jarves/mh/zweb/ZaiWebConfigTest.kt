@@ -1,0 +1,135 @@
+package com.jarves.mh.zweb
+
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
+import org.junit.Test
+import java.io.File
+
+class ZaiWebConfigTest {
+
+    private fun bundledAssetFile(): File {
+        // Gradle runs JVM unit tests with the working directory at the app module.
+        val f = File("src/main/assets/zweb/selectors.json")
+        if (!f.isFile) fail("Bundled selector asset not found at ${f.absolutePath} — tests must verify the real shipped config")
+        return f
+    }
+
+    private fun parseBundled(): ZaiWebConfig = ZaiWebConfig.fromJson(bundledAssetFile().readText())
+
+    @Test
+    fun `bundled asset parses and carries all required selector groups`() {
+        val config = parseBundled()
+        ZaiWebConfig.REQUIRED_GROUPS.forEach { group ->
+            assertTrue("group $group must exist in the bundled config", config.selectorsFor(group).isNotEmpty())
+        }
+        assertTrue(config.selectorsFor("newChatButton").isNotEmpty())
+        assertTrue(config.selectorsFor("userMessage").isNotEmpty())
+        assertTrue(config.selectorsFor("fileCard").isNotEmpty())
+    }
+
+    @Test
+    fun `bundled asset has version, remote url and https start url`() {
+        val config = parseBundled()
+        assertTrue(config.version >= 1)
+        assertTrue(config.remoteUpdateUrl.startsWith("https://raw.githubusercontent.com/"))
+        assertTrue(config.startUrl == "https://chat.z.ai/")
+        assertTrue(config.authProbePath.startsWith("/"))
+    }
+
+    @Test
+    fun `bundled primary selectors match the live probe from 2026-10-18`() {
+        val config = parseBundled()
+        assertEquals("#chat-input", config.selectorsFor("input").first())
+        assertEquals("#send-message-button", config.selectorsFor("sendButton").first())
+        assertEquals("div[aria-label='Stop']", config.selectorsFor("stopIndicator").first())
+        assertEquals(".chat-assistant", config.selectorsFor("assistantMessage").first())
+        assertTrue(config.selectorsFor("loginMarker").contains("url-contains:/auth"))
+        assertTrue(config.selectorsFor("captchaMarker").first().startsWith("#aliyunCaptcha"))
+        assertEquals("#new-chat-button", config.selectorsFor("newChatButton").first())
+    }
+
+    @Test
+    fun `bundled timing values are inside the clamp bounds`() {
+        val config = parseBundled()
+        assertTrue(config.timing.pollIntervalMs >= ZaiWebConfig.MIN_POLL_INTERVAL_MS)
+        assertTrue(config.timing.stableWindowMs >= ZaiWebConfig.MIN_STABLE_WINDOW_MS)
+        assertTrue(config.timing.generationTimeoutMs in ZaiWebConfig.MIN_GENERATION_TIMEOUT_MS..ZaiWebConfig.MAX_GENERATION_TIMEOUT_MS)
+        assertTrue(config.timing.pageLoadTimeoutMs >= ZaiWebConfig.MIN_PAGE_LOAD_TIMEOUT_MS)
+    }
+
+    @Test
+    fun `toJsonString round-trips through fromJson`() {
+        val config = parseBundled()
+        val roundTrip = ZaiWebConfig.fromJson(config.toJsonString())
+        assertEquals(config.version, roundTrip.version)
+        assertEquals(config.startUrl, roundTrip.startUrl)
+        assertEquals(config.remoteUpdateUrl, roundTrip.remoteUpdateUrl)
+        assertEquals(config.authProbePath, roundTrip.authProbePath)
+        ZaiWebConfig.REQUIRED_GROUPS.forEach { group ->
+            assertEquals(config.selectorsFor(group), roundTrip.selectorsFor(group))
+        }
+        assertEquals(config.timing, roundTrip.timing)
+    }
+
+    @Test
+    fun `missing required groups throws`() {
+        val json = """
+            {"version":9,"selectors":{"input":["#chat-input"]},
+             "page":{"startUrl":"https://chat.z.ai/"},"timing":{}}
+        """.trimIndent()
+        try {
+            ZaiWebConfig.fromJson(json)
+            fail("expected ZaiConfigException")
+        } catch (e: ZaiConfigException) {
+            assertTrue(e.message!!.contains("missing required groups"))
+        }
+    }
+
+    @Test
+    fun `non-https start url is rejected`() {
+        val json = """
+            {"version":9,"selectors":{"input":["#i"],"sendButton":["#s"],"stopIndicator":["#x"],
+              "assistantMessage":[".a"],"codeBlock":["pre"],"loginMarker":["url-contains:/auth"],
+              "captchaMarker":["#cap"]},
+             "page":{"startUrl":"http://chat.z.ai/"},"timing":{}}
+        """.trimIndent()
+        try {
+            ZaiWebConfig.fromJson(json)
+            fail("expected ZaiConfigException")
+        } catch (e: ZaiConfigException) {
+            assertTrue(e.message!!.contains("https"))
+        }
+    }
+
+    @Test
+    fun `out-of-range timing values are clamped`() {
+        val json = """
+            {"version":9,"selectors":{"input":["#i"],"sendButton":["#s"],"stopIndicator":["#x"],
+              "assistantMessage":[".a"],"codeBlock":["pre"],"loginMarker":["url-contains:/auth"],
+              "captchaMarker":["#cap"]},
+             "page":{"startUrl":"https://chat.z.ai/"},
+             "timing":{"pollIntervalMs":10,"stableWindowMs":600000,"generationTimeoutMs":999999999,"pageLoadTimeoutMs":1}}
+        """.trimIndent()
+        val config = ZaiWebConfig.fromJson(json)
+        assertEquals(ZaiWebConfig.MIN_POLL_INTERVAL_MS, config.timing.pollIntervalMs)
+        assertEquals(ZaiWebConfig.MAX_STABLE_WINDOW_MS, config.timing.stableWindowMs)
+        assertEquals(ZaiWebConfig.MAX_GENERATION_TIMEOUT_MS, config.timing.generationTimeoutMs)
+        assertEquals(ZaiWebConfig.MIN_PAGE_LOAD_TIMEOUT_MS, config.timing.pageLoadTimeoutMs)
+    }
+
+    @Test
+    fun `empty fallback entries are dropped and defaults applied for missing timing`() {
+        val json = """
+            {"version":9,"selectors":{"input":["", "  ", "#chat-input"],"sendButton":["#s"],"stopIndicator":["#x"],
+              "assistantMessage":[".a"],"codeBlock":["pre"],"loginMarker":["url-contains:/auth"],
+              "captchaMarker":["#cap"]},
+             "page":{"startUrl":"https://chat.z.ai/"}}
+        """.trimIndent()
+        val config = ZaiWebConfig.fromJson(json)
+        assertEquals(listOf("#chat-input"), config.selectorsFor("input"))
+        assertNotNull(config.timing)
+        assertEquals(900L, config.timing.pollIntervalMs)
+    }
+}

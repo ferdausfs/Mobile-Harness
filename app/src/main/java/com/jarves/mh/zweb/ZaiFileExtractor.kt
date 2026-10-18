@@ -135,9 +135,8 @@ object ZaiFileExtractor {
             .removePrefix("./")
         if (cleaned.isEmpty() || cleaned.length > 200) return null
         if (cleaned.any { it.code < 0x20 || it.code == 0x7F }) return null
-        if (Regex("^[A-Za-z]:").matches(cleaned)) return null
+        if (Regex("^[A-Za-z]:").containsMatchIn(cleaned)) return null
         val segments = cleaned.split('/')
-        if (segments.any { it.isEmpty() && it != segments.last() }) return null
         if (segments.any { it == ".." }) return null
         val normalized = segments.filter { it.isNotEmpty() && it != "." }.joinToString("/")
         if (normalized.isEmpty() || normalized == "/" || normalized.endsWith("/")) return null

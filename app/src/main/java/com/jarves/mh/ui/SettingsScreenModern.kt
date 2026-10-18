@@ -2,7 +2,10 @@ package com.jarves.mh.ui
 
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.provider.Settings
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
@@ -44,6 +47,7 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.SmartToy
+import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Visibility
@@ -103,6 +107,7 @@ import com.jarves.mh.network.DiscoveredModel
 import com.jarves.mh.network.ModelDiscoveryResult
 import com.jarves.mh.runtime.AntigravityAuthStatus
 import com.jarves.mh.ui.theme.AppThemeMode
+import com.jarves.mh.ui.theme.PocketGreen
 import com.jarves.mh.ui.theme.PocketOrange
 import kotlinx.coroutines.launch
 
@@ -134,6 +139,8 @@ fun SettingsScreen(
     onRefreshAntigravityModels: () -> Unit = {},
     onSetAntigravityModel: (String) -> Unit = {},
     onSetAntigravityEffort: (String) -> Unit = {},
+    onCheckAppUpdate: () -> Unit = {},
+    onInstallAppUpdate: () -> Unit = {},
     initialDebugUpdateManifestUrl: String = "",
     onSetDebugUpdateManifestUrl: (String) -> Unit = {},
     onClearDebugUpdateManifestUrl: () -> Unit = {},
@@ -374,6 +381,14 @@ fun SettingsScreen(
                         }
                     }
                 }
+            }
+
+            item {
+                AppUpdateCard(
+                    state = state,
+                    onCheckNow = onCheckAppUpdate,
+                    onInstall = onInstallAppUpdate,
+                )
             }
 
             if (BuildConfig.DEBUG) {
@@ -922,6 +937,153 @@ private fun DebugUpdateChannelSection(
                 fontSize = 11.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+        }
+    }
+}
+
+@Composable
+private fun AppUpdateCard(
+    state: AppUiState,
+    onCheckNow: () -> Unit,
+    onInstall: () -> Unit,
+) {
+    val context = LocalContext.current
+    // Same contract as the home-screen update dialog: when Android has not
+    // granted "Install unknown apps" yet, send the user to the system page
+    // first and retry the install on the way back.
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) { onInstall() }
+    val canInstall = Build.VERSION.SDK_INT < Build.VERSION_CODES.O ||
+        context.packageManager.canRequestPackageInstalls()
+
+    val status = state.appUpdateStatus
+    val checking = state.appUpdateChecking
+    val downloading = status == AppUpdateStatus.DOWNLOADING
+    val installing = status == AppUpdateStatus.INSTALLING
+    val permissionRequired = status == AppUpdateStatus.PERMISSION_REQUIRED
+    val failed = status == AppUpdateStatus.ERROR
+    val available = state.appUpdate != null && !downloading && !installing
+
+    Surface(
+        shape = RoundedCornerShape(20.dp),
+        color = MaterialTheme.colorScheme.surface,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.SystemUpdate, null, Modifier.size(20.dp), tint = PocketOrange)
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f)) {
+                    Text("App update", fontWeight = FontWeight.SemiBold)
+                    Text(
+                        "Current: v${BuildConfig.VERSION_NAME} · code ${BuildConfig.VERSION_CODE}",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                TextButton(onClick = onCheckNow, enabled = !checking && !downloading && !installing) {
+                    Text(if (checking) "Checking…" else "Check now")
+                }
+            }
+
+            if (checking) LinearProgressIndicator(Modifier.fillMaxWidth())
+
+            state.appUpdateCheckMessage?.let { message ->
+                Text(
+                    message,
+                    fontSize = 12.sp,
+                    color = if (message.startsWith("Update check failed")) {
+                        MaterialTheme.colorScheme.error
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                )
+            }
+
+            val update = state.appUpdate
+            if (update != null && available) {
+                Text(
+                    "v${update.versionName} is available" +
+                        if (update.sizeBytes > 0) " · ${update.sizeBytes / 1_048_576.0} MB" else "",
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    update.notes,
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 4,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+
+            if (downloading) {
+                val total = state.appUpdateTotalBytes
+                val progress = if (total > 0) state.appUpdateDownloadedBytes.toFloat() / total else 0f
+                LinearProgressIndicator(
+                    progress = { progress.coerceIn(0f, 1f) },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Text(
+                    if (total > 0) {
+                        "Downloading %.1f / %.1f MB · ${(progress * 100).toInt()}%".format(
+                            state.appUpdateDownloadedBytes / 1_048_576.0,
+                            total / 1_048_576.0,
+                        )
+                    } else {
+                        "Downloading %.1f MB".format(state.appUpdateDownloadedBytes / 1_048_576.0)
+                    },
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+
+            if (installing) {
+                Text(
+                    "Download verified. Opening Android installer…",
+                    fontSize = 12.sp,
+                    color = PocketGreen,
+                )
+            }
+
+            if (permissionRequired) {
+                Text(
+                    "Allow ‘Install unknown apps’ for Mobile Harness, then tap Download again. Android blocks in-app updates without it.",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
+
+            if (failed) {
+                state.appUpdateError?.let {
+                    Text(it, fontSize = 12.sp, color = MaterialTheme.colorScheme.error)
+                }
+            }
+
+            if (update != null && available) {
+                Button(
+                    onClick = {
+                        if (!canInstall && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                            permissionLauncher.launch(
+                                Intent(
+                                    Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                                    Uri.parse("package:${context.packageName}"),
+                                ),
+                            )
+                        } else {
+                            onInstall()
+                        }
+                    },
+                    enabled = !downloading && !installing,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(if (failed) "Try again" else "Download and install")
+                }
+            }
         }
     }
 }

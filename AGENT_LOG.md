@@ -4,6 +4,49 @@ Newest entries prepended. Never delete entries.
 
 ---
 
+## 2026-10-18 — v1.0.18 release: Phase 0 of the "Z.ai Web" project — baseline verified + P0 tab no-op fix (versionCode 19)
+
+- **Agent/tool**: Z.ai (GLM) agent session, direct repo work on `ferdausfs/Mobile-Harness` branch `main`. User pre-approved all phases of the Z.ai Web project (hidden-WebView chat.z.ai agent tab, Phases 0–4) and the Phase 0 checklist: baseline tests/build, fix the known "tapping Claude Code and Antigravity tabs sometimes does nothing" bug, bump + release per phase.
+- **Feature/trigger**: Phase 0 (baseline) of the multi-phase Z.ai Web plan. Phases 1–4 (core WebView agent, foreground service, file handling, OpenRouter prompt-rewrite) are upcoming — see Pending.
+
+### Baseline (before any code change)
+- Fresh bootstrap from a wiped env this session: Temurin JDK 21.0.12.1 (`/home/z/jdk`, adoptium API tarball), SDK `/home/z/android-sdk` via cmdline-tools + `sdkmanager` (platform-36, build-tools 35.0.0/36.0.0, platform-tools, cmake 3.22.1), NDK r26b at `$SDK/ndk/26.1.10909125`, AGY bundle `pocketdev-agy-arm64-2026.09.1.tar.zst` re-downloaded from the `runtime-2026.09.4` release (sha256 `a659ab91…d78` matches manifest.json), keystore re-fetched from private gist `4b76689e972c864d8a6e187503b174c4` (keytool fingerprint verified `d07ba804…ccfe` before signing), `git submodule update --init --recursive` (proot + libandroid-shmem — **required**, CMake fails with "No SOURCES given to target: android-shmem/prootloader/proot" without them).
+- Baseline `:app:testOnlineDebugUnitTest` on an untouched tree → **142 tests, 0 failures, 0 skipped**; `:app:compileOnlineDebugKotlin` clean. No pre-existing test failures, so no baseline bug commits were needed beyond the P0 fix below.
+
+### Root cause — "tapping Claude Code and Antigravity tabs sometimes does nothing" (reproduced by code-path analysis; three silent no-op paths)
+1. Tabs were `clickable(enabled = state.agentInstalling == null)` — fully dead during ANY install — while the install progress card rendered only when `state.agentInstalling == viewedAgent`. An install started from Settings (or with the viewed tab on another agent) therefore disabled all three tabs with **zero on-screen reason**: taps did literally nothing.
+2. `installAgent()`'s in-flight guard `if (_state.value.agentInstalling != null) return` was silent (no toast), so even an enabled-looking tap path reported nothing.
+3. The isInstalled tap branch moved `viewedAgent` optimistically before `selectAgent()` could reject the switch (running-task race); with `viewedAgent != state.agentKind` the config area rendered an **empty branch** — highlighted tab, blank body, no feedback.
+
+### What changed (each commit separately revertable)
+| Item | Commit | Change |
+|------|--------|--------|
+| P0 fix | `ac5b36a` | New pure decision module `ui/AgentTabPolicy.kt`: `agentTabTapAction()` (SWITCH / SHOW_INSTALL / SHOW_INSTALL_PROGRESS / REFUSED_INSTALLING / REFUSED_RUNNING) + `agentSwitchBlock()` (NONE / RUNNING / INSTALLING_OTHER) — single source of truth used by both the tab click handler and the ViewModel. Tabs are now always clickable and every blocked tap is explained via toast. `installAgent()` in-flight guard toasts "Installing X — wait for it to finish."; `selectAgent()` gains the INSTALLING_OTHER guard while still permitting `installAgent()`'s own post-install auto-switch (installing == target passes). Install progress card keyed on `agentInstalling != null` (always visible, no matter where the install started). Viewing an installed-but-inactive agent renders an explanatory card ("Stop the running task to switch…" / "Switching to …") instead of the blank void. Redundant in-branch guards (the two new "condition always true" warnings) removed. |
+| tests | `e86ca54` | `AgentTabPolicyTest` — 11 JVM tests covering idle switch, running-task block, install-in-flight block, the installAgent auto-switch exemption, and every tap classification branch. |
+| version | `5b1dcb7` | v1.0.18 / versionCode 19: `app/build.gradle.kts`, changelog `19.txt`, `mobile-harness-update.json` (sha256 `eada087b…70b49`, 87,655,923 bytes). |
+
+### Verification
+- `:app:testOnlineDebugUnitTest` → **153 tests, 0 failures, 0 skipped** (142 previous + 11 new), run twice (post-fix and post-version-bump).
+- `:app:assembleOnlineRelease` → **BUILD SUCCESSFUL** (signed). `aapt dump badging`: `versionCode='19' versionName='1.0.18'`. AGY asset embedded: 41,870,025 bytes (matches manifest.json). APK 87,655,923 bytes, sha256 `eada087b4afdad9b678aabb7843384e2e37735d4b2eb34ee1ff00bc81ad70b49`.
+- `apksigner verify --print-certs`: cert SHA-256 `d07ba804cfa95dd39083002628b65487d7ae99acab12cdfa61c5f42bca7dccfe` — identical to the v1.0.8–v1.0.17 line; in-place update path preserved.
+- Pushed `main` only after build+tests passed (user rule). Tag `v1.0.18`; GitHub release with `mobile-harness-online-v1.0.18.apk` + `mobile-harness-update.json`; `releases/latest` → v1.0.18.
+- On-device end-to-end (actual tab taps) not verifiable in this environment — the three no-op paths are closed at the code level with JVM-tested policy logic.
+
+### Touched files
+`ui/AgentTabPolicy.kt` (new), `ui/AgentScreen.kt`, `ui/MainViewModel.kt`, `app/src/test/java/com/jarves/mh/ui/AgentTabPolicyTest.kt` (new), `app/build.gradle.kts`, `fastlane/metadata/android/en-US/changelogs/19.txt` (new), `mobile-harness-update.json`, this file.
+
+### Pending items
+- **Phase 1** (next): new "Z.ai Web" tab + isolated `com.jarves.mh.zweb` module — hidden WebView on `https://chat.z.ai`, JSON selector config in assets with fallbacks + remote-update URL, prompt send, robust finish detection (indicator gone + text stable N s + timeout), text/code-block extraction, `FILE: path` parsing → files, JVM tests for parser/config/finish-detection. Must NOT touch AgentRegistry/AgentDriver (Z.ai Web is not a CLI agent).
+- **Phase 2**: foreground service (Android 14+ type rules), task queue, notifications, login/captcha detection → visible WebView handoff, resume. **Phase 3**: DownloadListener fallback with session cookies, zip output. **Phase 4**: optional OpenRouter prompt rewriting + report summary via the app's existing provider/key vault.
+- User manual action after Phase 1 ships: open the Z.ai Web tab once and log in to chat.z.ai inside the app's WebView (cookies persist thereafter).
+
+### Notes for next agent
+- Build env is fully scripted this session: `/home/z/my-project/scripts/bootstrap_env.sh` + `bootstrap_stage2.sh` (downloads are resumable — the harness kills detached downloads, run stage2 in the foreground), `extract_signing.sh` (parses KEYSTORE_INFO.txt → `keystores/signing.env`, strips the trailing "(same)" annotation on the Key pass line — a naive full-line parse feeds a wrong key password and PackageAndroidArtifact fails with "Given final block not properly padded"), `env.sh` (JAVA_HOME + signing env). Foreground `./gradlew` runs take ~1.5–4 min warm, ~9 min cold including Gradle 8.14 + deps.
+- `git submodule update --init --recursive` is mandatory on every fresh clone before any assemble task.
+- The Z.ai Web tab work should land as a NEW package (`com.jarves.mh.zweb`) + one additive AgentScreen tab entry; the AgentTabPolicy tap classification only covers the three AgentKind tabs and does not need to know about the new tab (it will be a separate UI section per the plan).
+
+---
+
 ## 2026-10-09 — v1.0.17 release: F-09..F-15 fix set — app User-Agent everywhere + honest 401/403 messages + key-pool hardening (versionCode 18)
 
 - **Agent/tool**: Super Z agent session, direct repo work on `ferdausfs/Mobile-Harness` branch `main`. User approved ALL items F-09..F-15 from the review report in one batch, with a separate commit per item for easy revert.

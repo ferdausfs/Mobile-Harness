@@ -66,7 +66,14 @@ data class ZaiWebConfig(
         const val JSON_STABLE_WINDOW = "stableWindowMs"
         const val JSON_GENERATION_TIMEOUT = "generationTimeoutMs"
 
-        /** Selector groups the engine requires to be present and non-empty. */
+        /**
+         * Selector groups the engine requires to be present and non-empty.
+         *
+         * `sidebarToggle` / `signInButton` / `loginFormMarker` drive the visible
+         * sign-in sheet's auto-navigation (guest home → open sidebar → tap Sign in)
+         * added in config v2 after the live probe showed the auth route can fail to
+         * render its form when the page is loaded inside an Android WebView.
+         */
         val REQUIRED_GROUPS = listOf(
             "input",
             "sendButton",
@@ -74,6 +81,9 @@ data class ZaiWebConfig(
             "assistantMessage",
             "codeBlock",
             "loginMarker",
+            "loginFormMarker",
+            "sidebarToggle",
+            "signInButton",
             "captchaMarker",
         )
 

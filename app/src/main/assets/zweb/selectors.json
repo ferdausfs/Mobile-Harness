@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "remoteUpdateUrl": "https://raw.githubusercontent.com/ferdausfs/Mobile-Harness/main/app/src/main/assets/zweb/selectors.json",
   "page": {
     "startUrl": "https://chat.z.ai/",
@@ -45,6 +45,24 @@
       "url-contains:/auth",
       "text:=Welcome to Z.ai",
       "text:=Continue with Email"
+    ],
+    "loginFormMarker": [
+      "text:=Welcome to Z.ai",
+      "text:=Continue with Email",
+      "text:=Continue with Google"
+    ],
+    "sidebarToggle": [
+      "#sidebar-toggle-button",
+      "button[aria-label='Toggle Sidebar']",
+      "[id*='sidebar-toggle']",
+      "button[aria-label*='sidebar' i]"
+    ],
+    "signInButton": [
+      "text-button:=sign in",
+      "text-button:=log in",
+      "button[aria-label='Sign in']",
+      "a[href='/auth']",
+      "a[href*='/auth']"
     ],
     "captchaMarker": [
       "#aliyunCaptcha-window-popup.window-show",

@@ -18,6 +18,9 @@ class ZaiProbeScriptsTest {
            "assistantMessage":[".chat-assistant"],
            "codeBlock":[".chat-assistant pre code"],
            "loginMarker":["url-contains:/auth","text:=Welcome to Z.ai"],
+           "loginFormMarker":["text:=Welcome to Z.ai"],
+           "sidebarToggle":["#sidebar-toggle-button"],
+           "signInButton":["text-button:=sign in"],
            "captchaMarker":["#aliyunCaptcha-window-popup.window-show"],
            "newChatButton":["#new-chat-button"]},
          "timing":{}}

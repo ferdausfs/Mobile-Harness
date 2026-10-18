@@ -30,6 +30,19 @@ class ZaiWebConfigTest {
     }
 
     @Test
+    fun `bundled sign-in groups match the live probe from 2026-10-18`() {
+        val config = parseBundled()
+        // Live probe: sidebar toggle button id + drawer "Sign in" buttons (text and aria).
+        assertEquals("#sidebar-toggle-button", config.selectorsFor("sidebarToggle").first())
+        assertEquals("text-button:=sign in", config.selectorsFor("signInButton").first())
+        // loginFormMarker must be URL-independent: the auth route can keep the /auth URL
+        // while rendering guest home content, so only text/CSS markers qualify.
+        config.selectorsFor("loginFormMarker").forEach { marker ->
+            assertTrue("loginFormMarker must not use url-contains: $marker", !marker.startsWith("url-contains:"))
+        }
+    }
+
+    @Test
     fun `bundled asset has version, remote url and https start url`() {
         val config = parseBundled()
         assertTrue(config.version >= 1)
@@ -92,6 +105,7 @@ class ZaiWebConfigTest {
         val json = """
             {"version":9,"selectors":{"input":["#i"],"sendButton":["#s"],"stopIndicator":["#x"],
               "assistantMessage":[".a"],"codeBlock":["pre"],"loginMarker":["url-contains:/auth"],
+              "loginFormMarker":["text:=Welcome"],"sidebarToggle":["#st"],"signInButton":["text-button:=sign in"],
               "captchaMarker":["#cap"]},
              "page":{"startUrl":"http://chat.z.ai/"},"timing":{}}
         """.trimIndent()
@@ -108,6 +122,7 @@ class ZaiWebConfigTest {
         val json = """
             {"version":9,"selectors":{"input":["#i"],"sendButton":["#s"],"stopIndicator":["#x"],
               "assistantMessage":[".a"],"codeBlock":["pre"],"loginMarker":["url-contains:/auth"],
+              "loginFormMarker":["text:=Welcome"],"sidebarToggle":["#st"],"signInButton":["text-button:=sign in"],
               "captchaMarker":["#cap"]},
              "page":{"startUrl":"https://chat.z.ai/"},
              "timing":{"pollIntervalMs":10,"stableWindowMs":600000,"generationTimeoutMs":999999999,"pageLoadTimeoutMs":1}}
@@ -124,6 +139,7 @@ class ZaiWebConfigTest {
         val json = """
             {"version":9,"selectors":{"input":["", "  ", "#chat-input"],"sendButton":["#s"],"stopIndicator":["#x"],
               "assistantMessage":[".a"],"codeBlock":["pre"],"loginMarker":["url-contains:/auth"],
+              "loginFormMarker":["text:=Welcome"],"sidebarToggle":["#st"],"signInButton":["text-button:=sign in"],
               "captchaMarker":["#cap"]},
              "page":{"startUrl":"https://chat.z.ai/"}}
         """.trimIndent()

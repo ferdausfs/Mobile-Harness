@@ -112,6 +112,9 @@ import com.jarves.mh.network.ConnectionValidation
 import com.jarves.mh.network.DiscoveredModel
 import com.jarves.mh.network.ModelDiscoveryResult
 import com.jarves.mh.runtime.AntigravityAuthStatus
+import com.jarves.mh.update.InstallDiagnostics
+import com.jarves.mh.update.InstallDiagnosticsProvider
+import com.jarves.mh.update.InstallResultStore
 import com.jarves.mh.ui.theme.AppThemeMode
 import com.jarves.mh.ui.theme.PocketGreen
 import com.jarves.mh.ui.theme.PocketOrange
@@ -147,6 +150,7 @@ fun SettingsScreen(
     onSetAntigravityEffort: (String) -> Unit = {},
     onCheckAppUpdate: () -> Unit = {},
     onInstallAppUpdate: () -> Unit = {},
+    onDismissAppUpdateError: () -> Unit = {},
     initialDebugUpdateManifestUrl: String = "",
     onSetDebugUpdateManifestUrl: (String) -> Unit = {},
     onClearDebugUpdateManifestUrl: () -> Unit = {},
@@ -394,11 +398,16 @@ fun SettingsScreen(
                     state = state,
                     onCheckNow = onCheckAppUpdate,
                     onInstall = onInstallAppUpdate,
+                    onDismiss = onDismissAppUpdateError,
                 )
             }
 
             item {
                 CrashReportCard()
+            }
+
+            item {
+                InstallDiagnosticsCard()
             }
 
             if (BuildConfig.DEBUG) {
@@ -956,6 +965,7 @@ private fun AppUpdateCard(
     state: AppUiState,
     onCheckNow: () -> Unit,
     onInstall: () -> Unit,
+    onDismiss: () -> Unit = {},
 ) {
     val context = LocalContext.current
     // Same contract as the home-screen update dialog: when Android has not
@@ -1082,6 +1092,21 @@ private fun AppUpdateCard(
                 }
             }
 
+            // The installer reports through a broadcast, not the ViewModel —
+            // surface the recorded PackageInstaller outcome here so a failed
+            // hand-off is never a dead-end "Installing…" state.
+            val lastInstall = remember(state.appUpdateStatus) { InstallResultStore.load(context) }
+            if (lastInstall != null && lastInstall.statusCode != InstallDiagnostics.STATUS_SUCCESS && !downloading) {
+                Text(
+                    "Last install attempt: " + (InstallDiagnostics.summarizeRecord(lastInstall) ?: "failure"),
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.error,
+                )
+                if (installing) {
+                    TextButton(onClick = onDismiss) { Text("Back to update") }
+                }
+            }
+
             if (update != null && available) {
                 Button(
                     onClick = {
@@ -1105,6 +1130,123 @@ private fun AppUpdateCard(
         }
     }
 }
+
+@Composable
+private fun InstallDiagnosticsCard() {
+    val context = LocalContext.current
+    var data by remember { mutableStateOf(InstallDiagnosticsProvider.collect(context)) }
+    val record = data.lastRecord
+    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+
+    Surface(
+        shape = RoundedCornerShape(20.dp),
+        color = MaterialTheme.colorScheme.surface,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.PhoneAndroid, null, Modifier.size(20.dp), tint = PocketGreen)
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f)) {
+                    Text("Install diagnostics", fontWeight = FontWeight.SemiBold)
+                    Text(
+                        InstallDiagnostics.summarizeRecord(record) ?: "No in-app install attempt recorded",
+                        fontSize = 12.sp,
+                        color = when {
+                            record == null -> MaterialTheme.colorScheme.onSurfaceVariant
+                            record.statusCode == InstallDiagnostics.STATUS_SUCCESS -> MaterialTheme.colorScheme.onSurfaceVariant
+                            else -> MaterialTheme.colorScheme.error
+                        },
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                IconButton(onClick = { data = InstallDiagnosticsProvider.collect(context) }) {
+                    Icon(Icons.Default.Refresh, contentDescription = "Refresh install diagnostics")
+                }
+            }
+
+            Text(
+                "Installed: v${data.installedVersionName} · code ${data.installedVersionCode}\n" +
+                    "Installed cert: ${shortCert(data.installedCertSha256)}\n" +
+                    "Android SDK: ${data.sdkInt} · Free: ${InstallDiagnostics.formatBytes(data.freeInternalBytes)}\n" +
+                    "ABIs: ${data.abis.joinToString(", ")}",
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontFamily = FontFamily.Monospace,
+            )
+            if (data.downloadedApkPath != null) {
+                Text(
+                    "Pending update APK: ${InstallDiagnostics.formatBytes(data.downloadedApkSizeBytes)} · cert ${shortCert(data.downloadedCertSha256)}\n" +
+                        InstallDiagnostics.certVerdict(data.installedCertSha256, data.downloadedCertSha256),
+                    fontSize = 12.sp,
+                    color = if (data.installedCertSha256 != null && data.downloadedCertSha256 != null &&
+                        !data.installedCertSha256.equals(data.downloadedCertSha256, ignoreCase = true)
+                    ) {
+                        MaterialTheme.colorScheme.error
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                )
+            }
+            record?.let {
+                Text(
+                    buildString {
+                        append("Status: ")
+                        append(InstallDiagnostics.statusCodeName(it.statusCode))
+                        append(" (code ")
+                        append(it.statusCode)
+                        append(")")
+                        if (it.statusMessage.isNotBlank()) {
+                            append("\nEXTRA_STATUS_MESSAGE: ")
+                            append(it.statusMessage)
+                        }
+                    },
+                    fontSize = 12.sp,
+                    color = if (it.statusCode == InstallDiagnostics.STATUS_SUCCESS) {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    } else {
+                        MaterialTheme.colorScheme.error
+                    },
+                    fontFamily = FontFamily.Monospace,
+                )
+            }
+
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(
+                    onClick = {
+                        data = InstallDiagnosticsProvider.collect(context)
+                        clipboard?.setPrimaryClip(
+                            ClipData.newPlainText(
+                                "Mobile Harness install diagnostics",
+                                InstallDiagnostics.formatReport(data),
+                            ),
+                        )
+                        Toast.makeText(context, "Install diagnostics copied", Toast.LENGTH_SHORT).show()
+                    },
+                ) { Text("Copy report") }
+                if (record != null) {
+                    TextButton(onClick = {
+                        InstallResultStore.clear(context)
+                        data = InstallDiagnosticsProvider.collect(context)
+                    }) { Text("Clear") }
+                }
+            }
+            Text(
+                "Shows the exact PackageInstaller result of the last in-app update install. " +
+                    "For browser installs (which never reach this app) use the adb recipe in " +
+                    "docs/adb-install-diagnostics.md.",
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+/** 16-hex prefix of a SHA-256 cert fingerprint, or a placeholder when unavailable. */
+private fun shortCert(cert: String?): String =
+    cert?.take(16)?.uppercase()?.let { "$it…" } ?: "unavailable"
 
 @Composable
 private fun CrashReportCard() {

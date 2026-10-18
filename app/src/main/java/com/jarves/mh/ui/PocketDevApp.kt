@@ -2158,6 +2158,7 @@ private fun RootScreenHost(
                     onSetAntigravityEffort = viewModel::setAntigravityEffort,
                     onCheckAppUpdate = { viewModel.checkForAppUpdate(force = true) },
                     onInstallAppUpdate = viewModel::installAppUpdate,
+                    onDismissAppUpdateError = viewModel::dismissAppUpdateError,
                     initialDebugUpdateManifestUrl = viewModel.debugUpdateManifestUrl(),
                     onSetDebugUpdateManifestUrl = viewModel::setDebugUpdateManifestUrl,
                     onClearDebugUpdateManifestUrl = viewModel::clearDebugUpdateManifestUrl,

@@ -9,13 +9,21 @@ import android.widget.Toast
 
 class AndroidAppInstallReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
+        // A throw here shows the system crash dialog over the installer — the
+        // exact "keeps stopping" report. Never let anything escape.
+        runCatching { handle(context, intent) }
+    }
+
+    private fun handle(context: Context, intent: Intent) {
         if (intent.action != AndroidAppInstaller.ACTION_INSTALL_RESULT) return
         val status = intent.getIntExtra(PackageInstaller.EXTRA_STATUS, PackageInstaller.STATUS_FAILURE)
         if (status == PackageInstaller.STATUS_PENDING_USER_ACTION) {
             @Suppress("DEPRECATION")
             val userAction = intent.getParcelableExtra<Intent>(Intent.EXTRA_INTENT)
             userAction?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            userAction?.let(context::startActivity)
+            if (userAction != null) {
+                runCatching { context.startActivity(userAction) }
+            }
             return
         }
         if (status != PackageInstaller.STATUS_SUCCESS) {

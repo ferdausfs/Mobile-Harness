@@ -50,6 +50,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -66,9 +67,12 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import com.jarves.mh.ui.theme.PocketOrange
+import com.jarves.mh.zweb.AuthProbePollPolicy
 import com.jarves.mh.zweb.ZaiAuthProbeClassifier
 import com.jarves.mh.zweb.ZaiDiagnostics
 import com.jarves.mh.zweb.ZaiProbeScripts
+import com.jarves.mh.zweb.probeTimeoutVerdict
+import com.jarves.mh.zweb.runAuthProbeScript
 import com.jarves.mh.zweb.ZaiPromptBuilder
 import com.jarves.mh.zweb.ZaiRunPhase
 import com.jarves.mh.zweb.ZaiSheetDiagnostics
@@ -76,6 +80,7 @@ import com.jarves.mh.zweb.ZaiSheetUserAgent
 import com.jarves.mh.zweb.ZaiWebUiState
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
 
@@ -569,6 +574,8 @@ private fun ZaiSignInSheet(
     var sheetUa by remember { mutableStateOf("") }
     var showHint by remember { mutableStateOf(false) }
     var captchaSeen by remember { mutableStateOf(false) }
+    var closing by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
 
     val selectors = remember(automationJson) { ZaiProbeScripts.parseSheetSelectors(automationJson) }
     val authProbeJs = remember(selectors) {
@@ -586,9 +593,23 @@ private fun ZaiSignInSheet(
             // 1. Session check — runs on every tick, on any page (a fetch to a
             //    foreign origin simply fails and reads as signed-out). The probe
             //    mirrors the site's own check: Bearer-from-localStorage + cookie.
-            val verdict = ZaiAuthProbeClassifier.classify(
-                ZaiAuthProbeClassifier.parseEvalResult(view.evalSheetJs(authProbeJs)),
+            //    v1.0.23: store-and-poll — evaluateJavascript cannot await the
+            //    probe's fetches on a real WebView, so the script stores its
+            //    result in window.__mhAuthResult and we poll the synchronous
+            //    reader here (short budget; a slow fetch lands on the next tick
+            //    because the injector's guard never clears an in-flight probe).
+            val raw = runAuthProbeScript(
+                eval = { script -> view.evalSheetJs(script) },
+                injectScript = authProbeJs,
+                readerScript = ZaiProbeScripts.buildAuthResultReaderScript(),
+                isReadable = { ZaiAuthProbeClassifier.parseEvalResult(it) != null },
+                config = AuthProbePollPolicy.SHEET_POLL,
             )
+            val verdict = if (raw == null) {
+                probeTimeoutVerdict(AuthProbePollPolicy.totalWaitMs(AuthProbePollPolicy.SHEET_POLL))
+            } else {
+                ZaiAuthProbeClassifier.classify(ZaiAuthProbeClassifier.parseEvalResult(raw))
+            }
             onSheetDiagnostics(
                 ZaiSheetDiagnostics(view.url, sheetUa, ZaiAuthProbeClassifier.summary(verdict)),
             )
@@ -633,11 +654,25 @@ private fun ZaiSignInSheet(
             onClose()
             return
         }
-        // X pressed: one last session probe so "logged in, then closed" is never lost.
-        view.evaluateJavascript(authProbeJs) { result ->
-            val verdict = ZaiAuthProbeClassifier.classify(
-                ZaiAuthProbeClassifier.parseEvalResult(result),
+        if (closing) return
+        closing = true
+        // X pressed: one last session probe so "logged in, then closed" is never
+        // lost. v1.0.23: store-and-poll with a short budget — the sheet poll
+        // keeps a fresh result in window.__mhAuthResult, so this usually lands
+        // on the first read. The sheet stays up ~1.5s worst case, then closes.
+        scope.launch {
+            val raw = runAuthProbeScript(
+                eval = { script -> view.evalSheetJs(script) },
+                injectScript = authProbeJs,
+                readerScript = ZaiProbeScripts.buildAuthResultReaderScript(),
+                isReadable = { ZaiAuthProbeClassifier.parseEvalResult(it) != null },
+                config = AuthProbePollPolicy.SHEET_FINAL,
             )
+            val verdict = if (raw == null) {
+                probeTimeoutVerdict(AuthProbePollPolicy.totalWaitMs(AuthProbePollPolicy.SHEET_FINAL))
+            } else {
+                ZaiAuthProbeClassifier.classify(ZaiAuthProbeClassifier.parseEvalResult(raw))
+            }
             onSheetDiagnostics(
                 ZaiSheetDiagnostics(view.url, sheetUa, ZaiAuthProbeClassifier.summary(verdict)),
             )
@@ -711,12 +746,23 @@ private fun ZaiSignInSheet(
                         onVerify = {
                             // Fast path after every finished load (incl. the OAuth
                             // redirect back to chat.z.ai): probe immediately instead
-                            // of waiting for the next poll tick.
+                            // of waiting for the next poll tick. v1.0.23:
+                            // store-and-poll — a Promise completion value would read
+                            // as "{}" on a real WebView, so poll the stored result.
                             val view = webViewRef
-                            if (view != null && !verified) {
-                                view.evaluateJavascript(authProbeJs) { result ->
+                            if (view != null && !verified && !closing) {
+                                scope.launch {
+                                    val raw = runAuthProbeScript(
+                                        eval = { script -> view.evalSheetJs(script) },
+                                        injectScript = authProbeJs,
+                                        readerScript = ZaiProbeScripts.buildAuthResultReaderScript(),
+                                        isReadable = { ZaiAuthProbeClassifier.parseEvalResult(it) != null },
+                                        config = AuthProbePollPolicy.SHEET_FINAL,
+                                    )
+                                    if (!isActive) return@launch
+                                    if (raw == null) return@launch // next poll tick re-checks
                                     val verdict = ZaiAuthProbeClassifier.classify(
-                                        ZaiAuthProbeClassifier.parseEvalResult(result),
+                                        ZaiAuthProbeClassifier.parseEvalResult(raw),
                                     )
                                     onSheetDiagnostics(
                                         ZaiSheetDiagnostics(view.url, sheetUa, ZaiAuthProbeClassifier.summary(verdict)),

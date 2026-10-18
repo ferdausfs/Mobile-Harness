@@ -609,11 +609,27 @@ class ZaiWebEngine(
         }
     }
 
-    /** Runs the session probe and classifies it. Never throws. */
+    /**
+     * Runs the session probe (store-and-poll) and classifies it. Never throws.
+     *
+     * v1.0.23: the probe script no longer returns its Promise to
+     * evaluateJavascript (which cannot await it — on-device evidence
+     * 2026-10-18); it stores the result in `window.__mhAuthResult` and this
+     * polls the synchronous reader until it lands or the budget expires.
+     */
     private suspend fun probeAuthVerdict(view: WebView, config: ZaiWebConfig): ZaiAuthProbeClassifier.ZaiAuthVerdict {
-        val raw = view.evaluateJs(ZaiProbeScripts.buildAuthProbe(config))
-        val parsed = ZaiAuthProbeClassifier.parseEvalResult(raw)
-        return ZaiAuthProbeClassifier.classify(parsed)
+        val raw = runAuthProbeScript(
+            eval = { script -> view.evaluateJs(script) },
+            injectScript = ZaiProbeScripts.buildAuthProbe(config),
+            readerScript = ZaiProbeScripts.buildAuthResultReaderScript(),
+            isReadable = { ZaiAuthProbeClassifier.parseEvalResult(it) != null },
+            config = AuthProbePollPolicy.ENGINE_CHECK,
+        )
+        return if (raw == null) {
+            probeTimeoutVerdict(AuthProbePollPolicy.totalWaitMs(AuthProbePollPolicy.ENGINE_CHECK))
+        } else {
+            ZaiAuthProbeClassifier.classify(ZaiAuthProbeClassifier.parseEvalResult(raw))
+        }
     }
 
     private suspend fun sendWithRetries(view: WebView, config: ZaiWebConfig): Boolean {

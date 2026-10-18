@@ -180,6 +180,72 @@ class ZaiProbeScriptsTest {
     }
 
     @Test
+    fun `auth probe stores its result instead of returning a promise to evaluateJavascript`() {
+        // THE v1.0.23 FIX. evaluateJavascript hands its callback the script's
+        // synchronous completion value; a Promise completion value serializes
+        // to "{}" and is never awaited on a real Android WebView (on-device
+        // Diagnostics 2026-10-18). The injector must therefore store the result
+        // in window.__mhAuthResult and return nothing.
+        val js = ZaiProbeScripts.buildAuthProbeForPath("/api/v1/auths/")
+        assertTrue(js.contains("window.__mhAuthResult=null"))
+        assertTrue(js.contains("window.__mhAuthResult=JSON.stringify"))
+        // No promise may be the completion value: the IIFE must not return the
+        // Promise.all chain (the old broken pattern). The fetch inside the
+        // call() helper is fine — its value flows into Promise.all, which only
+        // STORES the result.
+        assertFalse(Regex("return\\s*Promise").containsMatchIn(js))
+    }
+
+    @Test
+    fun `auth probe is single-flight per document without clearing an in-flight result`() {
+        // While a probe is settling, later injectors skip WITHOUT clearing, so
+        // a slow fetch's result still lands and the next reader picks it up.
+        val js = ZaiProbeScripts.buildAuthProbeForPath("/api/v1/auths/")
+        assertTrue(js.contains("__mhAuthProbeInFlight"))
+        assertTrue(js.contains("__mhAuthProbeAt"))
+        assertTrue(js.contains("15000"))
+    }
+
+    @Test
+    fun `auth result reader is a synchronous expression`() {
+        val js = ZaiProbeScripts.buildAuthResultReaderScript()
+        assertTrue(js.contains("window.__mhAuthResult||null"))
+        assertFalse(js.contains("fetch"))
+        assertFalse(js.contains("Promise"))
+        assertFalse(js.contains(".then("))
+    }
+
+    @Test
+    fun `no other probe script returns a promise or calls fetch`() {
+        // The auth injector is the ONLY script allowed to fetch; every other
+        // builder must stay fully synchronous so its JSON result reaches the
+        // evaluateJavascript callback.
+        val syncScripts = listOf(
+            "stateProbe" to ZaiProbeScripts.buildStateProbe(config),
+            "inject" to ZaiProbeScripts.buildInjectScript(config, "x"),
+            "clickSend" to ZaiProbeScripts.buildClickSendScript(config),
+            "enterFallback" to ZaiProbeScripts.buildEnterFallbackScript(config),
+            "clickStop" to ZaiProbeScripts.buildClickStopScript(config),
+            "clickNewChat" to ZaiProbeScripts.buildClickNewChatScript(config),
+            "extract" to ZaiProbeScripts.buildExtractScript(config),
+            "sheetProbe" to ZaiProbeScripts.buildSheetProbeScript(
+                ZaiProbeScripts.parseSheetSelectors(sheetJson)!!,
+            ),
+            "sheetClickSidebar" to ZaiProbeScripts.buildClickVisibleScript(
+                ZaiProbeScripts.parseSheetSelectors(sheetJson)!!, "sidebarToggle",
+            ),
+            "sheetClickSignIn" to ZaiProbeScripts.buildClickVisibleScript(
+                ZaiProbeScripts.parseSheetSelectors(sheetJson)!!, "signInButton",
+            ),
+        )
+        syncScripts.forEach { (name, js) ->
+            assertFalse("$name must not fetch", js.contains("fetch("))
+            assertFalse("$name must not use Promise", js.contains("Promise"))
+            assertFalse("$name must not chain .then", js.contains(".then("))
+        }
+    }
+
+    @Test
     fun `auth probe never exposes the token or email value`() {
         val js = ZaiProbeScripts.buildAuthProbeForPath("/api/v1/auths/")
         // The token value only ever flows into the Authorization header — the

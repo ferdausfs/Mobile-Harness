@@ -100,6 +100,19 @@ object ZaiProbeScripts {
      * because the server answers unauthenticated requests with a FRESH GUEST
      * user (HTTP 200, role:"guest") instead of a 401.
      *
+     * v1.0.23 — store-and-poll contract: `WebView.evaluateJavascript` returns a
+     * script's SYNCHRONOUS completion value to its callback; a `Promise`
+     * completion value serializes to `"{}"` and is never awaited on a real
+     * Android WebView (on-device Diagnostics 2026-10-18: every probe read
+     * `probe-error` while the site session cookies existed). This script now
+     * RETURNS NOTHING — it clears `window.__mhAuthResult`, starts the two
+     * fetches, and stores the JSON result in `window.__mhAuthResult` when they
+     * settle. Callers read it back with [buildAuthResultReaderScript] using the
+     * [AuthProbePollPolicy] loop ([runAuthProbeScript]). The in-flight guard
+     * (15s expiry) keeps the probe single-flight per document: while a fetch is
+     * settling, later injectors skip WITHOUT clearing, so a slow result still
+     * lands and is picked up by the next read.
+     *
      * Secrets: the script never returns the token value or the account email —
      * presence booleans, the role string and truncated error text only. The
      * top-level `signedIn` boolean is a compat mirror of
@@ -128,24 +141,39 @@ object ZaiProbeScripts {
                   })
                   .catch(function(e){return{status:null,shape:'error',role:'',emailPresent:false,guest:false,error:String(e).slice(0,160)};});
               }
+              var now=Date.now();
+              if(window.__mhAuthProbeInFlight&&(now-(window.__mhAuthProbeAt||0))<15000){return;}
+              window.__mhAuthProbeInFlight=true;
+              window.__mhAuthProbeAt=now;
+              window.__mhAuthResult=null;
               var ls=null;
               try{ls=window.localStorage?window.localStorage.getItem('token'):null;}catch(e){ls=null;}
               var bh={Accept:'application/json'};
               if(ls){bh.Authorization='Bearer '+ls;}
-              return Promise.all([call(bh),call({Accept:'application/json'})]).then(function(rs){
+              Promise.all([call(bh),call({Accept:'application/json'})]).then(function(rs){
                 var b=rs[0],c=rs[1];
                 var bu=!!b&&b.shape==='user'&&!b.guest&&b.role!=='';
                 var cu=!!c&&c.shape==='user'&&!c.guest&&c.role!=='';
-                return JSON.stringify({
+                window.__mhAuthResult=JSON.stringify({
                   signedIn:bu||cu,
                   hasLocalToken:!!ls,
                   bearer:b,
                   cookie:c
                 });
+                window.__mhAuthProbeInFlight=false;
               });
             })()
         """.trimIndent()
     }
+
+    /**
+     * The synchronous reader for [buildAuthProbeForPath]'s stored result.
+     * `evaluateJavascript`-safe by construction: its completion value is the
+     * stored JSON string (WebView wraps it in one level of JSON quoting) or
+     * null — never a Promise. [ZaiAuthProbeClassifier.parseEvalResult] handles
+     * both forms.
+     */
+    fun buildAuthResultReaderScript(): String = "window.__mhAuthResult||null"
 
     /** Sets the prompt text on the input element using the native value setter (Svelte-safe). */
     fun buildInjectScript(config: ZaiWebConfig, text: String): String {

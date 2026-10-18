@@ -1,12 +1,12 @@
 {
-  "versionCode": 23,
-  "versionName": "1.0.22",
-  "notes": "Fixes \"the app never updates\". The in-app update check ran once per day, silently, and a single failed check (weak network at app start) was counted as completed - blocking every retry for the next 24 hours, and release builds had no button to check again. v1.0.21 was published and served correctly the whole time; the app just refused to look. Now a failed check no longer blocks retries (the next app start re-checks automatically), and Settings has a new always-visible App update card: Check now button, current version, a clear up-to-date or failure message, and when an update exists the same download flow with progress, the Install-unknown-apps permission step and retry. If the update still does not appear, Settings > App update > Check now will show the reason instead of staying silent. Also carries all of v1.0.21: the Z.ai sign-in session fix (session check now reads the site's own Bearer token, not just cookies) and the Diagnostics section on the Z.ai tab. Same signing key - installs over v1.0.20/v1.0.21 with one tap.",
+  "versionCode": 24,
+  "versionName": "1.0.23",
+  "notes": "Fixes \"Z.ai auth probe never returns a result on a real Android WebView\". Your Diagnostics showed it exactly: login actually succeeded (the token and oauth_id_token cookies exist), but every check read outcome=probe-error, error=\"probe did not return a readable result\", so the card stayed on \"Not signed in\" and the sign-in sheet never closed itself. Root cause: the probe script returned a JavaScript Promise to WebView.evaluateJavascript, which on a real Android WebView cannot await it - it hands back \"{}\" instead of the result (headless-browser tests awaited the Promise, which is why tests passed while the phone never worked). The probe now stores its result on the page and the app polls it with short synchronous reads (with a timeout budget that reports the real reason instead of a generic error). Applied everywhere the probe runs: the hidden engine's connection check, the sign-in sheet's 2-second session poll, the X-close final probe and the page-finished fast path - so after login the sheet closes itself and the card shows Connected. Also adds a source-level guard test that fails if any script handed to evaluateJavascript ever returns a Promise again, plus on-device verification steps in docs/zai-auth-probe-verification.md. Same signing key - installs over v1.0.22 with one tap.",
   "artifacts": {
     "online": {
-      "url": "https://github.com/ferdausfs/Mobile-Harness/releases/download/v1.0.22/mobile-harness-online-v1.0.22.apk",
-      "sha256": "364411549a14e02fc1cd8f25b0bb7a5d5240ebf621c0e54b3ff77354dc1070e9",
-      "sizeBytes": 87940807
+      "url": "https://github.com/ferdausfs/Mobile-Harness/releases/download/v1.0.23/mobile-harness-online-v1.0.23.apk",
+      "sha256": "12f5db5f68d351b49f26cef94789cf99476dc4c20fc96468be073878e36564ba",
+      "sizeBytes": 87957939
     }
   }
 }

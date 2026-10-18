@@ -13,6 +13,10 @@ import com.jarves.mh.ui.theme.PocketTheme
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
+        // First thing the process does on this entry path: capture any crash
+        // to filesDir/crash/last-crash.txt (Settings → Last crash) so a crash
+        // report can be copied and sent instead of being a blind spot.
+        CrashGuard.install(this)
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent {

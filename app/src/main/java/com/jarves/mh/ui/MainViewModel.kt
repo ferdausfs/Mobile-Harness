@@ -66,6 +66,15 @@ import com.jarves.mh.update.AppUpdateCheckPolicy
 import com.jarves.mh.update.AppUpdater
 import com.jarves.mh.zweb.ZaiWebController
 import com.jarves.mh.zweb.ZaiWebUiState
+import com.jarves.mh.zweb.ZaiChatPromptBuilder
+import com.jarves.mh.zweb.ZaiChatTurnPolicy
+import com.jarves.mh.zweb.ZaiChatTurnPresenter
+import com.jarves.mh.zweb.ZaiNeedFilesParser
+import com.jarves.mh.zweb.ZaiPendingApply
+import com.jarves.mh.zweb.ZaiPromptBudget
+import com.jarves.mh.zweb.ZaiRunPhase
+import com.jarves.mh.zweb.ZaiWorkspaceApply
+import com.jarves.mh.zweb.ZaiWorkspaceApply.PlannedFile
 import java.io.File
 import java.io.RandomAccessFile
 import java.net.UnknownHostException
@@ -265,6 +274,14 @@ data class AppUiState(
     val appUpdateCheckMessage: String? = null,
     /** Z.ai Web tab (hidden-WebView agent). Owned by ZaiWebController, isolated from the CLI stack. */
     val zaiWeb: ZaiWebUiState = ZaiWebUiState(),
+    /** Z.ai Web is the active engine for the project workspace chat (chat-engine adapter, NOT an AgentKind). */
+    val zaiChatEngineActive: Boolean = false,
+    /** Apply Z.ai-returned files without the review card (default OFF). */
+    val zaiAutoApply: Boolean = false,
+    /** Review-and-apply plan for the last Z.ai chat reply (in-memory; cleared on chat switch). */
+    val zaiPendingApply: ZaiPendingApply? = null,
+    /** Terminal chat-engine notice in the chat (sign-in / captcha / timeout / error / stopped). */
+    val zaiChatNotice: com.jarves.mh.zweb.ZaiChatTurnPresenter.TurnNotice? = null,
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -356,6 +373,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             backgroundSetupComplete = preferences.backgroundSetupComplete,
             agentKind = initialAgentKind,
             primaryAgentKind = initialPrimaryAgentKind,
+            zaiChatEngineActive = preferences.zaiChatEngineActive,
+            zaiAutoApply = preferences.zaiAutoApply,
             provider = preferences.loadProvider(vault, initialAgentKind),
             activeApiKeyName = vault.list(preferences.loadProvider(vault, initialAgentKind).kind.name)
                 .firstOrNull(ApiKeyInfo::isActive)?.name,
@@ -3034,6 +3053,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 taskFinishedAtMillis = null,
                 pendingApproval = null,
                 pendingAttachments = emptyList(),
+                zaiPendingApply = null,
+                zaiChatNotice = null,
             )
         }
     }
@@ -3265,6 +3286,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun sendPrompt(prompt: String) {
+        // Z.ai chat engine: a separate branch/adapter — Z.ai Web is not a CLI
+        // agent, so this never touches AgentRegistry/AgentDriver or the CLI flow below.
+        if (_state.value.zaiChatEngineActive) {
+            sendZaiPrompt(prompt)
+            return
+        }
         val project = state.value.activeProject ?: return
         if (_state.value.agentKind == AgentKind.ANTIGRAVITY &&
             _state.value.antigravityAuth.status != AntigravityAuthStatus.SIGNED_IN) {
@@ -3389,11 +3416,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun stopTask() {
         if (!_state.value.isRunning) return
+        if (zaiTurnActive) {
+            zaiWebController.cancel()
+            return
+        }
         viewModelScope.launch { activeRuntime().stopActiveSession() }
     }
 
     fun undoLastChanges() {
         val project = _state.value.activeProject ?: return
+        if (lastZaiApplyActive) {
+            undoZaiChanges(project.id)
+            return
+        }
         viewModelScope.launch {
             val restored = activeRuntime().undoLastChanges(project.id)
             _state.update { current ->
@@ -3413,6 +3448,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun keepLastChanges() {
         val project = _state.value.activeProject ?: return
+        if (lastZaiApplyActive) {
+            keepZaiChanges()
+            return
+        }
         viewModelScope.launch {
             activeRuntime().acceptLastChanges(project.id)
             _state.update {
@@ -3426,6 +3465,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun undoFileChange(path: String) {
         val project = _state.value.activeProject ?: return
+        if (lastZaiApplyActive) {
+            undoZaiFileChange(project.id, path)
+            return
+        }
         viewModelScope.launch {
             if (activeRuntime().undoFileChange(project.id, path)) {
                 _state.update { current -> current.copy(changes = current.changes.filterNot { it.path == path }) }
@@ -3436,6 +3479,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun keepFileChange(path: String) {
         val project = _state.value.activeProject ?: return
+        if (lastZaiApplyActive) {
+            keepZaiFileChange(project.id, path)
+            return
+        }
         viewModelScope.launch {
             if (activeRuntime().acceptFileChange(project.id, path)) {
                 _state.update { current -> current.copy(changes = current.changes.filterNot { it.path == path }) }
@@ -4002,9 +4049,43 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val zaiWebController by lazy {
         ZaiWebController(getApplication()) { zaiState ->
+            val previous = _state.value.zaiWeb
             _state.update { it.copy(zaiWeb = zaiState) }
+            onZaiStateChanged(previous, zaiState)
         }
     }
+
+    /**
+     * Same checkpoint store the CLI bridges use (same filesDir root), so a
+     * Z.ai apply lands in the identical checkpoint/changes.json layout and the
+     * existing Changes tab / Undo flows behave exactly as for CLI agents.
+     */
+    private val zaiCheckpoints by lazy {
+        com.jarves.mh.runtime.WorkspaceCheckpoints(getApplication<Application>().filesDir)
+    }
+
+    /** One in-flight Z.ai chat-engine turn (per user message). */
+    private data class ZaiActiveTurn(
+        val project: Project,
+        val chatId: String,
+        val needFilesRounds: Int,
+    )
+
+    private var zaiTurnContext: ZaiActiveTurn? = null
+
+    /** True between sendZaiPrompt and the turn's terminal phase. */
+    @Volatile
+    private var zaiTurnActive = false
+
+    /**
+     * The project chat that owns the current chat.z.ai page conversation.
+     * Null = no trusted live conversation (next turn opens a fresh one).
+     * Reset on every terminal failure/stop; set on success.
+     */
+    private var zaiPageConversationChatId: String? = null
+
+    /** Whether the pending changes in the Changes tab came from a Z.ai apply. */
+    private var lastZaiApplyActive = false
 
     fun zaiCheckConnection() = zaiWebController.checkConnection()
 
@@ -4037,6 +4118,517 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     runMessage = if (zai.runPhase == com.jarves.mh.zweb.ZaiRunPhase.DONE) null else zai.runMessage,
                 ),
             )
+        }
+    }
+
+    // ── Z.ai as the project workspace chat engine ──
+
+    /** Flips the project chat between the CLI agent and Z.ai Web (persisted). */
+    fun setZaiChatEngineActive(active: Boolean) {
+        preferences.zaiChatEngineActive = active
+        _state.update { it.copy(zaiChatEngineActive = active, zaiChatNotice = null) }
+    }
+
+    /** Auto-apply toggle for Z.ai returned files (default OFF). */
+    fun setZaiAutoApply(enabled: Boolean) {
+        preferences.zaiAutoApply = enabled
+        _state.update { it.copy(zaiAutoApply = enabled) }
+    }
+
+    /**
+     * Chat-engine picker from the workspace chat header. `"zai-web"` selects
+     * Z.ai; anything else is treated as an AgentKind stable id and keeps the
+     * CLI flow (the three CLI agents stay completely unchanged).
+     */
+    fun selectChatEngine(engineId: String) {
+        if (engineId == ZaiChatPromptBuilder.ZAI_WEB_ENGINE_ID) {
+            setZaiChatEngineActive(true)
+            if (_state.value.zaiWeb.signedIn != true) {
+                _state.update { it.copy(toastMessage = "Z.ai is now the project chat engine — sign in to start.") }
+                zaiCheckConnection()
+                zaiOpenSignIn()
+            } else {
+                _state.update { it.copy(toastMessage = "Z.ai is now the project chat engine.") }
+            }
+            return
+        }
+        val kind = AgentKind.fromStored(engineId)
+        val block = agentSwitchBlock(_state.value.isRunning, _state.value.agentInstalling, kind)
+        if (block != AgentSwitchBlock.NONE) {
+            _state.update {
+                it.copy(
+                    toastMessage = when (block) {
+                        AgentSwitchBlock.RUNNING -> "A task is running — stop it before switching engines."
+                        else -> "An agent is installing — try again when it finishes."
+                    },
+                )
+            }
+            return
+        }
+        setZaiChatEngineActive(false)
+        if (_state.value.agentKind != kind) selectAgent(kind)
+    }
+
+    fun clearZaiChatNotice() {
+        _state.update { it.copy(zaiChatNotice = null) }
+    }
+
+    /**
+     * One chat turn through Z.ai Web: builds the prompt in the app (user
+     * message + project context + attachments/NEED_FILES files under a hard
+     * budget), sends it through the hidden WebView, and turns the reply into
+     * either a NEED_FILES fulfilment round or an assistant message with an
+     * apply plan. Conversation policy lives in [ZaiChatTurnPolicy]: continue
+     * the chat's live Z.ai conversation when possible, otherwise start fresh
+     * with a history recap.
+     */
+    private fun sendZaiPrompt(prompt: String) {
+        val project = _state.value.activeProject ?: return
+        val chatId = _state.value.activeChatId ?: return
+        if (_state.value.isRunning) return
+        val attachments = _state.value.pendingAttachments
+        if (prompt.isBlank() && attachments.isEmpty()) return
+        if (_state.value.zaiWeb.signedIn != true) {
+            _state.update { it.copy(toastMessage = "Sign in to Z.ai first — opening the sign-in sheet.") }
+            zaiCheckConnection()
+            zaiOpenSignIn()
+            return
+        }
+        val requestText = prompt.trim().ifBlank { "Please review the attached files." }
+        updateActiveChatTitle(requestText)
+        _state.update {
+            it.copy(
+                messages = it.messages + ChatMessage(fromUser = true, text = prompt.trim(), attachments = attachments),
+                pendingAttachments = emptyList(),
+                isRunning = true,
+                activity = listOf(ActivityItem("Understanding your request", "Preparing workspace context for Z.ai", false)) + it.activity,
+                liveProcess = listOf(ActivityItem("Preparing", "Collecting project context…", false)),
+                liveThinking = true,
+                taskStartedAtMillis = System.currentTimeMillis(),
+                taskFinishedAtMillis = null,
+                workSegmentStartedAtMillis = System.currentTimeMillis(),
+                currentTaskRequest = requestText,
+                zaiChatNotice = null,
+                zaiPendingApply = null,
+            )
+        }
+        touchProject(project.id)
+        persistMessages()
+        viewModelScope.launch(backgroundGuard) {
+            val decision = ZaiChatTurnPolicy.decideTurn(zaiPageConversationChatId, chatId)
+            val built = withContext(Dispatchers.IO) {
+                val workspace = projectWorkspaceRoot(project)
+                val context = ZaiChatPromptBuilder.TurnContext(
+                    fileTree = buildZaiFileTreeText(workspace),
+                    includedFiles = attachments.mapNotNull { attachment ->
+                        readWorkspaceFileForPrompt(workspace, attachment.relativePath, attachment.displayName)
+                    },
+                    historyRecap = if (decision.freshConversation) buildZaiHistoryRecap() else null,
+                    freshConversation = decision.freshConversation,
+                )
+                ZaiChatPromptBuilder.buildTurnPrompt(requestText, context)
+            }
+            withContext(Dispatchers.Main) {
+                zaiTurnContext = ZaiActiveTurn(project = project, chatId = chatId, needFilesRounds = 0)
+                zaiTurnActive = true
+                reportZaiBudget(built.report)
+                _state.update {
+                    it.copy(liveProcess = listOf(ActivityItem("Connecting to Z.ai", "Opening chat.z.ai…", false)))
+                }
+            }
+            zaiWebController.runChatTurn(built.prompt, continueChat = !decision.freshConversation)
+        }
+    }
+
+    private fun reportZaiBudget(report: ZaiChatPromptBuilder.BudgetReport) {
+        val parts = ArrayList<String>()
+        if (report.truncatedFiles.isNotEmpty()) parts.add("${report.truncatedFiles.size} file(s) truncated")
+        if (report.droppedFiles.isNotEmpty()) parts.add("${report.droppedFiles.size} file(s) left out")
+        if (parts.isEmpty()) return
+        _state.update {
+            it.copy(
+                toastMessage = "Prompt kept under the Z.ai input limit: ${parts.joinToString(", ")}. " +
+                    "The model can ask for the rest with NEED_FILES.",
+            )
+        }
+    }
+
+    /** Relative workspace paths for the prompt's file tree (sensible ignores, bounded). */
+    private fun buildZaiFileTreeText(workspace: File): String? {
+        if (!workspace.isDirectory) return null
+        val workspacePath = workspace.canonicalFile.toPath()
+        val paths = runCatching {
+            workspace.walkTopDown()
+                .maxDepth(8)
+                .onEnter { dir ->
+                    val relative = if (dir == workspace) "" else dir.relativeTo(workspace).invariantSeparatorsPath
+                    dir == workspace || (!isZaiIgnoredPath(relative) &&
+                        !Files.isSymbolicLink(dir.toPath()) &&
+                        runCatching { dir.canonicalFile.toPath().startsWith(workspacePath) }.getOrDefault(false))
+                }
+                .drop(1)
+                .filter { file ->
+                    val relative = file.relativeTo(workspace).invariantSeparatorsPath
+                    !isZaiIgnoredPath(relative) &&
+                        !Files.isSymbolicLink(file.toPath()) &&
+                        runCatching { file.canonicalFile.toPath().startsWith(workspacePath) }.getOrDefault(false)
+                }
+                .take(800)
+                .map { file ->
+                    val relative = file.relativeTo(workspace).invariantSeparatorsPath
+                    if (file.isDirectory) "$relative/" else relative
+                }
+                .sorted()
+                .toList()
+        }.getOrDefault(emptyList())
+        if (paths.isEmpty()) return null
+        return paths.joinToString("\n")
+    }
+
+    private fun isZaiIgnoredPath(relativePath: String): Boolean {
+        val normalized = relativePath.replace('\\', '/')
+        if (normalized == ".claude" || normalized == ".claude.json" || normalized.startsWith(".claude/")) return true
+        return normalized.split('/').any { segment ->
+            segment in ZaiWorkspaceApply.DENIED_DIRECTORY_NAMES || segment == "__pycache__"
+        }
+    }
+
+    /** Reads one workspace file for the prompt; null = skip (missing or unreadable). */
+    private fun readWorkspaceFileForPrompt(workspace: File, relativePath: String, displayName: String): ZaiChatPromptBuilder.IncludedFile? {
+        val sanitized = com.jarves.mh.zweb.ZaiFileExtractor.sanitizeZaiPath(relativePath) ?: return null
+        if (sanitized.split('/').any { it in ZaiWorkspaceApply.DENIED_DIRECTORY_NAMES }) return null
+        return runCatching {
+            val target = File(workspace, sanitized)
+            val workspacePath = workspace.canonicalFile.toPath()
+            if (!target.canonicalFile.toPath().startsWith(workspacePath)) return null
+            if (!target.isFile) return null
+            val bytes = target.inputStream().use { stream ->
+                val buffer = ByteArray(2_000_000)
+                val read = stream.read(buffer)
+                if (read <= 0) ByteArray(0) else buffer.copyOf(read)
+            }
+            if (bytes.any { it == 0.toByte() }) {
+                ZaiChatPromptBuilder.IncludedFile(
+                    path = sanitized,
+                    content = "[Binary file (not shown as text): $displayName]",
+                )
+            } else {
+                ZaiChatPromptBuilder.IncludedFile(path = sanitized, content = bytes.decodeToString())
+            }
+        }.getOrNull()
+    }
+
+    /** Short transcript recap for a fresh Z.ai conversation (builder caps it). */
+    private fun buildZaiHistoryRecap(): String {
+        val recent = _state.value.messages.takeLast(14)
+        if (recent.isEmpty()) return String()
+        return recent.joinToString("\n") { message ->
+            val speaker = if (message.fromUser) "USER" else "ASSISTANT"
+            val text = if (message.text.length > 400) {
+                message.text.take(200) + " … [file output omitted]"
+            } else {
+                message.text
+            }.replace('\n', ' ').trim()
+            "$speaker: $text"
+        }
+    }
+
+    /** Central phase watcher for chat-engine turns (drives progress, finish, failures). */
+    private fun onZaiStateChanged(previous: ZaiWebUiState, current: ZaiWebUiState) {
+        if (!zaiTurnActive) return
+        if (previous.runPhase == current.runPhase) return
+        when (current.runPhase) {
+            ZaiRunPhase.OPENING_PAGE, ZaiRunPhase.SENDING, ZaiRunPhase.GENERATING, ZaiRunPhase.EXTRACTING -> {
+                val title = ZaiChatTurnPresenter.progressTitle(current.runPhase) ?: return
+                val detail = ZaiChatTurnPresenter.progressDetail(current.runPhase) ?: return
+                _state.update { it.copy(liveProcess = listOf(ActivityItem(title, detail, false))) }
+            }
+            ZaiRunPhase.DONE -> handleZaiTurnDone(current)
+            else -> handleZaiTurnFailed(current)
+        }
+    }
+
+    private fun handleZaiTurnFailed(current: ZaiWebUiState) {
+        zaiTurnActive = false
+        zaiTurnContext = null
+        zaiPageConversationChatId = null
+        val notice = ZaiChatTurnPresenter.terminalNotice(current.runPhase, current.runMessage)
+        _state.update {
+            it.copy(
+                isRunning = false,
+                liveProcess = emptyList(),
+                liveThinking = false,
+                taskFinishedAtMillis = System.currentTimeMillis(),
+                zaiChatNotice = notice,
+            )
+        }
+        persistMessages(includeLiveProcess = false)
+    }
+
+    private fun handleZaiTurnDone(current: ZaiWebUiState) {
+        val turn = zaiTurnContext
+        if (turn == null) {
+            // DONE from a Z.ai-tab task run (no chat turn in flight): the tab's
+            // result card owns it. Never touch isRunning — a CLI agent may be
+            // running in parallel and owns that flag.
+            return
+        }
+        val reply = current.lastReply.orEmpty().ifBlank { "(empty reply)" }
+        if (ZaiNeedFilesParser.isAutoFulfillable(reply) && ZaiChatTurnPolicy.canFulfilMore(turn.needFilesRounds)) {
+            fulfilNeedFiles(turn, reply)
+            return
+        }
+        finishZaiTurn(turn, reply, current)
+    }
+
+    /** Reads the files the model asked for and re-sends them in the SAME conversation. */
+    private fun fulfilNeedFiles(turn: ZaiActiveTurn, reply: String) {
+        val request = ZaiNeedFilesParser.parse(reply)
+        zaiTurnContext = turn.copy(needFilesRounds = turn.needFilesRounds + 1)
+        viewModelScope.launch(backgroundGuard) {
+            val workspace = projectWorkspaceRoot(turn.project)
+            val files = withContext(Dispatchers.IO) {
+                request.requested.mapNotNull { path ->
+                    readWorkspaceFileForPrompt(workspace, path, path.substringAfterLast('/'))
+                        ?: ZaiChatPromptBuilder.IncludedFile(path = path, content = "[File not found in the workspace: $path]")
+                }
+            }
+            val missingNote = request.invalidPaths.takeIf { it.isNotEmpty() }
+                ?.joinToString(prefix = " (refused unsafe paths: ", separator = ", ", postfix = ")") { it }
+                .orEmpty()
+            val note = "Automatically providing the files Z.ai asked for: ${request.requested.joinToString(", ")}$missingNote"
+            val built = ZaiChatPromptBuilder.buildTurnPrompt(
+                userMessage = "Here are the files you asked for. Continue with your plan and produce the file changes as instructed.",
+                context = ZaiChatPromptBuilder.TurnContext(
+                    fileTree = null,
+                    includedFiles = files,
+                    historyRecap = null,
+                    freshConversation = false,
+                    needFilesNote = note,
+                ),
+            )
+            withContext(Dispatchers.Main) {
+                _state.update {
+                    it.copy(
+                        messages = it.messages + ChatMessage(
+                            fromUser = false,
+                            text = "NEED_FILES: ${request.requested.joinToString(", ")} — providing these files automatically.",
+                        ),
+                        liveProcess = listOf(ActivityItem("Sending to Z.ai", "Sending the requested files…", false)),
+                    )
+                }
+                persistMessages()
+                reportZaiBudget(built.report)
+                zaiWebController.runChatTurn(built.prompt, continueChat = true)
+            }
+        }
+    }
+
+    /** Appends the reply to the transcript and either auto-applies or parks the plan for review. */
+    private fun finishZaiTurn(turn: ZaiActiveTurn, reply: String, current: ZaiWebUiState) {
+        zaiTurnActive = false
+        zaiTurnContext = null
+        zaiPageConversationChatId = turn.chatId
+        val assistantMessage = ChatMessage(fromUser = false, text = reply)
+        _state.update {
+            it.copy(
+                messages = it.messages + assistantMessage,
+                isRunning = false,
+                liveProcess = emptyList(),
+                liveThinking = false,
+                taskFinishedAtMillis = System.currentTimeMillis(),
+            )
+        }
+        persistMessages()
+        if (current.lastFiles.isEmpty()) {
+            _state.update { it.copy(zaiPendingApply = null) }
+            return
+        }
+        viewModelScope.launch(backgroundGuard) {
+            val workspace = projectWorkspaceRoot(turn.project)
+            val plan = withContext(Dispatchers.IO) {
+                ZaiWorkspaceApply.plan(current.lastFiles, workspace) { before, after ->
+                    zaiCheckpoints.buildDiffLines(before, after)
+                }
+            }
+            withContext(Dispatchers.Main) {
+                if (plan.hasWork || plan.rejected.isNotEmpty()) {
+                    val pending = ZaiPendingApply(
+                        projectId = turn.project.id,
+                        chatId = turn.chatId,
+                        messageId = assistantMessage.id,
+                        files = plan.files,
+                        rejected = plan.rejected,
+                        unchanged = plan.unchanged,
+                    )
+                    if (_state.value.zaiAutoApply && plan.hasWork) {
+                        applyZaiPlannedFiles(pending, pending.files)
+                    } else {
+                        _state.update { it.copy(zaiPendingApply = pending) }
+                    }
+                } else {
+                    _state.update { it.copy(zaiPendingApply = null) }
+                }
+            }
+        }
+    }
+
+    // ── Z.ai apply pipeline (checkpoint BEFORE write, Changes tab after) ──
+
+    /** Review card: Apply all. */
+    fun zaiApplyAllFiles() {
+        val pending = _state.value.zaiPendingApply ?: return
+        applyZaiPlannedFiles(pending, pending.files)
+    }
+
+    /** Review card: apply a single file. */
+    fun zaiApplyFile(path: String) {
+        val pending = _state.value.zaiPendingApply ?: return
+        val file = pending.files.firstOrNull { it.path == path } ?: return
+        applyZaiPlannedFiles(pending, listOf(file))
+    }
+
+    /** Review card: Reject — nothing is written. */
+    fun zaiRejectPlan() {
+        _state.update { it.copy(zaiPendingApply = null) }
+    }
+
+    private fun applyZaiPlannedFiles(pending: ZaiPendingApply, files: List<PlannedFile>) {
+        if (files.isEmpty()) return
+        val handle = zaiProjectHandle(pending.projectId)
+        _state.update { current ->
+            current.copy(
+                zaiPendingApply = current.zaiPendingApply?.copy(
+                    files = current.zaiPendingApply.files.filterNot { file -> files.any { it.path == file.path } },
+                ),
+                activity = listOf(ActivityItem("Applying Z.ai files", files.joinToString(limit = 4) { it.path })) + current.activity,
+            )
+        }
+        viewModelScope.launch(backgroundGuard) {
+            val workspace = projectWorkspaceRoot(handle)
+            val outcome = withContext(Dispatchers.IO) {
+                zaiCheckpoints.configureProjectRoot(pending.projectId, handle.rootPath)
+                // Checkpoint BEFORE writing so Undo restores the pre-apply state.
+                zaiCheckpoints.createCheckpoint(pending.projectId, workspace)
+                val result = ZaiWorkspaceApply.apply(files, workspace)
+                if (result.applied.isNotEmpty()) {
+                    zaiCheckpoints.saveChangedPaths(pending.projectId, result.applied)
+                }
+                result
+            }
+            withContext(Dispatchers.Main) {
+                if (outcome.applied.isNotEmpty()) {
+                    lastZaiApplyActive = true
+                    val appliedSet = outcome.applied.toSet()
+                    val details = withContext(Dispatchers.IO) {
+                        zaiCheckpoints.buildChangeDetails(pending.projectId, workspace, outcome.applied)
+                    }
+                    _state.update { current ->
+                        current.copy(
+                            changes = (current.changes.filterNot { it.path in appliedSet } + details)
+                                .sortedBy { it.path },
+                            zaiPendingApply = current.zaiPendingApply?.takeIf { !it.isEmpty },
+                            toastMessage = "Applied ${outcome.applied.size} file(s) — Undo is available in Changes.",
+                        )
+                    }
+                    refreshProjectFiles()
+                } else {
+                    _state.update { current ->
+                        current.copy(
+                            zaiPendingApply = current.zaiPendingApply?.takeIf { !it.isEmpty },
+                            toastMessage = outcome.failed.firstOrNull()?.let { "Could not apply ${it.path}: ${it.reason}" },
+                        )
+                    }
+                }
+                if (outcome.failed.isNotEmpty()) {
+                    Log.w("MainViewModel", "Z.ai apply failures: ${outcome.failed.joinToString { "${it.path}: ${it.reason}" }}")
+                }
+            }
+        }
+    }
+
+    /** Stored project, or a blank handle when only the id is known (checkpoint calls). */
+    private fun zaiProjectHandle(projectId: String): Project {
+        return _state.value.projects.firstOrNull { it.id == projectId }
+            ?: Project(id = projectId, name = "", description = "", language = "")
+    }
+
+    // ── Z.ai apply undo/keep (direct checkpoint ops; same semantics as the bridges) ──
+
+    private fun undoZaiChanges(projectId: String) {
+        viewModelScope.launch(backgroundGuard) {
+            val workspace = projectWorkspaceRoot(zaiProjectHandle(projectId))
+            val checkpoint = zaiCheckpoints.checkpointDir(projectId)
+            val backup = File(checkpoint, "project")
+            val manifest = File(checkpoint, "changes.json")
+            val ok = withContext(Dispatchers.IO) {
+                if (!backup.isDirectory || !manifest.isFile) return@withContext false
+                val paths = zaiCheckpoints.readChangedPaths(projectId)
+                    .filterNot { zaiCheckpoints.isInternalRuntimePath(it) }
+                ZaiWorkspaceApply.revertFiles(workspace, backup, paths)
+                checkpoint.deleteRecursively()
+                true
+            }
+            withContext(Dispatchers.Main) {
+                lastZaiApplyActive = false
+                _state.update { current ->
+                    current.copy(
+                        changes = if (ok) emptyList() else current.changes,
+                        activity = listOf(
+                            ActivityItem(
+                                if (ok) "Changes undone" else "Undo unavailable",
+                                if (ok) "Restored files to their state before the Z.ai apply" else "No restorable checkpoint was found",
+                            ),
+                        ),
+                    )
+                }
+                if (ok) refreshProjectFiles()
+            }
+        }
+    }
+
+    private fun keepZaiChanges() {
+        val projectId = _state.value.activeProject?.id ?: return
+        viewModelScope.launch(backgroundGuard) {
+            withContext(Dispatchers.IO) { zaiCheckpoints.checkpointDir(projectId).deleteRecursively() }
+            withContext(Dispatchers.Main) {
+                lastZaiApplyActive = false
+                _state.update {
+                    it.copy(
+                        changes = emptyList(),
+                        activity = listOf(ActivityItem("Changes kept", "Accepted the Z.ai file changes")) + it.activity,
+                    )
+                }
+            }
+        }
+    }
+
+    private fun undoZaiFileChange(projectId: String, path: String) {
+        viewModelScope.launch(backgroundGuard) {
+            val workspace = projectWorkspaceRoot(zaiProjectHandle(projectId))
+            val restored = withContext(Dispatchers.IO) {
+                if (zaiCheckpoints.isInternalRuntimePath(path) || path !in zaiCheckpoints.readChangedPaths(projectId)) {
+                    return@withContext false
+                }
+                ZaiWorkspaceApply.revertFiles(workspace, File(zaiCheckpoints.checkpointDir(projectId), "project"), listOf(path))
+                zaiCheckpoints.removeChangedPath(projectId, path)
+                true
+            }
+            withContext(Dispatchers.Main) {
+                if (restored) {
+                    _state.update { current -> current.copy(changes = current.changes.filterNot { it.path == path }) }
+                    refreshProjectFiles()
+                }
+            }
+        }
+    }
+
+    private fun keepZaiFileChange(projectId: String, path: String) {
+        viewModelScope.launch(backgroundGuard) {
+            withContext(Dispatchers.IO) { zaiCheckpoints.removeChangedPath(projectId, path) }
+            withContext(Dispatchers.Main) {
+                _state.update { current -> current.copy(changes = current.changes.filterNot { it.path == path }) }
+            }
         }
     }
 

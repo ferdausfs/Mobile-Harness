@@ -59,6 +59,16 @@ class AppPreferences(private val context: Context) : AppPreferencesBridge {
         get() = preferences.getString("agent_antigravity_account_email", "") ?: ""
         set(value) { preferences.edit().putString("agent_antigravity_account_email", value).apply() }
 
+    /** Z.ai Web is the active engine for the project workspace chat (chat-engine adapter, not an AgentKind). */
+    var zaiChatEngineActive: Boolean
+        get() = preferences.getBoolean("zai_chat_engine_active", false)
+        set(value) { preferences.edit().putBoolean("zai_chat_engine_active", value).apply() }
+
+    /** Auto-apply Z.ai-returned files without the review card (default OFF — review first). */
+    var zaiAutoApply: Boolean
+        get() = preferences.getBoolean("zai_auto_apply", false)
+        set(value) { preferences.edit().putBoolean("zai_auto_apply", value).apply() }
+
     var githubLogin: String
         get() = preferences.getString("github_login", "") ?: ""
         set(value) { preferences.edit().putString("github_login", value).apply() }

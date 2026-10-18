@@ -4,6 +4,57 @@ Newest entries prepended. Never delete entries.
 
 ---
 
+## 2026-10-18 — v1.0.19 release: Phase 1 of the "Z.ai Web" project — new Z.ai Web agent tab driven by a hidden WebView on chat.z.ai (versionCode 20)
+
+- **Agent/tool**: Z.ai (GLM) agent session, direct repo work on `ferdausfs/Mobile-Harness` branch `main`. User pre-approved Phase 1 in full (fourth "Z.ai" tab, isolated `com.jarves.mh.zweb` package, hidden-WebView automation, JSON selector config with remote hot-update, multi-signal finish detection, `FILE:` extraction, JVM tests) and instructed to proceed without waiting for approval.
+- **Feature/trigger**: Phase 1 (core WebView agent) of the multi-phase Z.ai Web plan. Phase 0 shipped as v1.0.18. Phases 2–4 (foreground service, download fallback + zip, OpenRouter prompt rewrite) are next — see Pending.
+
+### Live DOM probe (2026-10-18, headless Chromium on https://chat.z.ai)
+The chat.z.ai UI is Svelte; the composer is rendered even signed-out, so most selectors were verified **directly on the live site** before being written into the config:
+- `textarea#chat-input` (placeholder "Send a Message") ✓ typed into it; `#send-message-button` (`type=submit`, class `sendMessageButton`) confirmed `disabled` when empty and enabled after input, up-arrow SVG ✓; `#upload-file-button` (+ attach) ✓.
+- Sending while signed-out still opens `/c/<uuid>` and starts a turn: the generating indicator rendered as a `div[aria-label="Stop"]` wrapper ✓ (send button swaps out for it during generation).
+- Assistant messages render as `div.chat-assistant.markdown-prose`, user messages as `div.chat-user` ✓ (also confirmed in the prod bundle: `` `chat-${role} w-full min-w-full markdown-prose` ``); code blocks are standard `<pre><code class="language-…">` inside the prose container (bundle-confirmed).
+- Captcha = **Aliyun Captcha**: `#aliyunCaptcha-window-popup.window-show` + `.aliyunCaptcha-sliding-text` ("Please drag the slider to complete the puzzle") ✓ appeared live and is detected.
+- Login page = `/auth` route with "Welcome to Z.ai" / "Continue with Google|Email|Github" ✓ visited live.
+- `#new-chat-button` (aria-label "New Chat") ✓; session JWT lives in the `token` cookie (never logged); signed-in state checkable via `GET /api/v1/auths/` → `role:"guest"` vs real account (verified guest shape live).
+- **NOT verifiable logged-out**: (a) an actual full generation turn (the logged-out turn was gated by the slider captcha — turn started, Stop indicator present, captcha detected — so the generation lifecycle signals were still observed); (b) `fileCard` selectors (Phase 3 concern — placeholder guesses in config); (c) the exact mid-stream DOM mutations. All selector fallbacks are in JSON so drift is fixable without a release.
+
+### What changed (each commit separately revertable)
+| Item | Commit | Change |
+|------|--------|--------|
+| config | `4b50d20` | New package `com.jarves.mh.zweb`. `assets/zweb/selectors.json`: 10 selector groups (input / sendButton / stopIndicator / assistantMessage / userMessage / codeBlock / fileCard / loginMarker / captchaMarker / newChatButton), several fallbacks per field, syntax `css` · `url-contains:` · `text:=`, plus `remoteUpdateUrl` (GitHub raw) and clamped timing. `ZaiWebConfig` (pure parse+validate, required groups enforced) + `ZaiConfigLoader` (bundled → filesDir-cached remote when newer, never downgrades, best-effort refresh). **No selector hardcoded in Kotlin anywhere.** |
+| parser | `cc6a123` | `ZaiFileExtractor` — pure line-scan parser for the `FILE: path` + fenced-block contract (case-insensitive, tolerates `**FILE:**`/backtick wrapping, prose between marker and fence, unterminated fences, CRLF, `~~~` fences; traversal/absolute/control-char/oversize rejected, duplicate paths keep first block, caps 50 files / 2 MB). `ZaiPromptBuilder` — task prompt embedding the FILE: contract + deterministic test prompt. `ZaiProbeScripts` — ALL WebView JS built from the config (state probe with whitespace-normalised change detection, session auth probe, native-setter injection, send click + Enter fallback, stop/new-chat clicks, final extraction). |
+| detector | `16f17ad` | `ZaiFinishDetector` — pure state machine; FINISHED requires **stop indicator absent AND new assistant message past pre-send baseline (or stop seen-then-vanished fallback) AND whitespace-normalised text stable for `stableWindowMs`**, with login/captcha short-circuits and overall timeout. Never a single signal. |
+| engine | `b56165d` | `ZaiWebEngine` + `ZaiWebController` + `ZaiWebState` — headless (never-attached) WebView on the app's persistent default CookieManager (shares session with the sign-in sheet), probes via `Handler.post` (unattached `View.post` never fires), fresh-conversation click before each run for an unambiguous baseline, send with retries + Enter fallback, detector polling, extraction, files saved to `filesDir/zweb/outputs/<stamp>/`. Login page or captcha at any point → clean stop with an explicit message; `cancel()` also clicks the page's Stop button; `disconnect()` expires every chat.z.ai cookie **by name only** (values never read/logged); WebContents debugging only in debug builds; engine destroyed in `onCleared`. Zero AgentRegistry/AgentDriver involvement. |
+| UI | `fb417c5` | Additive-only AgentScreen edits: 4th segment "Z.ai" **outside** the AgentKind loop (AgentTabPolicy untouched — the three CLI tabs behave exactly as before), `viewingZai` flag, pill+subtitle override while viewing, `AgentZaiCard` branch in the config card, updates card hidden on the Z.ai tab. New `ui/AgentZaiCard.kt`: account row (email / Connected / Not signed in), Disconnect, Test connection, task box with live phase + Stop, reply rendered via existing `MarkdownText`, extracted-files list with saved-to path. `ZaiSignInSheet`: full-screen visible WebView on `chat.z.ai/auth` (auto-verifies via auth probe on non-auth navigations, shares the CookieManager). MainViewModel: `zaiWeb` field + forwarding functions + `onCleared` shutdown. PocketDevApp: wires the callbacks at the single call site. |
+| tests | `01d5387` | 44 new JVM tests: `ZaiWebConfigTest` (9 — validates the **real bundled asset** including selector parity with the live probe), `ZaiFileExtractorTest` (15), `ZaiFinishDetectorTest` (10), `ZaiPromptBuilderTest` (5), `ZaiProbeScriptsTest` (5). Two real bugs the tests caught and fixed pre-push: `//` collapsing in paths, Windows-drive prefix check used whole-string `matches()` instead of prefix match. |
+| version | `6d5751d` | v1.0.19 / versionCode 20: `app/build.gradle.kts`, changelog `20.txt`, `mobile-harness-update.json` (sha256 `58d75647…20fc`, 87,842,519 bytes). |
+
+### Verification
+- `:app:testOnlineDebugUnitTest` → **197 tests, 0 failures, 0 skipped** (153 previous + 44 new), run after the engine fixes and again after the version bump.
+- `:app:assembleOnlineRelease` → **BUILD SUCCESSFUL**; `aapt`: `versionCode='20' versionName='1.0.19'`; APK 87,842,519 bytes, sha256 `58d756474df6222d3e9bf7d7eccdb769b720c0a8207aa4d06170d5a2b1e620fc`; `apksigner` cert SHA-256 `d07ba804…ca7dccfe` — identical to the v1.0.8–v1.0.18 line (in-place update preserved); `assets/zweb/selectors.json` embedded (v1, 10 groups).
+- Selector config provenance: live-probed 2026-10-18 (details above). The hidden-WebView end-to-end (signed-in generation → extraction → files) **could not be verified in this environment** — no Z.ai account credentials exist here; the login/captcha/finish plumbing is covered by unit tests and the selectors were live-probed, but the full happy path needs one manual sign-in by the user.
+- Pushed `main` only after build+tests passed. Tag `v1.0.19`; GitHub release with `mobile-harness-online-v1.0.19.apk` + `mobile-harness-update.json`.
+
+### Touched files
+`app/src/main/assets/zweb/selectors.json` (new), `app/src/main/java/com/jarves/mh/zweb/{ZaiWebConfig,ZaiConfigLoader,ZaiFileExtractor,ZaiPromptBuilder,ZaiProbeScripts,ZaiFinishDetector,ZaiWebEngine,ZaiWebController,ZaiWebState}.kt` (all new), `app/src/main/java/com/jarves/mh/ui/AgentZaiCard.kt` (new), `ui/AgentScreen.kt` (additive), `ui/MainViewModel.kt` (additive), `ui/PocketDevApp.kt` (call-site wiring), `app/src/test/java/com/jarves/mh/zweb/*Test.kt` (5 new), `app/build.gradle.kts`, `fastlane/metadata/android/en-US/changelogs/20.txt` (new), `mobile-harness-update.json`, this file.
+
+### Pending items
+- **User manual action (required)**: install v1.0.19, open Agent → Z.ai tab → "Sign in to Z.ai", log into chat.z.ai once (free account), tap "Test connection". Report whether the test reply arrives and whether a real task extracts files.
+- **Phase 2**: foreground service (Android 14+ `foregroundServiceType` rules) so generation survives screen-off, task queue, notifications, visible-WebView handoff + resume after login/captcha.
+- **Phase 3**: real file-download fallback via `DownloadListener` + session cookies (probe the real `fileCard` selectors on a logged-in session first), zip output of extracted files.
+- **Phase 4**: optional OpenRouter prompt rewriting + reply summarisation via the app's existing provider/key vault.
+- Config hot-update: bump `version` in `app/src/main/assets/zweb/selectors.json` on main; installed apps refresh from the GitHub raw URL within one run.
+
+### Notes for next agent
+- Build env: reuse `/home/z/my-project/scripts/{bootstrap_env.sh,env.sh}`; `git submodule update --init --recursive` mandatory; AGY bundle must exist under `dist/runtime-bundles/`.
+- The engine's WebView is deliberately never attached to a view hierarchy; if z.ai ever gates DOM updates behind rAF, the app-side polling still drives detection, but streaming text visibility would degrade — check `ZaiProbeScripts.buildStateProbe` first when debugging "stuck at generating".
+- K2 gotcha: a constructor param **without** `val` used inside a method body gives the misleading "Function invocation 'context(...)' expected" error on Kotlin 2.2 (`context` is now a soft keyword). Use `val` params.
+- The detector's baseline is the `.chat-assistant` count taken **before** send; the "new chat" click + reload before every run keeps it exact. Don't remove that step.
+- Never log probe/extract payloads (they contain user content and, on the auth probe, account email is published only into UI state, not logs).
+
+---
+
 ## 2026-10-18 — v1.0.18 release: Phase 0 of the "Z.ai Web" project — baseline verified + P0 tab no-op fix (versionCode 19)
 
 - **Agent/tool**: Z.ai (GLM) agent session, direct repo work on `ferdausfs/Mobile-Harness` branch `main`. User pre-approved all phases of the Z.ai Web project (hidden-WebView chat.z.ai agent tab, Phases 0–4) and the Phase 0 checklist: baseline tests/build, fix the known "tapping Claude Code and Antigravity tabs sometimes does nothing" bug, bump + release per phase.

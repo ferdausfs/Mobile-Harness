@@ -4,6 +4,15 @@ Newest entries prepended. Never delete entries.
 
 ---
 
+## 2026-10-18 — User cannot complete the v1.0.20 download; advised SKIPPING the zero-loss test and going straight to uninstall + fresh v1.0.22 install — no release made (version bump still useless)
+
+- **User report**: following the zero-loss test plan, they tried to download release v1.0.20 from the release page, but the download never completes ("ei link diya download complete hoy na").
+- **Asset verified live again (2026-10-18)**: `releases/download/v1.0.20/mobile-harness-online-v1.0.20.apk` → 302 → **200**, `Content-Length: 87,866,007` (byte-identical to local evidence `v1020.apk`, sha256 `08861438…8300`), `Accept-Ranges: bytes` (resume-capable). **The asset and the link are healthy; the incompleteness is network-side** (large file over the user's mobile network / GitHub CDN throttling).
+- **Fallback mirrors verified serving the identical content-length (87,866,007)**: `https://ghfast.top/<full-github-url>` and `https://gh-proxy.com/<full-github-url>` (`github.moeyy.xyz` dead). Offered to the user ONLY with the post-download exact byte-size check; direct GitHub/Wi-Fi/ADM-with-resume/PC-transfer remain the primary advice.
+- **Key decision — the zero-loss test is skippable**: four-plus "App not installed" failures of exact-size v1.0.21/v1.0.22 files (release cert `d07ba804…` verified server-side) already establish `INSTALL_FAILED_UPDATE_INCOMPATIBLE`; installing release v1.0.20 (same versionCode 21, different cert than the phone's app) would produce the identical verdict. Installing release v1.0.20 over the phone's app was only a *confirmation*, not a *fix* — and the fix (uninstall → fresh release install) is the same either way.
+- **Advice given (download-free fix path)**: (1) back up API keys out of the app (uninstall wipes app data; Z.ai sign-in and runtime setup must be redone), (2) uninstall Mobile Harness, (3) install the **already-downloaded** `mobile-harness-online-v1.0.22.apk` (87,940,807 B, confirmed in Downloads by screenshot earlier) as a fresh install — no cert conflict once the old app is gone, (4) restore keys / re-login Z.ai / redo runtime setup; from then on the phone is on the release cert line and in-app updates work.
+- **No v1.0.23 release was burned**: a version change cannot affect a signing-cert comparison; this was re-communicated to the user.
+- **Keystore still GONE this session** (`/home/z/my-project/keystores/` missing again after the sandbox reset). MUST be recovered and backed up outside the sandbox **before** the next real release, or that release can never install over v1.0.22-release installs.
 
 ## 2026-10-18 — "App not installed" screenshot analysis: INSTALL_FAILED_UPDATE_INCOMPATIBLE (signature mismatch with the app installed on the user's phone) — version bump will NOT fix; uninstall+fresh install is the fix
 

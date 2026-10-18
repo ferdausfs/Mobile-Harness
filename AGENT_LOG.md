@@ -5,6 +5,24 @@ Newest entries prepended. Never delete entries.
 ---
 
 
+## 2026-10-18 — v1.0.22 follow-up: "install korte parsi na" — published APKs verified byte-perfect and same-cert; failure is device-side; release body clarified; KEYSTORE LOST TO SANDBOX RESET
+
+- **User report**: v1.0.20 still installed; downloaded v1.0.21 from the release page but **could not install it** ("ami install korte parsi na"). User suspected the code.
+
+### Evidence (all live, 2026-10-18)
+- Downloaded the actual published APKs for v1.0.20 / v1.0.21 / v1.0.22 from GitHub (`/home/z/my-project/evidence/`).
+- **sha256**: v1.0.21 = `df595710c3aaa3d3…` and v1.0.22 = `364411549a14e02f…` — both byte-identical to the builds recorded in this log. **No upload corruption.**
+- **ZIP integrity**: all three pass central-directory entry checks (`scripts/apk_cert_check.py`).
+- **Signing certs — ALL THREE IDENTICAL**: `d07ba804cfa95dd39083002628b65487d7ae99acab12cdfa61c5f42bca7dccfe` (v2 scheme, 1380-byte DER). Verified with a new pure-Python APK Signing Block parser (`scripts/apk_cert_check.py`, no SDK needed) after the sandbox reset wiped the Android SDK. **Signature mismatch is ruled out as the install-blocker.**
+- Release asset layout is unchanged since v1.0.20 (one APK + manifest JSON), so nothing structural changed at v1.0.21. **Conclusion: the published v1.0.21/v1.0.22 files are valid and installable over the user's v1.0.20; the failure happens on the device at download or install time** (truncated browser download, "Install unknown apps" permission, MIUI/pure-mode or Play Protect block, or low storage). v1.0.20 itself installed from the same page earlier, so the phone CAN handle ~88 MB APKs.
+- Release 416391456 body updated with concrete install guidance: download only the `.apk`, verify the exact size (87,940,807 bytes) before installing, re-download on Wi-Fi if smaller.
+
+### ⚠️ KEYSTORE ALERT — next agent MUST read
+- The sandbox reset between sessions **wiped `/home/z/my-project/keystores/`** (signing.env + key material). The v1.0.22 build earlier in this session still signed correctly with cert `d07ba804…` because the keystore was present at session start (restored by the snapshot); it is GONE again now.
+- **First action next session**: check `/home/z/my-project/keystores/signing.env`. If missing, find it IMMEDIATELY (snapshot restore, wherever `extract_signing.sh` got it from originally) and **back it up outside the sandbox** before anything else. Without that key, no future release can install over users' existing installs.
+
+---
+
 ## 2026-10-18 — v1.0.22 release: "app update hoy na" — in-app updater never re-checked after a failed startup check; manual Check now in Settings (versionCode 23)
 
 - **Agent/tool**: Z.ai (GLM) agent session, direct repo work on `ferdausfs/Mobile-Harness` branch `main`. User reported on v1.0.20: "app update hoy na" (the app never updates) — while v1.0.21 was already published. Same standing rules: evidence first, one commit per concern, same signing key, no Z.ai API mode.

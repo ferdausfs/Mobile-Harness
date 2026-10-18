@@ -864,7 +864,11 @@ fun AgentScreen(
                             horizontalArrangement = Arrangement.spacedBy(4.dp),
                         ) {
                             orderedAgents.forEach { agent ->
-                                val isSelected = viewedAgent == agent
+                                // Pure selection rule (AgentTabPolicy): a CLI tab is
+                                // highlighted only when it is the viewed agent AND the
+                                // Z.ai web tab is not open — fixes the v1.0.19 bug
+                                // where the last CLI tab stayed highlighted next to Z.ai.
+                                val isSelected = agentTabSelected(viewedAgent, agent, viewingZai)
                                 val isInstalled = agent == state.agentKind || state.installedAgentVersions.containsKey(agent)
                                 val updateAvailable = state.agentUpdates.containsKey(agent)
                                 val shortTitle = when (agent) {
@@ -940,7 +944,7 @@ fun AgentScreen(
                             // ── Fourth segment: Z.ai (Web agent, not a CLI engine) ──
                             // Outside the AgentKind loop on purpose: AgentTabPolicy only
                             // classifies CLI agent taps; this tab has no install/run semantics.
-                            val zaiSelected = viewingZai
+                            val zaiSelected = zaiTabSelected(viewingZai)
                             Surface(
                                 shape = RoundedCornerShape(12.dp),
                                 color = if (zaiSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.12f) else Color.Transparent,

@@ -89,3 +89,16 @@ fun agentTabTapAction(
     isRunning -> AgentTabTapAction.REFUSED_RUNNING
     else -> AgentTabTapAction.SHOW_INSTALL
 }
+
+/**
+ * Whether a CLI engine tab (Claude Code / DeepSeek / Antigravity) renders as
+ * selected. The Z.ai web tab is highlighted by [zaiTabSelected]; the two are
+ * mutually exclusive, so opening the Z.ai tab can never leave the last-viewed
+ * engine tab highlighted too (the v1.0.19 double-highlight bug: `viewedAgent`
+ * keeps its old value while the Z.ai flag is on).
+ */
+fun agentTabSelected(viewedAgent: AgentKind?, agent: AgentKind, viewingZai: Boolean): Boolean =
+    !viewingZai && viewedAgent == agent
+
+/** Whether the Z.ai web tab renders as selected. */
+fun zaiTabSelected(viewingZai: Boolean): Boolean = viewingZai

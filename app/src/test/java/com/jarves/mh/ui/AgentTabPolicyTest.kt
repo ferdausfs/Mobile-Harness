@@ -135,4 +135,62 @@ class AgentTabPolicyTest {
             agentTabTapAction(AgentKind.ANTIGRAVITY, installed = true, isRunning = true, installingAgent = null),
         )
     }
+
+    // ── Tab highlight rule (v1.0.20 double-highlight fix) ──
+    //
+    // Bug: with the Z.ai tab open, the last-viewed CLI tab kept its highlight
+    // because the rule was plain `viewedAgent == agent` and `viewedAgent` is
+    // untouched while the Z.ai flag is on. The highlight must be exclusive.
+
+    @Test
+    fun noCliTabIsHighlightedWhileTheZaiTabIsOpen() {
+        AgentKind.entries.forEach { agent ->
+            org.junit.Assert.assertFalse(
+                "agent $agent must not be highlighted while viewing Z.ai",
+                agentTabSelected(viewedAgent = agent, agent = agent, viewingZai = true),
+            )
+        }
+    }
+
+    @Test
+    fun cliTabHighlightFollowsTheViewedAgentOnlyWhenZaiIsClosed() {
+        org.junit.Assert.assertTrue(
+            agentTabSelected(viewedAgent = AgentKind.CLAUDE_CODE, agent = AgentKind.CLAUDE_CODE, viewingZai = false),
+        )
+        org.junit.Assert.assertFalse(
+            agentTabSelected(viewedAgent = AgentKind.CLAUDE_CODE, agent = AgentKind.DEEPSEEK_HARNESS, viewingZai = false),
+        )
+        org.junit.Assert.assertFalse(
+            agentTabSelected(viewedAgent = AgentKind.CLAUDE_CODE, agent = AgentKind.ANTIGRAVITY, viewingZai = false),
+        )
+    }
+
+    @Test
+    fun aNullViewedAgentNeverHighlightsAnyCliTab() {
+        AgentKind.entries.forEach { agent ->
+            org.junit.Assert.assertFalse(agentTabSelected(null, agent, viewingZai = false))
+            org.junit.Assert.assertFalse(agentTabSelected(null, agent, viewingZai = true))
+        }
+    }
+
+    @Test
+    fun exactlyOneTabIsHighlightedInEveryCombination() {
+        // The Z.ai tab and the CLI tabs are mutually exclusive: whatever the
+        // state, at most one highlight can render.
+        AgentKind.entries.forEach { viewed ->
+            for (viewingZai in booleanArrayOf(false, true)) {
+                AgentKind.entries.forEach { agent ->
+                    val cliSelected = agentTabSelected(viewed, agent, viewingZai)
+                    val zaiSelected = zaiTabSelected(viewingZai)
+                    org.junit.Assert.assertFalse("exclusivity broken at viewed=$viewed agent=$agent zai=$viewingZai", cliSelected && zaiSelected)
+                }
+            }
+        }
+    }
+
+    @Test
+    fun zaiTabHighlightFollowsItsOwnFlag() {
+        org.junit.Assert.assertTrue(zaiTabSelected(true))
+        org.junit.Assert.assertFalse(zaiTabSelected(false))
+    }
 }

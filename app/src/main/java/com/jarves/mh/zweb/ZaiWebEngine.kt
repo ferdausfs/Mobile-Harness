@@ -94,6 +94,12 @@ class ZaiWebEngine(
             view.settings.useWideViewPort = true
             view.settings.cacheMode = WebSettings.LOAD_DEFAULT
             view.settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
+            // Same UA as the visible sign-in sheet (WebView markers stripped):
+            // the site does not bind sessions to the UA (live-tested 2026-10-18
+            // — one token accepted under two different UAs), but sheet and
+            // engine presenting ONE coherent Chrome profile removes a whole
+            // class of drift and keeps the OAuth path safe in both WebViews.
+            runCatching { view.settings.userAgentString = ZaiSheetUserAgent.chromeLike(view.settings.userAgentString) }
             cookieManager.setAcceptThirdPartyCookies(view, true)
             cookieManager.flush()
             update { it.copy(engineUserAgent = view.settings.userAgentString) }

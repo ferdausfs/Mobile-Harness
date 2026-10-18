@@ -4,6 +4,37 @@ Newest entries prepended. Never delete entries.
 
 ---
 
+
+## 2026-10-18 — v1.0.22 release: "app update hoy na" — in-app updater never re-checked after a failed startup check; manual Check now in Settings (versionCode 23)
+
+- **Agent/tool**: Z.ai (GLM) agent session, direct repo work on `ferdausfs/Mobile-Harness` branch `main`. User reported on v1.0.20: "app update hoy na" (the app never updates) — while v1.0.21 was already published. Same standing rules: evidence first, one commit per concern, same signing key, no Z.ai API mode.
+
+### Evidence (all server-side checks re-verified live, 2026-10-18)
+- The release chain was **healthy the whole time**: `releases/latest/download/mobile-harness-update.json` → HTTP 200 serving versionCode 22; `releases/download/v1.0.21/mobile-harness-online-v1.0.21.apk` → 200; `releases/latest` API → v1.0.21 with no stray assets.
+- **THE ROOT CAUSE — in `checkForAppUpdate` (MainViewModel), not in the release chain.** Two defects, compounding: (1) `preferences.lastAppUpdateCheckMillis` was stamped **even when the check threw** (`runCatching{check()}.getOrNull()` then unconditional stamp), so one failed startup check (flaky mobile network, GitHub hiccup) silenced the updater for 24h; (2) release builds had **no manual re-check path at all** — `checkForAppUpdate(force = true)` was reachable only from the debug-only manifest-override helpers, and check failures were swallowed with zero UI. The check also runs only at successful app startup. Net effect on the user's phone: a failed/throttled startup check + no way to force one = "app update hoy na" with v1.0.21 downloadable the whole time.
+
+### What changed (each commit separately revertable)
+| Item | Commit | Change |
+|------|--------|--------|
+| policy | `a56a861` | New pure `AppUpdateCheckPolicy`: `shouldCheck` (forced always; automatic only after the 24h window or first-ever) + `shouldRecordAttempt` (only a check that actually completed — found an update or definitively none — may advance the throttle; a thrown check must not). `checkForAppUpdate` now records the outcome in state: `appUpdateChecking` flag + `appUpdateCheckMessage` ("You're on the latest version (vX)" / "Update check failed: …"). 7 JVM tests incl. the regression case. |
+| UI | `b90b576` | New always-visible **App update card** in Settings (release builds too): current version + version code, **Check now** button (`checkForAppUpdate(force = true)`), check outcome line, and when an update exists the full download flow from the home dialog: notes preview, byte-level progress, the ACTION_MANAGE_UNKNOWN_APP_SOURCES permission round-trip, installer handoff, retry after a failed download. Wired via `onCheckAppUpdate`/`onInstallAppUpdate` at the SettingsScreen call site. |
+| version | `1ed4e5d` | v1.0.22 / versionCode 23: `app/build.gradle.kts`, changelog `23.txt`, `mobile-harness-update.json` (sha256 `36441154…70e9`, 87,940,807 bytes). |
+
+### Verification
+- `:app:testOnlineDebugUnitTest` → **250 tests, 0 failures, 0 skipped** (243 previous + 7 policy tests).
+- `:app:assembleOnlineRelease` → BUILD SUCCESSFUL; `aapt`: versionCode '23' versionName '1.0.22'; APK 87,940,807 bytes, sha256 `364411549a14e02fc1cd8f25b0bb7a5d5240ebf621c0e54b3ff77354dc1070e9`; `apksigner` cert SHA-256 `d07ba804…dccfe` — identical to the v1.0.8–v1.0.21 line; embedded `assets/zweb/selectors.json` v2 with all 13 groups.
+- **Verified for real** (curl): manifest URL serving versionCode 23 after this release's manifest lands; APK URL 200; release-assets chain reachable. **Not reproducible here**: the user's on-device check history (their `lastAppUpdateCheckMillis` state) — but both defects are deterministic code paths covered by tests, and the new Settings card gives the user a forced check with visible outcome regardless of throttle state.
+
+### User flow for this release
+- Fastest path: Settings → **App update** → **Check now** → Download and install (needs the one-time "Install unknown apps" grant). If the check fails, the card now says why instead of staying silent. Direct fallback: the v1.0.22 APK on the GitHub release page installs over v1.0.20/v1.0.21 (same key).
+
+### Notes for next agent
+- The AGY bundle for builds: re-download from `runtime-2026.09.4` release → `dist/runtime-bundles/`, sha256 `a659ab91…d78` (41,870,025 bytes — that IS the full size; don't wait for more).
+- `AppUpdateCheckPolicy.DEFAULT_THROTTLE_MILLIS` is the single knob for the auto-check interval; forced checks bypass it entirely.
+- Build env: reuse `/home/z/my-project/scripts/env.sh` (JAVA_HOME + signing env + cd); fresh clone needs `local.properties`, submodules, AGY bundle as above. `gh` CLI absent — REST API; uploads to `uploads.github.com`; backticks in commit messages → `git commit -F`.
+
+---
+
 ## 2026-10-18 — v1.0.21 release: "Z.ai sign-in session not recognized after login" — root cause found (localStorage token, cookie-only probe), Diagnostics section (versionCode 22)
 
 - **Agent/tool**: Z.ai (GLM) agent session, direct repo work on `ferdausfs/Mobile-Harness` branch `main`. User pre-approved everything ("do not wait for me"). Symptom on v1.0.20: Google login inside the sign-in sheet works, but after closing with X the card says "Not signed in" and login is needed again every time. User explicitly said **do not guess — evidence first**, listed six hypotheses (a)–(f), required a Diagnostics section, honest verified-vs-guessed reporting, one commit per fix, v1.0.21 / versionCode 22. Explicitly: **no Z.ai API mode** (Phase 2+ still blocked).

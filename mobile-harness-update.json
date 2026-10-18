@@ -1,12 +1,12 @@
 {
-  "versionCode": 22,
-  "versionName": "1.0.21",
-  "notes": "Fixes the \"logged in but the card says Not signed in\" loop reported on v1.0.20. Root cause: chat.z.ai keeps your session token in its own browser storage (localStorage) and authorizes API calls with a Bearer header, while the app only checked the session cookie - and the server answers a cookie-less check by silently minting a fresh guest, so the app kept reporting \"Not signed in\" even right after a successful Google login. The session check now mirrors exactly what the chat.z.ai site itself does (Bearer token from the page's own storage plus the cookie fallback), for both the sign-in sheet and the hidden browser. Also new: a Diagnostics section on the Z.ai tab (collapsed by default, one-tap copyable, contains no secrets) showing the last check result and which branch fired, both browsers' last URLs and user agents, cookie names (never values), whether the session survived an app restart, and an orange warning if the sign-in sheet and the hidden browser ever disagree. Session cookies chat.z.ai sets are session-scoped (server-verified); the fix no longer depends on them. Same signing key - installs over v1.0.20 with one tap.",
+  "versionCode": 23,
+  "versionName": "1.0.22",
+  "notes": "Fixes \"the app never updates\". The in-app update check ran once per day, silently, and a single failed check (weak network at app start) was counted as completed - blocking every retry for the next 24 hours, and release builds had no button to check again. v1.0.21 was published and served correctly the whole time; the app just refused to look. Now a failed check no longer blocks retries (the next app start re-checks automatically), and Settings has a new always-visible App update card: Check now button, current version, a clear up-to-date or failure message, and when an update exists the same download flow with progress, the Install-unknown-apps permission step and retry. If the update still does not appear, Settings > App update > Check now will show the reason instead of staying silent. Also carries all of v1.0.21: the Z.ai sign-in session fix (session check now reads the site's own Bearer token, not just cookies) and the Diagnostics section on the Z.ai tab. Same signing key - installs over v1.0.20/v1.0.21 with one tap.",
   "artifacts": {
     "online": {
-      "url": "https://github.com/ferdausfs/Mobile-Harness/releases/download/v1.0.21/mobile-harness-online-v1.0.21.apk",
-      "sha256": "df595710c3aaa3d35f6a2ef07ba43585eac8c989f337d0e1ac252b51c5e632c2",
-      "sizeBytes": 87920431
+      "url": "https://github.com/ferdausfs/Mobile-Harness/releases/download/v1.0.22/mobile-harness-online-v1.0.22.apk",
+      "sha256": "364411549a14e02fc1cd8f25b0bb7a5d5240ebf621c0e54b3ff77354dc1070e9",
+      "sizeBytes": 87940807
     }
   }
 }

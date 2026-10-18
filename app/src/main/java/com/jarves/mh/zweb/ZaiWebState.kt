@@ -27,6 +27,27 @@ data class ZaiWebUiState(
      */
     val sheetAutomationJson: String? = null,
     val configVersion: Int = 0,
+    // ── Diagnostics (v1.0.21) — all values are secret-free ──
+    /** Label of the last checkConnection outcome ([ZaiAuthProbeClassifier.ZaiCheckOutcome]). */
+    val lastCheckOutcome: String? = null,
+    /** One-line secret-free probe summary, e.g. "role=user email=yes outcome=signed-in-bearer localToken=yes". */
+    val lastProbeSummary: String? = null,
+    val lastCheckAtMillis: Long? = null,
+    /** The URL the hidden engine's page last reported through the state probe. */
+    val engineLastUrl: String? = null,
+    /** User agent of the hidden engine WebView (captured at creation). */
+    val engineUserAgent: String? = null,
+    /** Last URL the visible sign-in sheet WebView reported. */
+    val sheetLastUrl: String? = null,
+    /** User agent of the visible sign-in sheet WebView. */
+    val sheetUserAgent: String? = null,
+    /** One-line secret-free summary of the sheet's own last session probe. */
+    val sheetProbeSummary: String? = null,
+    /** When the sign-in sheet last reported a signed-in session (agreement check). */
+    val sheetVerifiedAtMillis: Long? = null,
+    /** Outcome of the last check of the PREVIOUS app run (session-persistence hint). */
+    val previousRunOutcome: String? = null,
+    val previousRunSignedIn: Boolean? = null,
 ) {
     val busy: Boolean
         get() = checkingConnection || testRunning ||

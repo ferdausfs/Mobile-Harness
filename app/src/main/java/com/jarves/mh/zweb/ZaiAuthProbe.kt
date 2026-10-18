@@ -70,6 +70,8 @@ object ZaiAuthProbeClassifier {
         const val CAPTCHA = "captcha"
         const val PAGE_TIMEOUT = "page-timeout"
         const val CONFIG_MISSING = "config-missing"
+        const val CHECK_ERROR = "check-error"
+        const val SIGNED_OUT_BY_USER = "signed-out-by-user"
     }
 
     private const val SHAPE_USER = "user"

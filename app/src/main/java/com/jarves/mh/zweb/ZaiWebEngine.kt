@@ -96,6 +96,7 @@ class ZaiWebEngine(
             view.settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
             cookieManager.setAcceptThirdPartyCookies(view, true)
             cookieManager.flush()
+            update { it.copy(engineUserAgent = view.settings.userAgentString) }
             // The WebView is intentionally never attached to a view hierarchy: it is
             // a headless automation surface, laid out manually so the page has a
             // real viewport.
@@ -136,7 +137,15 @@ class ZaiWebEngine(
         update { it.copy(checkingConnection = true, runMessage = null) }
         val config = configLoader.load()
         if (config == null) {
-            update { it.copy(checkingConnection = false, signedIn = false, runMessage = "Selector config unavailable.") }
+            update {
+                it.copy(
+                    checkingConnection = false,
+                    signedIn = false,
+                    lastCheckOutcome = ZaiAuthProbeClassifier.ZaiCheckOutcome.CONFIG_MISSING,
+                    lastCheckAtMillis = System.currentTimeMillis(),
+                    runMessage = "Selector config unavailable.",
+                )
+            }
             return
         }
         refreshConfigInBackground()
@@ -149,7 +158,15 @@ class ZaiWebEngine(
             loadChatPage(view, config)
             val ready = waitForComposer(view, config)
             if (ready.blocked == PageBlock.LOGIN) {
-                update { it.copy(checkingConnection = false, signedIn = false, accountEmail = null) }
+                update {
+                    it.copy(
+                        checkingConnection = false,
+                        signedIn = false,
+                        accountEmail = null,
+                        lastCheckOutcome = ZaiAuthProbeClassifier.ZaiCheckOutcome.LOGIN_PAGE,
+                        lastCheckAtMillis = System.currentTimeMillis(),
+                    )
+                }
                 return
             }
             if (ready.blocked == PageBlock.CAPTCHA) {
@@ -157,17 +174,39 @@ class ZaiWebEngine(
                     it.copy(
                         checkingConnection = false,
                         signedIn = null,
+                        lastCheckOutcome = ZaiAuthProbeClassifier.ZaiCheckOutcome.CAPTCHA,
+                        lastCheckAtMillis = System.currentTimeMillis(),
                         runMessage = "chat.z.ai is showing a verification puzzle. Open Z.ai once, solve it, then check again.",
                     )
                 }
                 return
             }
-            val auth = probeAuth(view, config)
+            if (!ready.composerReady) {
+                update {
+                    it.copy(
+                        checkingConnection = false,
+                        signedIn = null,
+                        lastCheckOutcome = ZaiAuthProbeClassifier.ZaiCheckOutcome.PAGE_TIMEOUT,
+                        lastCheckAtMillis = System.currentTimeMillis(),
+                        runMessage = "chat.z.ai did not load in time — open Diagnostics and check your connection.",
+                    )
+                }
+                return
+            }
+            val verdict = probeAuthVerdict(view, config)
             update {
                 it.copy(
                     checkingConnection = false,
-                    signedIn = auth?.optBoolean("signedIn") == true,
-                    accountEmail = auth?.optString("email").orEmpty().takeIf(String::isNotBlank),
+                    signedIn = verdict.signedIn,
+                    accountEmail = if (verdict.signedIn) it.accountEmail else null,
+                    lastCheckOutcome = verdict.outcome,
+                    lastProbeSummary = ZaiAuthProbeClassifier.summary(verdict),
+                    lastCheckAtMillis = System.currentTimeMillis(),
+                    runMessage = if (!verdict.signedIn && verdict.outcome == ZaiAuthProbeClassifier.ZaiCheckOutcome.PROBE_ERROR) {
+                        "Could not verify the Z.ai session: ${verdict.errorText}"
+                    } else {
+                        null
+                    },
                 )
             }
         } catch (e: CancellationException) {
@@ -175,7 +214,15 @@ class ZaiWebEngine(
             throw e
         } catch (e: Throwable) {
             Log.w(TAG, "checkConnection failed: ${e.message}")
-            update { it.copy(checkingConnection = false, signedIn = null, runMessage = "Connection check failed: ${e.message}") }
+            update {
+                it.copy(
+                    checkingConnection = false,
+                    signedIn = null,
+                    lastCheckOutcome = "${ZaiAuthProbeClassifier.ZaiCheckOutcome.CHECK_ERROR}:${e.message}".take(160),
+                    lastCheckAtMillis = System.currentTimeMillis(),
+                    runMessage = "Connection check failed: ${e.message}",
+                )
+            }
         }
     }
 
@@ -416,15 +463,30 @@ class ZaiWebEngine(
                 obj.toString()
             }.getOrNull()
         }
-        update { it.copy(signInSheetOpen = true, sheetAutomationJson = automationJson) }
+        update { it.copy(signInSheetOpen = true, sheetAutomationJson = automationJson, sheetVerifiedAtMillis = null) }
     }
 
     fun closeSignInSheet() = update { it.copy(signInSheetOpen = false, sheetAutomationJson = null) }
 
     /** Re-checks sign-in after the user completed the visible sign-in flow. */
     suspend fun onSignedInViaSheet() {
+        // Record the sheet's claim BEFORE the engine re-checks: if the hidden
+        // engine still reports signed-out, the card must show the disagreement
+        // instead of silently downgrading to "Not signed in".
+        update { it.copy(sheetVerifiedAtMillis = System.currentTimeMillis()) }
         closeSignInSheet()
         checkConnection()
+    }
+
+    /** Publishes the visible sheet's diagnostics (all values secret-free). */
+    fun publishSheetDiagnostics(url: String?, userAgent: String?, probeSummary: String?) {
+        update {
+            it.copy(
+                sheetLastUrl = url?.takeIf(String::isNotBlank) ?: it.sheetLastUrl,
+                sheetUserAgent = userAgent?.takeIf(String::isNotBlank) ?: it.sheetUserAgent,
+                sheetProbeSummary = probeSummary ?: it.sheetProbeSummary,
+            )
+        }
     }
 
     /**
@@ -467,6 +529,10 @@ class ZaiWebEngine(
                 lastFiles = emptyList(),
                 lastFilesDir = null,
                 testRunning = false,
+                lastCheckOutcome = ZaiAuthProbeClassifier.ZaiCheckOutcome.SIGNED_OUT_BY_USER,
+                lastCheckAtMillis = System.currentTimeMillis(),
+                lastProbeSummary = null,
+                sheetVerifiedAtMillis = null,
             )
         }
     }
@@ -501,6 +567,8 @@ class ZaiWebEngine(
         while (System.currentTimeMillis() < deadline) {
             val probe = runStateProbe(view, config)
             if (probe != null) {
+                val url = probe.optString("url")
+                if (url.isNotBlank()) update { it.copy(engineLastUrl = url) }
                 if (probe.optBoolean("captchaMatched")) return PageReady(false, PageBlock.CAPTCHA)
                 if (probe.optBoolean("loginMatched")) return PageReady(false, PageBlock.LOGIN)
                 if (probe.optBoolean("inputFound")) {
@@ -523,13 +591,11 @@ class ZaiWebEngine(
         }
     }
 
-    private suspend fun probeAuth(view: WebView, config: ZaiWebConfig): JSONObject? {
-        val raw = view.evaluateJs(ZaiProbeScripts.buildAuthProbe(config)) ?: return null
-        return try {
-            JSONObject(raw.unquoteEvalResult())
-        } catch (e: Exception) {
-            null
-        }
+    /** Runs the session probe and classifies it. Never throws. */
+    private suspend fun probeAuthVerdict(view: WebView, config: ZaiWebConfig): ZaiAuthProbeClassifier.ZaiAuthVerdict {
+        val raw = view.evaluateJs(ZaiProbeScripts.buildAuthProbe(config))
+        val parsed = ZaiAuthProbeClassifier.parseEvalResult(raw)
+        return ZaiAuthProbeClassifier.classify(parsed)
     }
 
     private suspend fun sendWithRetries(view: WebView, config: ZaiWebConfig): Boolean {

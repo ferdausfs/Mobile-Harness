@@ -5,6 +5,8 @@ import android.content.pm.PackageManager
 import android.os.Build
 import com.jarves.mh.BuildConfig
 import java.io.File
+import java.io.FileOutputStream
+import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
 import java.security.MessageDigest
@@ -69,33 +71,39 @@ class AppUpdater(
         }
     }
 
+    /**
+     * Resumable download: a connection that dies mid-download continues from
+     * the bytes already on disk instead of starting an ~88 MB transfer over.
+     * Interrupted transfers were the user's recurring failure (network drops
+     * long downloads), and a partial file is useless for installation.
+     */
     fun download(info: AppUpdateInfo, progress: (Long, Long) -> Unit): File {
         val directory = File(context.filesDir, "updates").also { it.mkdirs() }
-        val partial = File(directory, "mobile-harness-${BuildConfig.APP_VARIANT}.apk.part")
+        // Version-scoped partial: resuming bytes meant for another version
+        // would produce a corrupt APK; stale parts of other versions are removed.
+        val partial = File(directory, partFileName(BuildConfig.APP_VARIANT, info.versionCode))
         val target = File(directory, "mobile-harness-${BuildConfig.APP_VARIANT}.apk")
-        val connection = URL(info.apkUrl).openConnection() as HttpURLConnection
-        try {
-            connection.connectTimeout = 15_000
-            connection.readTimeout = 30_000
-            connection.instanceFollowRedirects = true
-            val code = connection.responseCode
-            check(code in 200..299) { "Update download failed (HTTP $code)" }
-            val total = connection.contentLengthLong.takeIf { it > 0 } ?: info.sizeBytes
-            connection.inputStream.use { input ->
-                partial.outputStream().use { output ->
-                    val buffer = ByteArray(128 * 1024)
-                    var downloaded = 0L
-                    while (true) {
-                        val count = input.read(buffer)
-                        if (count < 0) break
-                        output.write(buffer, 0, count)
-                        downloaded += count
-                        progress(downloaded, total)
-                    }
+        directory.listFiles()?.forEach { stale ->
+            if (stale.isFile && stale.name.endsWith(".apk.part") && stale.name != partial.name) stale.delete()
+        }
+
+        var attempt = 0
+        while (true) {
+            attempt++
+            try {
+                downloadOnce(info, partial, progress)
+                break
+            } catch (error: IOException) {
+                // Transient failure (timeout, reset connection, early close):
+                // the next attempt resumes from whatever reached the disk.
+                if (attempt >= DownloadResumePolicy.MAX_ATTEMPTS) {
+                    throw IOException(
+                        "Update download failed after ${DownloadResumePolicy.MAX_ATTEMPTS} attempts: ${error.message}",
+                        error,
+                    )
                 }
+                Thread.sleep(DownloadResumePolicy.backoffMillis(attempt))
             }
-        } finally {
-            connection.disconnect()
         }
         return try {
             if (info.sha256.isNotBlank()) {
@@ -110,6 +118,51 @@ class AppUpdater(
             // Do not strand a ~90 MB orphan when verification fails.
             partial.delete()
             throw error
+        }
+    }
+
+    private fun downloadOnce(info: AppUpdateInfo, partial: File, progress: (Long, Long) -> Unit) {
+        val resumeFrom = if (partial.isFile && partial.length() > 0) partial.length() else 0L
+        val connection = URL(info.apkUrl).openConnection() as HttpURLConnection
+        try {
+            connection.connectTimeout = 15_000
+            connection.readTimeout = 30_000
+            connection.instanceFollowRedirects = true
+            if (resumeFrom > 0) connection.setRequestProperty("Range", "bytes=$resumeFrom-")
+            val code = connection.responseCode
+            val decision = DownloadResumePolicy.decide(code, resumeFrom, connection.contentLengthLong, info.sizeBytes)
+            when (decision.action) {
+                DownloadResumePolicy.Action.RESUME -> Unit
+                DownloadResumePolicy.Action.RESTART -> {
+                    partial.delete()
+                    partial.createNewFile()
+                }
+                DownloadResumePolicy.Action.RETRY_FRESH -> {
+                    partial.delete()
+                    throw IOException("Server rejected the resume (HTTP $code); the next attempt starts from scratch")
+                }
+                DownloadResumePolicy.Action.FAIL -> error(decision.failure ?: "Update download failed")
+            }
+            var downloaded = decision.offset
+            connection.inputStream.use { input ->
+                FileOutputStream(partial, decision.action == DownloadResumePolicy.Action.RESUME).use { output ->
+                    val buffer = ByteArray(128 * 1024)
+                    while (true) {
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        output.write(buffer, 0, count)
+                        downloaded += count
+                        progress(downloaded, decision.total)
+                    }
+                }
+            }
+            // A stream that ends before the advertised size is a silent
+            // truncation — retry (the next attempt resumes the missing tail).
+            if (decision.total > 0 && downloaded < decision.total) {
+                throw IOException("Connection closed early at $downloaded of ${decision.total} bytes")
+            }
+        } finally {
+            connection.disconnect()
         }
     }
 
@@ -148,3 +201,7 @@ class AppUpdater(
     private fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256")
         .digest(bytes).joinToString("") { "%02x".format(it) }
 }
+
+/** Partial downloads are scoped per version code so bytes of two versions can never mix. */
+internal fun partFileName(variant: String, versionCode: Long): String =
+    "mobile-harness-$variant-$versionCode.apk.part"

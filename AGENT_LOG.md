@@ -5,6 +5,15 @@ Newest entries prepended. Never delete entries.
 ---
 
 
+## 2026-10-18 — "App not installed" screenshot analysis: INSTALL_FAILED_UPDATE_INCOMPATIBLE (signature mismatch with the app installed on the user's phone) — version bump will NOT fix; uninstall+fresh install is the fix
+
+- **User's screenshot** (Downloads screen + package installer): `mobile-harness-online-v1.0.22.apk` downloaded **just now, 87.94 MB** — the exact expected size (87,940,807 B), so the download is complete and intact. Installer result sheet: **"App not installed"** for Mobile Harness. User reports 4-5 identical failures (started at v1.0.21) and asks to "change the version".
+- **Eliminated by this screenshot**: truncated download (size exact), unknown-sources gating (installer ran and gave its final verdict), low storage (241 GB device), file corruption (round-trip sha256 verified earlier).
+- **Diagnosis**: "App not installed" is exactly how modern Android renders `INSTALL_FAILED_UPDATE_INCOMPATIBLE` — the installed app is signed with a **different key** than the update APK. Server-side, every release APK since v1.0.8 is cert `d07ba804…dccfe` (verified yesterday on the actual published files). Therefore the v1.0.20 **on the user's phone** is NOT the release-page v1.0.20 — it was almost certainly installed from a directly shared APK built with a different key in an earlier session. Every release-page upgrade since then collides with it. **Bumping the version number cannot help** (Android compares signing certs, not version codes) — no release was burned on this.
+- **Plan given to user (least data risk first)**: (1) zero-loss confirmation test — install the release v1.0.20 APK over the installed app; "App not installed" ⇒ mismatch 100% confirmed; (2) optional no-risk attempt — disable Play Protect scanning and retry v1.0.22 once; (3) the fix — copy API keys out of the app, uninstall Mobile Harness, install the already-downloaded v1.0.22 fresh, restore keys, sign in to Z.ai again. After the fresh install the phone is on the release signing line and all future in-app updates work.
+
+---
+
 ## 2026-10-18 — v1.0.22 follow-up: "install korte parsi na" — published APKs verified byte-perfect and same-cert; failure is device-side; release body clarified; KEYSTORE LOST TO SANDBOX RESET
 
 - **User report**: v1.0.20 still installed; downloaded v1.0.21 from the release page but **could not install it** ("ami install korte parsi na"). User suspected the code.

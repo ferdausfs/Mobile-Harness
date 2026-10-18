@@ -1,12 +1,12 @@
 {
-  "versionCode": 18,
-  "versionName": "1.0.17",
-  "notes": "Fixed the Ollama Cloud 'key rejected' false alarm: the app was sending Android's default Dalvik User-Agent and ollama.com's edge blocks it with a 403 before ever checking the key, so a valid key was reported as rejected. Every provider request now identifies itself as the app (validation, model refresh, connection test, usage card, and the runtime gateways). Error messages now separate a provider edge refusing the app's connection (a connection block, not a key problem) from a genuine 'rejected this key' verdict, for every provider. Pasted keys are cleaned of stray whitespace and accidental 'Bearer ' prefixes, a saved key's secret can never be silently replaced under its existing name, a newly added key is activated immediately, and the stale 'API key removed' status line is gone. Same signing key - installs directly over v1.0.16 with one tap.",
+  "versionCode": 19,
+  "versionName": "1.0.18",
+  "notes": "Fixed the known Agent-screen bug where tapping the Claude Code or Antigravity tabs sometimes did nothing: tabs went dead while an agent install ran in the background (including installs started from Settings, where no progress card was visible), and a tap that could not be carried out was silently swallowed with no message. Every tap now either acts immediately or explains itself with a toast - the install progress card is always visible while an install runs, tapping during another install says which one to wait for, and a switch blocked by a running task is announced instead of leaving the screen blank. Viewing an installed-but-not-yet-active agent shows an explanatory card instead of an empty space. No other behavior changed; the three existing agents work exactly as before. Same signing key - installs directly over v1.0.17 with one tap.",
   "artifacts": {
     "online": {
-      "url": "https://github.com/ferdausfs/Mobile-Harness/releases/download/v1.0.17/mobile-harness-online-v1.0.17.apk",
-      "sha256": "09f166bd34a98e11fa3c8df4821c5bcc9e115942635c2e0189865475d3c9a883",
-      "sizeBytes": 87649607
+      "url": "https://github.com/ferdausfs/Mobile-Harness/releases/download/v1.0.18/mobile-harness-online-v1.0.18.apk",
+      "sha256": "eada087b4afdad9b678aabb7843384e2e37735d4b2eb34ee1ff00bc81ad70b49",
+      "sizeBytes": 87655923
     }
   }
 }

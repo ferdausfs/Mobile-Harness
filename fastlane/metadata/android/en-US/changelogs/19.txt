@@ -1,0 +1,5 @@
+Fixed the known Agent-screen bug where tapping the Claude Code or Antigravity tabs sometimes did nothing. The tabs used to go completely dead while an agent install was running in the background (including installs started from Settings, where no progress card was visible on the Agent screen), and a tap that could not be carried out was silently swallowed with no message. Now every tap either acts immediately or explains itself with a toast: the install progress card is always visible while an install runs, tapping during someone else's install tells you which install to wait for, and a switch that is blocked by a running task is announced instead of leaving the screen blank. Viewing an installed-but-not-yet-active agent now shows an explanatory card instead of an empty space.
+
+No other behavior changed - the three existing agents (Claude Code, DeepSeek Harness, Antigravity) work exactly as before.
+
+Same signing key - installs directly over v1.0.17 with one tap.

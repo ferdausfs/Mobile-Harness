@@ -62,6 +62,7 @@ import com.jarves.mh.runtime.readTailText
 import com.jarves.mh.runtime.supportsArm64Runtime
 import com.jarves.mh.runtime.AndroidAppInstaller
 import com.jarves.mh.update.AppUpdateInfo
+import com.jarves.mh.update.AppUpdateCheckPolicy
 import com.jarves.mh.update.AppUpdater
 import com.jarves.mh.zweb.ZaiWebController
 import com.jarves.mh.zweb.ZaiWebUiState
@@ -258,6 +259,10 @@ data class AppUiState(
     val appUpdateDownloadedBytes: Long = 0L,
     val appUpdateTotalBytes: Long = -1L,
     val appUpdateError: String? = null,
+    /** True while a check for updates is in flight (Settings → Check now). */
+    val appUpdateChecking: Boolean = false,
+    /** Outcome of the last check for the Settings row: up-to-date, or why the check failed. */
+    val appUpdateCheckMessage: String? = null,
     /** Z.ai Web tab (hidden-WebView agent). Owned by ZaiWebController, isolated from the CLI stack. */
     val zaiWeb: ZaiWebUiState = ZaiWebUiState(),
 )
@@ -1242,15 +1247,50 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun checkForAppUpdate(force: Boolean = false) {
-        if (!force && System.currentTimeMillis() - preferences.lastAppUpdateCheckMillis < 24L * 60L * 60L * 1000L) return
+        val now = System.currentTimeMillis()
+        if (!AppUpdateCheckPolicy.shouldCheck(preferences.lastAppUpdateCheckMillis, now, force)) return
+        if (force) {
+            _state.update { it.copy(appUpdateChecking = true, appUpdateCheckMessage = null) }
+        }
         viewModelScope.launch(Dispatchers.IO) {
-            val update = runCatching { appUpdater().check() }.getOrNull()
-            preferences.lastAppUpdateCheckMillis = System.currentTimeMillis()
-            if (update != null) {
-                _state.update {
-                    it.copy(appUpdate = update, appUpdateStatus = AppUpdateStatus.AVAILABLE, appUpdateError = null)
-                }
+            val startedAt = System.currentTimeMillis()
+            val result = runCatching { appUpdater().check() }
+            // Only a check that actually completed may advance the 24h throttle.
+            // A failed check stays unstamped so the next startup retries instead
+            // of staying silent for a day (the "app never updates" report).
+            if (AppUpdateCheckPolicy.shouldRecordAttempt(checkCompleted = result.isSuccess)) {
+                preferences.lastAppUpdateCheckMillis = startedAt
             }
+            result.fold(
+                onSuccess = { update ->
+                    if (update != null) {
+                        _state.update {
+                            it.copy(
+                                appUpdate = update,
+                                appUpdateStatus = AppUpdateStatus.AVAILABLE,
+                                appUpdateError = null,
+                                appUpdateChecking = false,
+                                appUpdateCheckMessage = null,
+                            )
+                        }
+                    } else {
+                        _state.update {
+                            it.copy(
+                                appUpdateChecking = false,
+                                appUpdateCheckMessage = "You're on the latest version (v${BuildConfig.VERSION_NAME}).",
+                            )
+                        }
+                    }
+                },
+                onFailure = { error ->
+                    _state.update {
+                        it.copy(
+                            appUpdateChecking = false,
+                            appUpdateCheckMessage = "Update check failed: ${error.message ?: "network error"}. Tap Check again.",
+                        )
+                    }
+                },
+            )
         }
     }
 

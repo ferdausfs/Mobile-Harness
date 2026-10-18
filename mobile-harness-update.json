@@ -1,12 +1,12 @@
 {
-  "versionCode": 24,
-  "versionName": "1.0.23",
-  "notes": "Fixes \"Z.ai auth probe never returns a result on a real Android WebView\". Your Diagnostics showed it exactly: login actually succeeded (the token and oauth_id_token cookies exist), but every check read outcome=probe-error, error=\"probe did not return a readable result\", so the card stayed on \"Not signed in\" and the sign-in sheet never closed itself. Root cause: the probe script returned a JavaScript Promise to WebView.evaluateJavascript, which on a real Android WebView cannot await it - it hands back \"{}\" instead of the result (headless-browser tests awaited the Promise, which is why tests passed while the phone never worked). The probe now stores its result on the page and the app polls it with short synchronous reads (with a timeout budget that reports the real reason instead of a generic error). Applied everywhere the probe runs: the hidden engine's connection check, the sign-in sheet's 2-second session poll, the X-close final probe and the page-finished fast path - so after login the sheet closes itself and the card shows Connected. Also adds a source-level guard test that fails if any script handed to evaluateJavascript ever returns a Promise again, plus on-device verification steps in docs/zai-auth-probe-verification.md. Same signing key - installs over v1.0.22 with one tap.",
+  "versionCode": 25,
+  "versionName": "1.0.24",
+  "notes": "Fixes the update flow you hit this week: (1) In-app updates now RESUME instead of restarting - the download continues from where your connection dropped (up to 5 attempts with backoff), only hands Android a fully downloaded and SHA-256-verified APK, and each update gets its own partial file so two versions can never mix. This is the permanent fix for \"download complete hoy na\" on networks that cannot carry an ~88 MB file in one go - do updates from Settings > App update, not the browser. (2) Crashes are no longer a blind spot: the app now saves the stack trace of any crash to storage, and Settings shows a \"Last crash\" card with Copy report - send that report after a crash and the cause is known immediately instead of guessed. (3) Hardened the installer hand-off and the \"Install unknown apps\" round-trip so neither can crash the app. Still the same signing key - installs over v1.0.22/v1.0.23 with one tap.",
   "artifacts": {
     "online": {
-      "url": "https://github.com/ferdausfs/Mobile-Harness/releases/download/v1.0.23/mobile-harness-online-v1.0.23.apk",
-      "sha256": "12f5db5f68d351b49f26cef94789cf99476dc4c20fc96468be073878e36564ba",
-      "sizeBytes": 87957939
+      "url": "https://github.com/ferdausfs/Mobile-Harness/releases/download/v1.0.24/mobile-harness-online-v1.0.24.apk",
+      "sha256": "a425a6fcb565baaa9d74917b5d6d90dbd1abfd497fd1baabf9018c92e4709ae4",
+      "sizeBytes": 87980479
     }
   }
 }

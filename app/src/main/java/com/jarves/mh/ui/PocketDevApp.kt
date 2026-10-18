@@ -196,6 +196,9 @@ import com.jarves.mh.model.inferredDshApiForUrl
 import com.jarves.mh.model.providersForAgent
 import com.jarves.mh.model.ToolRequest
 import com.jarves.mh.model.WorkspaceEntry
+import com.jarves.mh.zweb.ZaiChatPromptBuilder
+import com.jarves.mh.zweb.ZaiChatTurnPresenter
+import com.jarves.mh.zweb.ZaiPendingApply
 import com.jarves.mh.model.projectSlug
 import com.jarves.mh.runtime.RuntimeExecutionService
 import com.jarves.mh.runtime.RuntimeSetupService
@@ -355,6 +358,13 @@ fun PocketDevApp(viewModel: MainViewModel = viewModel()) {
             onRemoveAttachment = viewModel::removePendingAttachment,
             onOpenAttachment = viewModel::openChatAttachment,
             onBuildAndRunAndroid = viewModel::buildAndRunAndroidApp,
+            onPickChatEngine = viewModel::selectChatEngine,
+            onZaiSignIn = viewModel::zaiOpenSignIn,
+            onZaiApplyFile = viewModel::zaiApplyFile,
+            onZaiApplyAll = viewModel::zaiApplyAllFiles,
+            onZaiRejectPlan = viewModel::zaiRejectPlan,
+            onZaiAutoApply = viewModel::setZaiAutoApply,
+            onDismissZaiNotice = viewModel::clearZaiChatNotice,
         )
         else -> RootScreenHost(state, viewModel, projectsListState)
     }
@@ -2129,6 +2139,7 @@ private fun RootScreenHost(
                     onZaiSignedInViaSheet = viewModel::zaiSignedInViaSheet,
                     onZaiClearResult = viewModel::zaiClearResult,
                     onZaiSheetDiagnostics = viewModel::zaiSheetDiagnostics,
+                    onZaiToggleChatEngine = viewModel::setZaiChatEngineActive,
                 )
                 RootScreen.SETTINGS -> SettingsScreen(
                     state = state,
@@ -3879,11 +3890,19 @@ private fun WorkspaceScreen(
     onRemoveAttachment: (String) -> Unit,
     onOpenAttachment: (ChatAttachment) -> Unit,
     onBuildAndRunAndroid: () -> Unit,
+    onPickChatEngine: (String) -> Unit,
+    onZaiSignIn: () -> Unit,
+    onZaiApplyFile: (String) -> Unit,
+    onZaiApplyAll: () -> Unit,
+    onZaiRejectPlan: () -> Unit,
+    onZaiAutoApply: (Boolean) -> Unit,
+    onDismissZaiNotice: () -> Unit,
 ) {
     BackHandler(onBack = onBack)
     val context = LocalContext.current
     val isAndroidProject = state.androidProjectDetected
     val keyboardVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
+    var showEnginePicker by rememberSaveable { mutableStateOf(false) }
     val exportProjectLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.CreateDocument("application/zip"),
         onResult = { uri -> if (uri != null) onExportProject(uri) },
@@ -3945,6 +3964,25 @@ private fun WorkspaceScreen(
     var selectedTab by rememberSaveable { mutableStateOf(WorkspaceTab.CHAT) }
     var showChats by rememberSaveable { mutableStateOf(false) }
     val activeChat = state.projectChats.firstOrNull { it.id == state.activeChatId }
+    val engineTitle = if (state.zaiChatEngineActive) {
+        ZaiChatPromptBuilder.ZAI_ENGINE_TITLE
+    } else if (state.agentKind == AgentKind.ANTIGRAVITY) {
+        state.agentKind.title
+    } else {
+        state.provider.kind.title
+    }
+    if (showEnginePicker) {
+        ZaiEnginePickerSheet(
+            zaiActive = state.zaiChatEngineActive,
+            activeAgentKind = state.agentKind,
+            zaiSignedIn = state.zaiWeb.signedIn,
+            zaiCheckingConnection = state.zaiWeb.checkingConnection,
+            zaiBusy = state.zaiWeb.busy,
+            onPickEngine = onPickChatEngine,
+            onSignIn = onZaiSignIn,
+            onDismiss = { showEnginePicker = false },
+        )
+    }
 
     // If a file is open, show the FileViewerScreen on top
     if (state.openedFilePath != null) {
@@ -4022,10 +4060,11 @@ private fun WorkspaceScreen(
                             ),
                         )
                         Text(
-                            "${activeChat?.title ?: "Chat"} · ${if (state.agentKind == AgentKind.ANTIGRAVITY) state.agentKind.title else state.provider.kind.title}",
+                            "${activeChat?.title ?: "Chat"} · $engineTitle",
                             fontSize = 11.sp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             maxLines = 1,
+                            modifier = Modifier.clickable { showEnginePicker = true },
                         )
                     }
                 },
@@ -4106,6 +4145,16 @@ private fun WorkspaceScreen(
                         onTerminalOpened()
                         onTerminalPrepare(command)
                     },
+                    engineTitle = engineTitle,
+                    zaiPendingApply = state.zaiPendingApply,
+                    zaiChatNotice = state.zaiChatNotice,
+                    zaiAutoApply = state.zaiAutoApply,
+                    onZaiApplyFile = onZaiApplyFile,
+                    onZaiApplyAll = onZaiApplyAll,
+                    onZaiRejectPlan = onZaiRejectPlan,
+                    onZaiAutoApply = onZaiAutoApply,
+                    onZaiSignIn = onZaiSignIn,
+                    onDismissZaiNotice = onDismissZaiNotice,
                 )
                 WorkspaceTab.FILES -> FilesTab(
                     files = state.workspaceFiles,
@@ -4481,6 +4530,16 @@ private fun ChatTab(
     readOnly: Boolean = false,
     readOnlyBlocked: Boolean = false,
     onContinueHere: () -> Unit = {},
+    engineTitle: String? = null,
+    zaiPendingApply: ZaiPendingApply? = null,
+    zaiChatNotice: ZaiChatTurnPresenter.TurnNotice? = null,
+    zaiAutoApply: Boolean = false,
+    onZaiApplyFile: (String) -> Unit = {},
+    onZaiApplyAll: () -> Unit = {},
+    onZaiRejectPlan: () -> Unit = {},
+    onZaiAutoApply: (Boolean) -> Unit = {},
+    onZaiSignIn: () -> Unit = {},
+    onDismissZaiNotice: () -> Unit = {},
 ) {
     val view = LocalView.current
     // Keep the screen on while the selected agent is working in this chat. Released automatically
@@ -4506,10 +4565,22 @@ private fun ChatTab(
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 items(messages, key = { it.id }) { message ->
-                    if (message.workItems.isNotEmpty()) {
-                        WorkBlockCard(message)
-                    } else {
-                        MessageBubble(message, onRunInTerminal, onOpenAttachment)
+                    Column {
+                        if (message.workItems.isNotEmpty()) {
+                            WorkBlockCard(message)
+                        } else {
+                            MessageBubble(message, onRunInTerminal, onOpenAttachment)
+                        }
+                        if (zaiPendingApply?.messageId == message.id) {
+                            ZaiFileReviewCard(
+                                pending = zaiPendingApply,
+                                autoApply = zaiAutoApply,
+                                onAutoApply = onZaiAutoApply,
+                                onApplyAll = onZaiApplyAll,
+                                onApplyFile = onZaiApplyFile,
+                                onReject = onZaiRejectPlan,
+                            )
+                        }
                     }
                 }
                 if (liveProcess.isNotEmpty() || thinkingActive) {
@@ -4524,6 +4595,11 @@ private fun ChatTab(
                     }
                 }
                 approval?.let { request -> item { ApprovalCard(request, onApproval) } }
+                zaiChatNotice?.let { notice ->
+                    item(key = "zai-chat-notice") {
+                        ZaiChatNoticeCard(notice, onSignIn = onZaiSignIn, onDismiss = onDismissZaiNotice)
+                    }
+                }
             }
             if (!readerAtBottom) {
                 Surface(
@@ -4665,7 +4741,7 @@ private fun ChatTab(
                                 Box(contentAlignment = Alignment.CenterStart) {
                                     if (prompt.isEmpty()) {
                                         Text(
-                                            text = "Message ${agentKind.title}…",
+                                            text = "Message ${engineTitle ?: agentKind.title}…",
                                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                                             fontSize = 15.sp,
                                         )

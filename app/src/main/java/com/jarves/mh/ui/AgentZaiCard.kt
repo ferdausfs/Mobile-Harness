@@ -42,6 +42,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -104,6 +105,7 @@ fun AgentZaiCard(
     onSignedInViaSheet: () -> Unit,
     onClearResult: () -> Unit,
     onSheetDiagnostics: (ZaiSheetDiagnostics) -> Unit = {},
+    onToggleChatEngine: (Boolean) -> Unit = {},
 ) {
     val zai = state.zaiWeb
     var task by remember { mutableStateOf("") }
@@ -270,6 +272,35 @@ fun AgentZaiCard(
                             MaterialTheme.colorScheme.onSurfaceVariant
                         },
                     )
+                }
+
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))
+
+                // ── Project chat engine (v1.0.25): Z.ai answers the project chat ──
+                Column(Modifier.fillMaxWidth()) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                "Project chat engine",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Text(
+                                if (state.zaiChatEngineActive) {
+                                    "Z.ai answers the project workspace chat. Your CLI agents stay unchanged."
+                                } else {
+                                    "Use Z.ai in the project chat instead of ${state.agentKind.title}."
+                                },
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Switch(
+                            checked = state.zaiChatEngineActive,
+                            onCheckedChange = onToggleChatEngine,
+                        )
+                    }
                 }
 
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))

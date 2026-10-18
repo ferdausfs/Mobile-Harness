@@ -1,0 +1,68 @@
+{
+  "version": 1,
+  "remoteUpdateUrl": "https://raw.githubusercontent.com/ferdausfs/Mobile-Harness/main/app/src/main/assets/zweb/selectors.json",
+  "page": {
+    "startUrl": "https://chat.z.ai/",
+    "authProbePath": "/api/v1/auths/"
+  },
+  "selectors": {
+    "input": [
+      "#chat-input",
+      "textarea[placeholder='Send a Message']",
+      "main textarea",
+      "textarea"
+    ],
+    "sendButton": [
+      "#send-message-button",
+      "button.sendMessageButton",
+      "form button[type='submit']"
+    ],
+    "stopIndicator": [
+      "div[aria-label='Stop']",
+      "[aria-label='Stop']"
+    ],
+    "assistantMessage": [
+      ".chat-assistant",
+      ".markdown-prose.chat-assistant",
+      "[class*='chat-assistant']"
+    ],
+    "userMessage": [
+      ".chat-user",
+      ".markdown-prose.chat-user",
+      "[class*='chat-user']"
+    ],
+    "codeBlock": [
+      ".chat-assistant pre code",
+      ".markdown-prose pre code",
+      "pre code"
+    ],
+    "fileCard": [
+      "[class*='file-card']",
+      "[class*='fileCard']",
+      "a[href*='/api/v1/files/']"
+    ],
+    "loginMarker": [
+      "url-contains:/auth",
+      "text:=Welcome to Z.ai",
+      "text:=Continue with Email"
+    ],
+    "captchaMarker": [
+      "#aliyunCaptcha-window-popup.window-show",
+      "[id^='aliyunCaptcha-window']",
+      ".aliyunCaptcha-sliding-text"
+    ],
+    "newChatButton": [
+      "#new-chat-button",
+      "[aria-label='New Chat']",
+      "a[aria-label='New Chat']"
+    ]
+  },
+  "timing": {
+    "pageLoadTimeoutMs": 25000,
+    "pageSettleMs": 1500,
+    "sendSettleMs": 2500,
+    "pollIntervalMs": 900,
+    "stableWindowMs": 4000,
+    "generationTimeoutMs": 300000
+  }
+}

@@ -1,12 +1,12 @@
 {
-  "versionCode": 21,
-  "versionName": "1.0.20",
-  "notes": "Fixes to the Z.ai sign-in screen reported on v1.0.19. Tapping \"Sign in to Z.ai\" could land on the chat.z.ai home page instead of the login form (Android WebView requests are treated differently by the site), which made logging in impossible - now the sheet detects that state and automatically opens the sidebar and taps \"Sign in\" for you, driven by updatable selectors, and if anything is still unclear a hint line tells you exactly what to tap. The sheet now checks every 2 seconds whether the login succeeded: it closes by itself and the card shows Connected (also when you close it right after logging in). The current page URL is shown in a small debug line while the sheet is open, and the site's verification puzzle stays fully solvable inside the sheet. Sign-in now presents a Chrome-style browser identity so Google logins are not rejected with \"disallowed_useragent\" (Google OAuth verified reachable from the probe; your device is the final judge). Fixed: the Claude Code tab and the Z.ai tab were highlighted at the same time - only the selected tab is highlighted now. Three CLI agents and all settings untouched; same signing key - installs over v1.0.19 with one tap.",
+  "versionCode": 22,
+  "versionName": "1.0.21",
+  "notes": "Fixes the \"logged in but the card says Not signed in\" loop reported on v1.0.20. Root cause: chat.z.ai keeps your session token in its own browser storage (localStorage) and authorizes API calls with a Bearer header, while the app only checked the session cookie - and the server answers a cookie-less check by silently minting a fresh guest, so the app kept reporting \"Not signed in\" even right after a successful Google login. The session check now mirrors exactly what the chat.z.ai site itself does (Bearer token from the page's own storage plus the cookie fallback), for both the sign-in sheet and the hidden browser. Also new: a Diagnostics section on the Z.ai tab (collapsed by default, one-tap copyable, contains no secrets) showing the last check result and which branch fired, both browsers' last URLs and user agents, cookie names (never values), whether the session survived an app restart, and an orange warning if the sign-in sheet and the hidden browser ever disagree. Session cookies chat.z.ai sets are session-scoped (server-verified); the fix no longer depends on them. Same signing key - installs over v1.0.20 with one tap.",
   "artifacts": {
     "online": {
-      "url": "https://github.com/ferdausfs/Mobile-Harness/releases/download/v1.0.20/mobile-harness-online-v1.0.20.apk",
-      "sha256": "088614381356c571a48425c9f526424b0dcf01cd277477c3d003de6f65798300",
-      "sizeBytes": 87866007
+      "url": "https://github.com/ferdausfs/Mobile-Harness/releases/download/v1.0.21/mobile-harness-online-v1.0.21.apk",
+      "sha256": "df595710c3aaa3d35f6a2ef07ba43585eac8c989f337d0e1ac252b51c5e632c2",
+      "sizeBytes": 87920431
     }
   }
 }

@@ -246,8 +246,17 @@ class ZaiWebEngine(
     /**
      * Sends [task] through the hidden WebView and waits for generation to finish.
      * [test] selects the tiny deterministic connection-test prompt.
+     *
+     * [continueChat] (chat-engine turns, v1.0.25) keeps the page's CURRENT
+     * conversation instead of clicking New chat: when the composer is still
+     * alive the turn is posted into the same chat.z.ai conversation, so the
+     * site remembers the previous turns of this project chat. When the page
+     * was reloaded, crashed, or never started (probe finds no composer), it
+     * falls back to the normal fresh-load path — the prompt itself always
+     * carries the full context, so either way the turn is self-contained.
+     * Tab-task runs (AgentZaiCard) keep the default fresh-conversation mode.
      */
-    suspend fun runPrompt(task: String, test: Boolean) {
+    suspend fun runPrompt(task: String, test: Boolean, continueChat: Boolean = false) {
         val config = configLoader.load()
         if (config == null) {
             update { it.copy(runPhase = ZaiRunPhase.ERROR, runMessage = "Selector config unavailable — Z.ai Web disabled.") }
@@ -279,8 +288,28 @@ class ZaiWebEngine(
         runJob = scope.launch {
             try {
                 // 1. Load the page and wait until the composer exists (or a blocker shows).
-                loadChatPage(view, config)
-                val ready = waitForComposer(view, config)
+                //    Continue-mode first probes the live page: an alive composer means
+                //    the conversation can continue without a reload (a reload would
+                //    depend on the site restoring the chat, which is not guaranteed).
+                val ready: PageReady = if (continueChat) {
+                    val live = runStateProbe(view, config)
+                    when {
+                        live == null -> {
+                            loadChatPage(view, config)
+                            waitForComposer(view, config)
+                        }
+                        live.optBoolean("captchaMatched") -> PageReady(false, PageBlock.CAPTCHA)
+                        live.optBoolean("loginMatched") -> PageReady(false, PageBlock.LOGIN)
+                        live.optBoolean("inputFound") -> PageReady(true, PageBlock.NONE)
+                        else -> {
+                            loadChatPage(view, config)
+                            waitForComposer(view, config)
+                        }
+                    }
+                } else {
+                    loadChatPage(view, config)
+                    waitForComposer(view, config)
+                }
                 if (canceled || thisRun != runNumber) return@launch
                 when (ready.blocked) {
                     PageBlock.LOGIN -> {
@@ -316,10 +345,16 @@ class ZaiWebEngine(
                 }
 
                 // 2. Fresh conversation so the assistant-count baseline is unambiguous.
-                view.evaluateJs(ZaiProbeScripts.buildClickNewChatScript(config))
-                delay(config.timing.pageSettleMs)
-                loadChatPage(view, config)
-                val freshReady = waitForComposer(view, config)
+                //    Continue-mode skips this entirely: the current conversation IS the
+                //    baseline, and the composer was verified in step 1.
+                if (!continueChat) {
+                    view.evaluateJs(ZaiProbeScripts.buildClickNewChatScript(config))
+                    delay(config.timing.pageSettleMs)
+                    loadChatPage(view, config)
+                }
+                val freshReady = if (continueChat) ready else {
+                    waitForComposer(view, config)
+                }
                 if (canceled || thisRun != runNumber) return@launch
                 if (!freshReady.composerReady) {
                     when (freshReady.blocked) {

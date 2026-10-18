@@ -54,6 +54,16 @@ class ZaiWebController(private val appContext: Context, private val onState: (Za
         scope.launch { engine.runPrompt(task, test = false) }
     }
 
+    /**
+     * One turn of the project workspace chat when Z.ai is the chat engine.
+     * [continueChat] keeps the page's current chat.z.ai conversation
+     * (see [ZaiWebEngine.runPrompt]); the Z.ai tab's task runner never uses it.
+     */
+    fun runChatTurn(prompt: String, continueChat: Boolean) {
+        val engine = ensureEngine() ?: return
+        scope.launch { engine.runPrompt(prompt, test = false, continueChat = continueChat) }
+    }
+
     fun runTest() {
         val engine = ensureEngine() ?: return
         scope.launch { engine.runPrompt("", test = true) }

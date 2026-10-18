@@ -2128,6 +2128,7 @@ private fun RootScreenHost(
                     onZaiCloseSignIn = viewModel::zaiCloseSignIn,
                     onZaiSignedInViaSheet = viewModel::zaiSignedInViaSheet,
                     onZaiClearResult = viewModel::zaiClearResult,
+                    onZaiSheetDiagnostics = viewModel::zaiSheetDiagnostics,
                 )
                 RootScreen.SETTINGS -> SettingsScreen(
                     state = state,

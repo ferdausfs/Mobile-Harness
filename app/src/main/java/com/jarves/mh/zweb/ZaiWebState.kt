@@ -70,3 +70,14 @@ enum class ZaiRunPhase {
     ERROR,
     CANCELED,
 }
+
+/**
+ * Secret-free diagnostics published by the visible sign-in sheet: its last
+ * page URL, its user agent, and the one-line summary of its last session
+ * probe. Feeds the Z.ai tab's Diagnostics report.
+ */
+data class ZaiSheetDiagnostics(
+    val url: String?,
+    val userAgent: String?,
+    val probeSummary: String?,
+)

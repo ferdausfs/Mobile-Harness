@@ -201,6 +201,7 @@ fun AgentScreen(
     onZaiCloseSignIn: () -> Unit = {},
     onZaiSignedInViaSheet: () -> Unit = {},
     onZaiClearResult: () -> Unit = {},
+    onZaiSheetDiagnostics: (com.jarves.mh.zweb.ZaiSheetDiagnostics) -> Unit = {},
 ) {
     val scope = rememberCoroutineScope()
     var selectedKind by rememberSaveable(state.provider.kind) { mutableStateOf(state.provider.kind) }
@@ -1094,6 +1095,7 @@ fun AgentScreen(
                         onCloseSignIn = onZaiCloseSignIn,
                         onSignedInViaSheet = onZaiSignedInViaSheet,
                         onClearResult = onZaiClearResult,
+                        onSheetDiagnostics = onZaiSheetDiagnostics,
                     )
                 } else if (!viewedAgentInstalled) {
                     // Installation/selection guidance is the install card shown

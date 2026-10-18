@@ -77,6 +77,11 @@ class ZaiWebController(private val appContext: Context, private val onState: (Za
         scope.launch { engine.onSignedInViaSheet() }
     }
 
+    /** Publishes the visible sheet's secret-free diagnostics into the UI state. */
+    fun publishSheetDiagnostics(diagnostics: ZaiSheetDiagnostics) {
+        engine?.publishSheetDiagnostics(diagnostics.url, diagnostics.userAgent, diagnostics.probeSummary)
+    }
+
     fun disconnect() {
         engine?.disconnect()
     }

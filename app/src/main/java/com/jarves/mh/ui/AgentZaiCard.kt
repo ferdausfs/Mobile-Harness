@@ -61,9 +61,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import android.view.ViewGroup
 import com.jarves.mh.ui.theme.PocketOrange
+import com.jarves.mh.zweb.ZaiAuthProbeClassifier
 import com.jarves.mh.zweb.ZaiProbeScripts
 import com.jarves.mh.zweb.ZaiPromptBuilder
 import com.jarves.mh.zweb.ZaiRunPhase
+import com.jarves.mh.zweb.ZaiSheetDiagnostics
 import com.jarves.mh.zweb.ZaiSheetUserAgent
 import com.jarves.mh.zweb.ZaiWebUiState
 import kotlinx.coroutines.delay
@@ -90,6 +92,7 @@ fun AgentZaiCard(
     onCloseSignIn: () -> Unit,
     onSignedInViaSheet: () -> Unit,
     onClearResult: () -> Unit,
+    onSheetDiagnostics: (ZaiSheetDiagnostics) -> Unit = {},
 ) {
     val zai = state.zaiWeb
     var task by remember { mutableStateOf("") }
@@ -381,6 +384,7 @@ fun AgentZaiCard(
             automationJson = zai.sheetAutomationJson,
             onClose = onCloseSignIn,
             onSignedIn = onSignedInViaSheet,
+            onSheetDiagnostics = onSheetDiagnostics,
         )
     }
 }
@@ -430,11 +434,13 @@ private fun ZaiSignInSheet(
     automationJson: String?,
     onClose: () -> Unit,
     onSignedIn: () -> Unit,
+    onSheetDiagnostics: (ZaiSheetDiagnostics) -> Unit,
 ) {
     var progress by remember { mutableStateOf(0) }
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
     var verified by remember { mutableStateOf(false) }
     var sheetUrl by remember { mutableStateOf("") }
+    var sheetUa by remember { mutableStateOf("") }
     var showHint by remember { mutableStateOf(false) }
     var captchaSeen by remember { mutableStateOf(false) }
 
@@ -452,8 +458,15 @@ private fun ZaiSignInSheet(
             if (verified) break
 
             // 1. Session check — runs on every tick, on any page (a fetch to a
-            //    foreign origin simply fails and reads as signed-out).
-            if (parseSignedInResult(view.evalSheetJs(authProbeJs))) {
+            //    foreign origin simply fails and reads as signed-out). The probe
+            //    mirrors the site's own check: Bearer-from-localStorage + cookie.
+            val verdict = ZaiAuthProbeClassifier.classify(
+                ZaiAuthProbeClassifier.parseEvalResult(view.evalSheetJs(authProbeJs)),
+            )
+            onSheetDiagnostics(
+                ZaiSheetDiagnostics(view.url, sheetUa, ZaiAuthProbeClassifier.summary(verdict)),
+            )
+            if (verdict.signedIn) {
                 verified = true
                 CookieManager.getInstance().flush()
                 onSignedIn()
@@ -496,7 +509,13 @@ private fun ZaiSignInSheet(
         }
         // X pressed: one last session probe so "logged in, then closed" is never lost.
         view.evaluateJavascript(authProbeJs) { result ->
-            if (parseSignedInResult(result)) {
+            val verdict = ZaiAuthProbeClassifier.classify(
+                ZaiAuthProbeClassifier.parseEvalResult(result),
+            )
+            onSheetDiagnostics(
+                ZaiSheetDiagnostics(view.url, sheetUa, ZaiAuthProbeClassifier.summary(verdict)),
+            )
+            if (verdict.signedIn) {
                 verified = true
                 CookieManager.getInstance().flush()
                 onSignedIn()
@@ -557,7 +576,10 @@ private fun ZaiSignInSheet(
                 Box(Modifier.weight(1f)) {
                     AndroidViewWebView(
                         modifier = Modifier.fillMaxSize(),
-                        onWebView = { webViewRef = it },
+                        onWebView = {
+                            webViewRef = it
+                            sheetUa = it.settings.userAgentString
+                        },
                         onProgress = { progress = it },
                         onPageFinished = { url -> sheetUrl = url },
                         onVerify = {
@@ -567,7 +589,13 @@ private fun ZaiSignInSheet(
                             val view = webViewRef
                             if (view != null && !verified) {
                                 view.evaluateJavascript(authProbeJs) { result ->
-                                    if (parseSignedInResult(result)) {
+                                    val verdict = ZaiAuthProbeClassifier.classify(
+                                        ZaiAuthProbeClassifier.parseEvalResult(result),
+                                    )
+                                    onSheetDiagnostics(
+                                        ZaiSheetDiagnostics(view.url, sheetUa, ZaiAuthProbeClassifier.summary(verdict)),
+                                    )
+                                    if (verdict.signedIn) {
                                         verified = true
                                         CookieManager.getInstance().flush()
                                         onSignedIn()
@@ -622,16 +650,6 @@ private suspend fun WebView.evalSheetJs(script: String): String? =
         }
     }
 
-/** evaluateJavascript wraps a returned string in one level of JSON quoting. */
-private fun String.sheetEvalPayload(): String? = runCatching {
-    org.json.JSONArray(this).optString(0)
-}.getOrNull()
-
-private fun parseSignedInResult(raw: String?): Boolean {
-    val inner = raw?.sheetEvalPayload() ?: return false
-    return runCatching { org.json.JSONObject(inner).optBoolean("signedIn") }.getOrDefault(false)
-}
-
 private data class SheetPageState(
     val loginFormPresent: Boolean,
     val captchaPresent: Boolean,
@@ -641,7 +659,7 @@ private data class SheetPageState(
 )
 
 private fun parseSheetStateResult(raw: String?): SheetPageState? {
-    val inner = raw?.sheetEvalPayload() ?: return null
+    val inner = raw?.sheetStatePayload() ?: return null
     return runCatching {
         val j = org.json.JSONObject(inner)
         SheetPageState(
@@ -653,6 +671,11 @@ private fun parseSheetStateResult(raw: String?): SheetPageState? {
         )
     }.getOrNull()
 }
+
+/** evaluateJavascript wraps a returned string in one level of JSON quoting. */
+private fun String.sheetStatePayload(): String? = runCatching {
+    org.json.JSONArray(this).optString(0)
+}.getOrNull()
 
 @Composable
 private fun AndroidViewWebView(

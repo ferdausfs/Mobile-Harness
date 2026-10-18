@@ -3980,6 +3980,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun zaiSignedInViaSheet() = zaiWebController.onSignedInViaSheet()
 
+    fun zaiSheetDiagnostics(diagnostics: com.jarves.mh.zweb.ZaiSheetDiagnostics) =
+        zaiWebController.publishSheetDiagnostics(diagnostics)
+
     fun zaiDisconnect() = zaiWebController.disconnect()
 
     fun zaiClearResult() {

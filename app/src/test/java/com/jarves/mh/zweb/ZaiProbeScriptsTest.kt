@@ -1,7 +1,11 @@
 package com.jarves.mh.zweb
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Test
 
 class ZaiProbeScriptsTest {
@@ -90,5 +94,77 @@ class ZaiProbeScriptsTest {
         val js = ZaiProbeScripts.buildStateProbe(config)
         assertFalse(js.contains("fileCard"))
         assertFalse(js.contains("userMessage"))
+    }
+
+    // ── Sign-in sheet automation scripts ──
+
+    private val sheetJson = """
+        {"loginFormMarker":["text:=Welcome to Z.ai","text:=Continue with Email"],
+         "captchaMarker":["#aliyunCaptcha-window-popup.window-show"],
+         "sidebarToggle":["#sidebar-toggle-button","button[aria-label='Toggle Sidebar']"],
+         "signInButton":["text-button:=sign in","button[aria-label='Sign in']"],
+         "authProbePath":"/api/v1/auths/"}
+    """.trimIndent()
+
+    @Test
+    fun `sheet selectors parse from the engine payload and reject junk`() {
+        val selectors = ZaiProbeScripts.parseSheetSelectors(sheetJson)
+        assertNotNull(selectors)
+        assertEquals(listOf("#sidebar-toggle-button", "button[aria-label='Toggle Sidebar']"), selectors!!.sidebarToggle)
+        assertEquals("/api/v1/auths/", selectors.authProbePath)
+        assertEquals(listOf("text:=Welcome to Z.ai"), selectors.loginFormMarker.take(1))
+        // junk payloads fall back to null so the sheet can degrade to hints only
+        assertNull(ZaiProbeScripts.parseSheetSelectors(null))
+        assertNull(ZaiProbeScripts.parseSheetSelectors(""))
+        assertNull(ZaiProbeScripts.parseSheetSelectors("not json {"))
+    }
+
+    @Test
+    fun `sheet probe carries selector groups and reports the login form without url markers`() {
+        val js = ZaiProbeScripts.buildSheetProbeScript(ZaiProbeScripts.parseSheetSelectors(sheetJson)!!)
+        assertTrue(js.contains("#sidebar-toggle-button"))
+        assertTrue(js.contains("text-button:=sign in"))
+        assertTrue(js.contains("#aliyunCaptcha-window-popup.window-show"))
+        assertTrue(js.contains("loginFormPresent"))
+        assertTrue(js.contains("captchaPresent"))
+        assertTrue(js.contains("sidebarFound"))
+        assertTrue(js.contains("signInFound"))
+    }
+
+    @Test
+    fun `click visible script scans fallbacks and skips url markers`() {
+        val selectors = ZaiProbeScripts.parseSheetSelectors(sheetJson)!!
+        val sidebar = ZaiProbeScripts.buildClickVisibleScript(selectors, "sidebarToggle")
+        assertTrue(sidebar.contains("#sidebar-toggle-button"))
+        assertTrue(sidebar.contains("getClientRects"))
+        assertTrue(sidebar.contains("group:'sidebarToggle'"))
+        // url-contains entries must never be clicked — they are not elements
+        assertFalse(sidebar.contains("url-contains:/auth") && sidebar.contains("click"))
+    }
+
+    @Test
+    fun `click visible script rejects non-clickable groups`() {
+        val selectors = ZaiProbeScripts.parseSheetSelectors(sheetJson)!!
+        try {
+            ZaiProbeScripts.buildClickVisibleScript(selectors, "captchaMarker")
+            fail("expected IllegalArgumentException")
+        } catch (expected: IllegalArgumentException) {
+            assertTrue(expected.message!!.contains("sidebarToggle"))
+        }
+    }
+
+    @Test
+    fun `text-button matcher is part of the shared picker helpers`() {
+        // The state probe (engine) and the sheet probe share HELPERS_JS; the
+        // text-button:= syntax must therefore be available everywhere.
+        val js = ZaiProbeScripts.buildStateProbe(config)
+        assertTrue(js.contains("text-button:="))
+    }
+
+    @Test
+    fun `auth probe for a raw path keeps the guest detection`() {
+        val js = ZaiProbeScripts.buildAuthProbeForPath("/api/v1/auths/")
+        assertTrue(js.contains("/api/v1/auths/"))
+        assertTrue(js.contains("guest"))
     }
 }

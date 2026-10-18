@@ -32,8 +32,20 @@ val appUpdateManifestUrl =
 val runtimeBundleDir = rootProject.layout.projectDirectory.dir("dist/runtime-bundles")
 val generatedRuntimeAssets = layout.buildDirectory.dir("generated/runtime-assets")
 
+/**
+ * Install-test builds only (-PmhSkipAgyAsset=true): produce the real app
+ * WITHOUT the 41 MB AGY runtime asset. Used to bisect on-device install
+ * failures (does size/asset layout matter?). Never set for a release build:
+ * the produced APK installs fine but Antigravity cannot install its runtime
+ * (the embedded asset has no online fallback). The produced APK marks itself
+ * via its versionName override (-PappVersionName=…-noagy-test).
+ */
+val skipAgyAsset = providers.gradleProperty("mhSkipAgyAsset").orNull?.toBoolean() == true
+
 val prepareBundledAgentAssets = tasks.register<Sync>("prepareBundledAgentAssets") {
-    from(runtimeBundleDir.file("pocketdev-agy-arm64-2026.09.1.tar.zst"))
+    if (!skipAgyAsset) {
+        from(runtimeBundleDir.file("pocketdev-agy-arm64-2026.09.1.tar.zst"))
+    }
     into(generatedRuntimeAssets.map { it.dir("shared/runtime") })
 }
 
@@ -46,6 +58,10 @@ val prepareBundledAgentAssets = tasks.register<Sync>("prepareBundledAgentAssets"
 // runtime error.
 val ensureBundledAgentAssetsPresent = tasks.register("ensureBundledAgentAssetsPresent") {
     doLast {
+        if (skipAgyAsset) {
+            println("mhSkipAgyAsset=true: install-test build, AGY runtime asset intentionally excluded")
+            return@doLast
+        }
         val agyBundle = runtimeBundleDir.file("pocketdev-agy-arm64-2026.09.1.tar.zst").asFile
         check(agyBundle.isFile) {
             """

@@ -1479,10 +1479,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /** Called from the first-launch setup screen; persists the agent choice for setup and Settings. */
     fun selectAgent(kind: AgentKind) {
         if (_state.value.agentKind == kind) return
-        if (_state.value.isRunning) {
-            _state.update { it.copy(toastMessage = "Stop the current agent before switching.") }
-            return
+        when (agentSwitchBlock(_state.value.isRunning, _state.value.agentInstalling, kind)) {
+            AgentSwitchBlock.RUNNING ->
+                _state.update { it.copy(toastMessage = "Stop the current agent before switching.") }
+            AgentSwitchBlock.INSTALLING_OTHER -> {
+                val installing = _state.value.agentInstalling
+                _state.update {
+                    it.copy(toastMessage = "Installing ${installing?.title} — wait for it to finish.")
+                }
+            }
+            AgentSwitchBlock.NONE -> selectAgentUnblocked(kind)
         }
+    }
+
+    private fun selectAgentUnblocked(kind: AgentKind) {
         val selectingInitialAgent = !preferences.runtimeSetupComplete
         preferences.agentKind = kind.stableId
         if (selectingInitialAgent) preferences.primaryAgentKind = kind.stableId
@@ -1503,7 +1513,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     /** Installs the other agent on demand (Settings) with live progress, then switches to it. */
     fun installAgent(kind: AgentKind) {
-        if (_state.value.agentInstalling != null) return
+        if (_state.value.agentInstalling != null) {
+            val installing = _state.value.agentInstalling
+            _state.update {
+                it.copy(toastMessage = "Installing ${installing?.title} — wait for it to finish.")
+            }
+            return
+        }
         if (_state.value.isRunning) {
             _state.update { it.copy(toastMessage = "Stop the current agent before switching.") }
             return

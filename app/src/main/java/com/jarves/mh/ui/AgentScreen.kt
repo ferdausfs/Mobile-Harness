@@ -854,26 +854,40 @@ fun AgentScreen(
                                     border = if (isSelected) BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.45f)) else null,
                                     modifier = Modifier
                                         .weight(1f)
-                                        .clickable(enabled = state.agentInstalling == null) {
-                                            when {
-                                                // Installed: switch right away. A rejected switch
-                                                // (task running) is reported by selectAgent() via
-                                                // toast; the viewed tab only moves when the switch
-                                                // can actually happen so the provider section never
-                                                // blanks out mid-task.
-                                                isInstalled -> {
+                                        .clickable {
+                                            // Tabs stay responsive at all times: every tap is
+                                            // classified by AgentTabPolicy and either acts or is
+                                            // explained by a toast — never a silent no-op.
+                                            when (
+                                                agentTabTapAction(
+                                                    agent,
+                                                    isInstalled,
+                                                    state.isRunning,
+                                                    state.agentInstalling,
+                                                )
+                                            ) {
+                                                AgentTabTapAction.SWITCH -> {
+                                                    // The viewed tab only moves when the switch can
+                                                    // actually happen so the provider section never
+                                                    // blanks out mid-task; selectAgent() reports any
+                                                    // authoritative rejection via toast.
                                                     if (!state.isRunning) viewedAgent = agent
                                                     onSelectAgent(agent)
                                                 }
                                                 // Not installed and idle: show this tab's install
                                                 // card and start the install with live progress.
                                                 // installAgent() switches to it once it succeeds.
-                                                !state.isRunning -> {
+                                                AgentTabTapAction.SHOW_INSTALL -> {
                                                     viewedAgent = agent
                                                     onInstallAgent(agent)
                                                 }
-                                                // Task running: installAgent() refuses with a toast.
-                                                else -> onInstallAgent(agent)
+                                                // This tab's own install is running: reveal its card.
+                                                AgentTabTapAction.SHOW_INSTALL_PROGRESS -> viewedAgent = agent
+                                                // Blocked (other install running / task running):
+                                                // installAgent() explains via toast.
+                                                AgentTabTapAction.REFUSED_INSTALLING,
+                                                AgentTabTapAction.REFUSED_RUNNING,
+                                                -> onInstallAgent(agent)
                                             }
                                         },
                                 ) {
@@ -900,7 +914,11 @@ fun AgentScreen(
                         }
                     }
 
-                    if (state.agentInstalling == viewedAgent) {
+                    // Keyed on the install being in flight (not on which tab is
+                    // viewed) so progress started anywhere — including Settings —
+                    // is always visible and the disabled-looking tabs always have
+                    // an explanation on screen.
+                    if (state.agentInstalling != null) {
                         Spacer(Modifier.height(6.dp))
                         Surface(
                             shape = RoundedCornerShape(12.dp),
@@ -977,7 +995,6 @@ fun AgentScreen(
                                 Spacer(Modifier.height(12.dp))
                                 Button(
                                     onClick = { onInstallAgent(viewedAgent) },
-                                    enabled = state.agentInstalling == null,
                                     modifier = Modifier.fillMaxWidth(),
                                     shape = RoundedCornerShape(12.dp),
                                 ) {
@@ -987,7 +1004,7 @@ fun AgentScreen(
                                 // attempt; agentMessage is only cleared/replaced when the
                                 // next install starts, so it always refers to this card.
                                 val installFailure = state.agentMessage
-                                if (state.agentInstalling == null && installFailure != null) {
+                                if (installFailure != null) {
                                     Spacer(Modifier.height(10.dp))
                                     Text(
                                         installFailure,
@@ -1004,8 +1021,38 @@ fun AgentScreen(
 
             // ── 2. Primary Configuration Card (Antigravity OR Provider) ──
             item {
-                if (!viewedAgentInstalled || viewedAgent != state.agentKind) {
-                    // Installation/selection guidance is shown directly below the tabs.
+                if (!viewedAgentInstalled) {
+                    // Installation/selection guidance is the install card shown
+                    // directly below the tabs.
+                } else if (viewedAgent != state.agentKind) {
+                    // Viewing an installed but not-yet-active agent. Never leave a
+                    // blank void here (a rejected switch used to render nothing at
+                    // all — the "tab tap does nothing" symptom); explain the state.
+                    Surface(
+                        shape = RoundedCornerShape(14.dp),
+                        color = MaterialTheme.colorScheme.surface,
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.65f)),
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Column(Modifier.padding(16.dp)) {
+                            Text(
+                                "You are viewing ${viewedAgent.title}",
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.Bold,
+                            )
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                if (state.isRunning) {
+                                    "Stop the running ${state.agentKind.title} task to switch agents."
+                                } else {
+                                    "Switching to ${viewedAgent.title}…"
+                                },
+                                fontSize = 12.sp,
+                                lineHeight = 17.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
                 } else if (state.agentKind == AgentKind.ANTIGRAVITY) {
                     AgentAntigravityCard(
                         state = state,

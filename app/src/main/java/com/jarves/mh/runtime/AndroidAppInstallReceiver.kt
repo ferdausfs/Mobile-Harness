@@ -6,6 +6,9 @@ import android.content.Intent
 import android.content.pm.PackageInstaller
 import android.os.Build
 import android.widget.Toast
+import com.jarves.mh.update.InstallDiagnostics
+import com.jarves.mh.update.InstallDiagnostics.InstallResultRecord
+import com.jarves.mh.update.InstallResultStore
 
 class AndroidAppInstallReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
@@ -26,17 +29,10 @@ class AndroidAppInstallReceiver : BroadcastReceiver() {
             }
             return
         }
+        recordResult(context, intent, status)
         if (status != PackageInstaller.STATUS_SUCCESS) {
             val raw = intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE).orEmpty()
-            val message = when {
-                // Historic releases shipped several signing keys; users updating
-                // across that boundary hit INSTALL_FAILED_UPDATE_INCOMPATIBLE.
-                raw.contains("INSTALL_FAILED_UPDATE_INCOMPATIBLE") ->
-                    "Mobile Harness was installed with a different signing key. Uninstall it once, then install this APK again."
-                raw.contains("INSTALL_FAILED_VERSION_DOWNGRADE") ->
-                    "A newer version of Mobile Harness is already installed on this phone."
-                else -> raw.ifEmpty { "Installation failed" }
-            }
+            val message = InstallDiagnostics.friendlyInstallFailure(status, raw)
             Toast.makeText(context, message, Toast.LENGTH_LONG).show()
             return
         }
@@ -55,5 +51,35 @@ class AndroidAppInstallReceiver : BroadcastReceiver() {
             launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             context.startActivity(launch)
         }
+    }
+
+    /**
+     * Persist the exact session outcome so Settings → Install diagnostics can
+     * show the numeric EXTRA_STATUS and the raw EXTRA_STATUS_MESSAGE instead
+     * of a dead-end "App not installed".
+     */
+    private fun recordResult(context: Context, intent: Intent, status: Int) {
+        val sessionId = intent.getIntExtra(PackageInstaller.EXTRA_SESSION_ID, -1)
+        val raw = intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE).orEmpty()
+        val other = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            intent.getStringExtra(PackageInstaller.EXTRA_OTHER_PACKAGE_NAME).orEmpty()
+        } else {
+            @Suppress("DEPRECATION")
+            intent.getStringExtra(PackageInstaller.EXTRA_OTHER_PACKAGE_NAME).orEmpty()
+        }
+        val apkName = intent.getStringExtra(AndroidAppInstaller.EXTRA_APK_NAME).orEmpty()
+        val apkSize = intent.getLongExtra(AndroidAppInstaller.EXTRA_APK_SIZE, -1L)
+        InstallResultStore.save(
+            context,
+            InstallResultRecord(
+                atMillis = System.currentTimeMillis(),
+                sessionId = sessionId,
+                statusCode = status,
+                statusMessage = raw,
+                apkName = apkName,
+                apkSizeBytes = apkSize,
+                otherPackageName = other,
+            ),
+        )
     }
 }

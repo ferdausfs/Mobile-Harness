@@ -55,6 +55,8 @@ object AndroidAppInstaller {
                     .setPackage(context.packageName)
                     .addFlags(Intent.FLAG_RECEIVER_FOREGROUND)
                     .putExtra(PackageInstaller.EXTRA_SESSION_ID, sessionId)
+                    .putExtra(EXTRA_APK_NAME, apk.name)
+                    .putExtra(EXTRA_APK_SIZE, apk.length())
                 val mutabilityFlag = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                     PendingIntent.FLAG_MUTABLE
                 } else {
@@ -73,6 +75,10 @@ object AndroidAppInstaller {
     }
 
     const val ACTION_INSTALL_RESULT = "com.jarves.mh.action.APK_INSTALL_RESULT"
+
+    /** Bookkeeping for the install diagnostics record (not PackageInstaller extras). */
+    const val EXTRA_APK_NAME = "com.jarves.mh.extra.APK_NAME"
+    const val EXTRA_APK_SIZE = "com.jarves.mh.extra.APK_SIZE"
 
     private fun isMiuiDevice(): Boolean = android.os.Build.MANUFACTURER.lowercase() in
         setOf("xiaomi", "redmi", "poco")

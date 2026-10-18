@@ -89,8 +89,22 @@ object ZaiProbeScripts {
     }
 
     /**
-     * Fetches the session auth probe on the page origin (cookies included) and reports signed-in state.
+     * Fetches the session auth probe on the page origin and reports signed-in state.
      * The path comes from the selector config (`page.authProbePath`) — never hardcoded.
+     *
+     * v1.0.21: mirrors chat.z.ai's own session check (verified in the prod
+     * bundle): `Authorization: Bearer <localStorage.token>` when a token exists,
+     * plus a cookie-only fetch as a fallback — either response confirming a real
+     * (non-guest) user means signed in. The previous cookie-only probe always
+     * read "guest" after a Google sign-in whose token only reached localStorage,
+     * because the server answers unauthenticated requests with a FRESH GUEST
+     * user (HTTP 200, role:"guest") instead of a 401.
+     *
+     * Secrets: the script never returns the token value or the account email —
+     * presence booleans, the role string and truncated error text only. The
+     * top-level `signedIn` boolean is a compat mirror of
+     * [com.jarves.mh.zweb.ZaiAuthProbeClassifier.classify] for callers that
+     * have not switched to the parsed sources yet.
      */
     fun buildAuthProbe(config: ZaiWebConfig): String = buildAuthProbeForPath(config.authProbePath)
 
@@ -98,14 +112,37 @@ object ZaiProbeScripts {
         val pathJson = JSONObject.quote(path)
         return """
             (function(){
-              return fetch($pathJson,{credentials:'include',headers:{'Accept':'application/json'}})
-                .then(function(r){return r.json();})
-                .then(function(j){
-                  var role=(j&&j.role)||''; var email=(j&&j.email)||'';
-                  var guest=(role==='guest')||(/\bguest[0-9.-]*@guest\.com$/i.test(email));
-                  return JSON.stringify({signedIn: !!j && !j.error && !guest, email: guest?'':email, role: role});
-                })
-                .catch(function(e){return JSON.stringify({signedIn:false, email:'', error:String(e)});});
+              var path=$pathJson;
+              function slim(j,status){
+                if(j===null||typeof j!=='object')return{status:status,shape:'empty',role:'',emailPresent:false,guest:false,error:''};
+                if(j.detail!=null&&j.detail!==undefined)return{status:status,shape:'detail',role:'',emailPresent:false,guest:false,error:String(j.detail).slice(0,160)};
+                var role=(typeof j.role==='string')?j.role:'';
+                var email=(typeof j.email==='string')?j.email:'';
+                return{status:status,shape:'user',role:role,emailPresent:!!email,
+                  guest:(role==='guest')||/guest[0-9.\-]*@guest\.com$/i.test(email),error:''};
+              }
+              function call(headers){
+                return fetch(path,{credentials:'include',headers:headers})
+                  .then(function(r){
+                    return r.json().then(function(j){return slim(j,r.status);},function(){return slim(null,r.status);});
+                  })
+                  .catch(function(e){return{status:null,shape:'error',role:'',emailPresent:false,guest:false,error:String(e).slice(0,160)};});
+              }
+              var ls=null;
+              try{ls=window.localStorage?window.localStorage.getItem('token'):null;}catch(e){ls=null;}
+              var bh={Accept:'application/json'};
+              if(ls){bh.Authorization='Bearer '+ls;}
+              return Promise.all([call(bh),call({Accept:'application/json'})]).then(function(rs){
+                var b=rs[0],c=rs[1];
+                var bu=!!b&&b.shape==='user'&&!b.guest&&b.role!=='';
+                var cu=!!c&&c.shape==='user'&&!c.guest&&c.role!=='';
+                return JSON.stringify({
+                  signedIn:bu||cu,
+                  hasLocalToken:!!ls,
+                  bearer:b,
+                  cookie:c
+                });
+              });
             })()
         """.trimIndent()
     }

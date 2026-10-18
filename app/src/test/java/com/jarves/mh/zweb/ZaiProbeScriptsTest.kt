@@ -167,4 +167,39 @@ class ZaiProbeScriptsTest {
         assertTrue(js.contains("/api/v1/auths/"))
         assertTrue(js.contains("guest"))
     }
+
+    @Test
+    fun `auth probe sends the localStorage token as Bearer plus a cookie-only fetch`() {
+        // Mirrors the site's own session check (prod bundle): Bearer from
+        // localStorage.token when present, cookie-only fetch as the fallback.
+        val js = ZaiProbeScripts.buildAuthProbeForPath("/api/v1/auths/")
+        assertTrue(js.contains("localStorage.getItem('token')"))
+        assertTrue(js.contains("'Bearer '+ls"))
+        assertTrue(js.contains("credentials:'include'"))
+        assertTrue(js.contains("Promise.all"))
+    }
+
+    @Test
+    fun `auth probe never exposes the token or email value`() {
+        val js = ZaiProbeScripts.buildAuthProbeForPath("/api/v1/auths/")
+        // The token value only ever flows into the Authorization header — the
+        // payload carries only its presence boolean; email becomes a boolean too.
+        assertTrue(js.contains("emailPresent:!!email"))
+        assertTrue(js.contains("hasLocalToken:!!ls"))
+        assertFalse(js.contains("token:ls"))
+        assertFalse(js.contains("email:guest"))
+    }
+
+    @Test
+    fun `auth probe payload keeps a compat signedIn boolean for older callers`() {
+        val js = ZaiProbeScripts.buildAuthProbeForPath("/api/v1/auths/")
+        assertTrue(js.contains("signedIn:bu||cu"))
+    }
+
+    @Test
+    fun `auth probe strips detail bodies and truncates error text`() {
+        val js = ZaiProbeScripts.buildAuthProbeForPath("/api/v1/auths/")
+        assertTrue(js.contains("shape:'detail'"))
+        assertTrue(js.contains("slice(0,160)"))
+    }
 }

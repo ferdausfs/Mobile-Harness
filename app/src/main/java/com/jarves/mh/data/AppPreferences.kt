@@ -11,7 +11,6 @@ import com.jarves.mh.model.ProviderKind
 import com.jarves.mh.model.ProviderProfile
 import com.jarves.mh.model.FailoverProvider
 import com.jarves.mh.model.defaultDshApiForProvider
-import com.jarves.mh.model.projectSlug
 import com.jarves.mh.model.providersForAgent
 import org.json.JSONArray
 import org.json.JSONObject
@@ -254,75 +253,26 @@ class AppPreferences(private val context: Context) : AppPreferencesBridge {
     private fun providerPrefix(agent: AgentKind): String = "provider_${agent.stableId.replace('-', '_')}_"
 
     fun saveProjects(projects: List<Project>) {
-        val arr = JSONArray()
-        projects.forEach { p ->
-            arr.put(JSONObject().apply {
-                put("id", p.id)
-                put("name", p.name)
-                put("description", p.description)
-                put("language", p.language)
-                put("slug", p.slug)
-                put("rootPath", p.rootPath)
-                put("updatedAtMillis", p.updatedAtMillis)
-                put("kind", p.kind.name)
-            })
-        }
-        preferences.edit().putString("projects_json", arr.toString()).apply()
+        preferences.edit().putString("projects_json", ProjectStoreJson.toJson(projects)).apply()
     }
 
     fun loadProjects(): List<Project> {
         val raw = preferences.getString("projects_json", null) ?: return emptyList()
-        var needsSave = false
-        val list = runCatching {
-            val arr = JSONArray(raw)
-            val usedSlugs = mutableSetOf<String>()
-            (0 until arr.length()).map { i ->
-                val obj = arr.getJSONObject(i)
-                val id = obj.getString("id")
-                val name = obj.getString("name")
-                val storedKind = obj.optString("kind", ProjectKind.PROJECT.name)
-                if (!obj.has("kind") || storedKind == "QUICK_CHAT") needsSave = true
-                val requestedSlug = obj.optString("slug").ifBlank { projectSlug(name) }
-                var slug = requestedSlug
-                if (!usedSlugs.add(slug)) {
-                    slug = "$requestedSlug-${id.take(6)}"
-                    var suffix = 2
-                    while (!usedSlugs.add(slug)) slug = "$requestedSlug-${suffix++}"
-                }
-                if (slug != obj.optString("slug")) needsSave = true
-                var millis = obj.optLong("updatedAtMillis", 0L)
-                if (millis <= 0L) {
-                    val workspaceDir = File(context.filesDir, "workspaces/$id")
-                    millis = if (workspaceDir.exists() && workspaceDir.lastModified() > 0L) {
-                        workspaceDir.lastModified()
-                    } else {
-                        System.currentTimeMillis() - 3600_000L
-                    }
-                    needsSave = true
-                }
-                Project(
-                    id = id,
-                    name = name,
-                    description = obj.optString("description", ""),
-                    language = obj.optString("language", ""),
-                    slug = slug,
-                    rootPath = obj.optString("rootPath", "").takeIf { root ->
-                        root.isBlank() || (!root.startsWith('/') && !root.contains(".."))
-                    } ?: "",
-                    updatedAtMillis = millis,
-                    kind = when (storedKind) {
-                        "QUICK_CHAT" -> ProjectKind.QUICK_PROJECT
-                        else -> runCatching { ProjectKind.valueOf(storedKind) }
-                            .getOrDefault(ProjectKind.PROJECT)
-                    },
-                )
+        // v1.0.31: parsing moved to the pure ProjectStoreJson — per-ENTRY
+        // tolerance (one malformed row no longer erases the whole list) and
+        // no exception can escape into startup.
+        val parsed = ProjectStoreJson.parse(raw) { id ->
+            val workspaceDir = File(context.filesDir, "workspaces/$id")
+            if (workspaceDir.exists() && workspaceDir.lastModified() > 0L) {
+                workspaceDir.lastModified()
+            } else {
+                -1L
             }
-        }.getOrDefault(emptyList())
-
-        if (needsSave && list.isNotEmpty()) {
-            saveProjects(list)
         }
-        return list
+        if (parsed.needsSave && parsed.projects.isNotEmpty()) {
+            saveProjects(parsed.projects)
+        }
+        return parsed.projects
     }
 
     /** Ordered backup providers used for automatic cross-provider failover. */

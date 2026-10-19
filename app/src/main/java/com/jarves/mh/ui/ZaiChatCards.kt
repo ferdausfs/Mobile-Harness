@@ -1,6 +1,8 @@
 package com.jarves.mh.ui
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
@@ -44,6 +46,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -59,6 +64,8 @@ import com.jarves.mh.zweb.ZaiPendingApply
 import com.jarves.mh.zweb.ZaiWorkspaceApply
 import com.jarves.mh.ui.theme.PocketGreen
 import com.jarves.mh.ui.theme.PocketOrange
+import com.jarves.mh.ui.theme.pocketPulse
+import com.jarves.mh.ui.theme.rememberReducedMotion
 
 /**
  * Chat-side cards for the Z.ai chat engine (v1.0.25): the terminal notice
@@ -358,6 +365,8 @@ fun ZaiLiveProcessCard(
 ) {
     var thinkingExpanded by rememberSaveable("zai-live-thinking") { mutableStateOf(false) }
     val hasThinking = !thinking.isNullOrBlank()
+    val reducedMotion = rememberReducedMotion()
+    val haptics = LocalHapticFeedback.current
     Column(Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 6.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
@@ -371,6 +380,16 @@ fun ZaiLiveProcessCard(
                     .wrapContentSize(Alignment.Center),
             )
             Spacer(Modifier.width(8.dp))
+            // Breathing phase dot: the at-a-glance "still working" signal
+            // (static under reduced motion).
+            Box(
+                Modifier.pocketPulse(
+                    PocketOrange,
+                    size = 7.dp,
+                    reducedMotion = reducedMotion,
+                ),
+            )
+            Spacer(Modifier.width(6.dp))
             Text(
                 phaseLabel?.takeIf { it.isNotBlank() } ?: "Z.ai is working",
                 fontWeight = FontWeight.SemiBold,
@@ -397,11 +416,19 @@ fun ZaiLiveProcessCard(
             )
         }
         if (hasThinking) {
+            val chevronRotation by animateFloatAsState(
+                targetValue = if (thinkingExpanded) 180f else 0f,
+                animationSpec = tween(durationMillis = if (reducedMotion) 0 else 180),
+                label = "zai-thinking-chevron",
+            )
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clickable { thinkingExpanded = !thinkingExpanded }
+                    .clickable {
+                        thinkingExpanded = !thinkingExpanded
+                        haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                    }
                     .padding(start = 30.dp, top = 4.dp, bottom = 2.dp),
             ) {
                 Text(
@@ -411,9 +438,11 @@ fun ZaiLiveProcessCard(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Icon(
-                    if (thinkingExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                    Icons.Default.ExpandMore,
                     contentDescription = if (thinkingExpanded) "Hide thinking" else "Show thinking",
-                    modifier = Modifier.size(16.dp),
+                    modifier = Modifier
+                        .size(16.dp)
+                        .graphicsLayer { rotationZ = chevronRotation },
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
@@ -499,6 +528,26 @@ fun ZaiModelPickerSheet(
                             Spacer(Modifier.width(8.dp))
                             Text("Reading the site's model dropdown…", fontSize = 12.sp)
                         }
+                        // Skeleton rows (polish: never a blank area) — static
+                        // placeholders while the site's list is being read.
+                        repeat(3) { index ->
+                            Surface(
+                                shape = RoundedCornerShape(10.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                Row(Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                                    Box(
+                                        Modifier
+                                            .size(width = (110 - index * 18).dp, height = 12.dp)
+                                            .background(
+                                                MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.18f),
+                                                RoundedCornerShape(6.dp),
+                                            ),
+                                    )
+                                }
+                            }
+                        }
                     }
                     persistedModels.isEmpty() -> {
                         Text(
@@ -509,13 +558,17 @@ fun ZaiModelPickerSheet(
                         )
                     }
                     else -> {
+                        val pickHaptics = LocalHapticFeedback.current
                         persistedModels.forEach { model ->
                             val selected = currentModel != null &&
                                 model.name.equals(currentModel, ignoreCase = true)
                             Surface(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .clickable(enabled = !pickRunning) { onPick(model.name) },
+                                    .clickable(enabled = !pickRunning) {
+                                        pickHaptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                        onPick(model.name)
+                                    },
                                 shape = RoundedCornerShape(10.dp),
                                 color = if (selected) {
                                     MaterialTheme.colorScheme.primaryContainer

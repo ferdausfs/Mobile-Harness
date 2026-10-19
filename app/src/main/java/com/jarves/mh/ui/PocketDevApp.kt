@@ -2143,6 +2143,12 @@ private fun RootScreenHost(
                     onZaiClearResult = viewModel::zaiClearResult,
                     onZaiSheetDiagnostics = viewModel::zaiSheetDiagnostics,
                     onZaiToggleChatEngine = viewModel::setZaiChatEngineActive,
+                    onZaiOpenModelPicker = viewModel::zaiOpenModelPicker,
+                    onZaiSyncSiteState = viewModel::zaiSyncSiteState,
+                    onZaiSetAutoThink = viewModel::zaiSetAutoThink,
+                    onZaiSetEffort = viewModel::zaiSetEffort,
+                    onZaiPickModel = viewModel::zaiPickModel,
+                    onZaiDismissModelPicker = viewModel::zaiDismissModelPicker,
                 )
                 RootScreen.SETTINGS -> SettingsScreen(
                     state = state,
@@ -3995,12 +4001,14 @@ private fun WorkspaceScreen(
             zaiCheckingConnection = state.zaiWeb.checkingConnection,
             zaiBusy = state.zaiWeb.busy,
             zaiCurrentModel = state.zaiWeb.currentModel,
+            zaiModels = state.zaiWeb.cachedModels.ifEmpty { state.zaiCachedModels },
             onPickEngine = onPickChatEngine,
             onSignIn = onZaiSignIn,
             onOpenModelPicker = {
                 showEnginePicker = false
                 onOpenZaiModelPicker()
             },
+            onPickModel = onZaiPickModel,
             onDismiss = { showEnginePicker = false },
         )
     }

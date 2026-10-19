@@ -203,6 +203,12 @@ fun AgentScreen(
     onZaiClearResult: () -> Unit = {},
     onZaiSheetDiagnostics: (com.jarves.mh.zweb.ZaiSheetDiagnostics) -> Unit = {},
     onZaiToggleChatEngine: (Boolean) -> Unit = {},
+    onZaiOpenModelPicker: () -> Unit = {},
+    onZaiSyncSiteState: () -> Unit = {},
+    onZaiSetAutoThink: (Boolean) -> Unit = {},
+    onZaiSetEffort: (String) -> Unit = {},
+    onZaiPickModel: (String) -> Unit = {},
+    onZaiDismissModelPicker: () -> Unit = {},
 ) {
     val scope = rememberCoroutineScope()
     var selectedKind by rememberSaveable(state.provider.kind) { mutableStateOf(state.provider.kind) }
@@ -805,7 +811,7 @@ fun AgentScreen(
                             Text("AI Agent", fontWeight = FontWeight.Bold, fontSize = 17.sp)
                             Text(
                                 when {
-                                    viewingZai -> "Z.ai Web · chat.z.ai"
+                                    viewingZai -> "Z.ai Web · " + (state.zaiWeb.currentModel ?: "chat.z.ai")
                                     isAntigravity -> "Antigravity · ${formatAntigravityModelName(state.antigravityModel)}"
                                     else -> "${state.agentKind.title} · ${model.ifBlank { selectedKind.title }}"
                                 },
@@ -1098,6 +1104,12 @@ fun AgentScreen(
                         onClearResult = onZaiClearResult,
                         onSheetDiagnostics = onZaiSheetDiagnostics,
                         onToggleChatEngine = onZaiToggleChatEngine,
+                        onOpenModelPicker = onZaiOpenModelPicker,
+                        onSyncSiteState = onZaiSyncSiteState,
+                        onSetAutoThink = onZaiSetAutoThink,
+                        onSetEffort = onZaiSetEffort,
+                        onPickModel = onZaiPickModel,
+                        onDismissModelPicker = onZaiDismissModelPicker,
                     )
                 } else if (!viewedAgentInstalled) {
                     // Installation/selection guidance is the install card shown
@@ -1373,48 +1385,16 @@ private fun AgentAntigravityCard(
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             Text("Google account", fontSize = 20.sp, fontWeight = FontWeight.Bold)
-            // Google Account Row
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(34.dp)
-                        .background(Color(0xFF34A853).copy(alpha = 0.14f), RoundedCornerShape(10.dp))
-                        .border(1.dp, Color(0xFF34A853).copy(alpha = 0.3f), RoundedCornerShape(10.dp)),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text("G", color = Color(0xFF34A853), fontWeight = FontWeight.Bold, fontSize = 15.sp)
-                }
-                Spacer(Modifier.width(10.dp))
-                Column(Modifier.weight(1f)) {
-                    val email = auth.accountEmail
-                    Text(
-                        email ?: if (auth.status == AntigravityAuthStatus.SIGNED_IN) "Connected" else "Not signed in",
-                        fontWeight = FontWeight.SemiBold,
-                        fontSize = 13.sp,
-                        color = MaterialTheme.colorScheme.onSurface,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    Text(
-                        if (auth.status == AntigravityAuthStatus.SIGNED_IN) "Connected with Google" else "Required for Antigravity",
-                        fontSize = 11.sp,
-                        color = if (auth.status == AntigravityAuthStatus.SIGNED_IN) Color(0xFF2E9D72) else MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                if (auth.status == AntigravityAuthStatus.SIGNED_IN) {
-                    Text(
-                        "Disconnect",
-                        fontSize = 11.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier
-                            .clickable { onLogout() }
-                            .padding(horizontal = 6.dp, vertical = 4.dp),
-                    )
-                }
-            }
+            // Google Account Row (shared piece, also used by the Z.ai tab)
+            AgentAccountRow(
+                badge = "G",
+                badgeColor = Color(0xFF34A853),
+                title = auth.accountEmail
+                    ?: if (auth.status == AntigravityAuthStatus.SIGNED_IN) "Connected" else "Not signed in",
+                subtitle = if (auth.status == AntigravityAuthStatus.SIGNED_IN) "Connected with Google" else "Required for Antigravity",
+                subtitleColor = if (auth.status == AntigravityAuthStatus.SIGNED_IN) Color(0xFF2E9D72) else MaterialTheme.colorScheme.onSurfaceVariant,
+                onDisconnect = if (auth.status == AntigravityAuthStatus.SIGNED_IN) onLogout else null,
+            )
 
             // Authentication actions if not signed in
             when (auth.status) {
@@ -1463,97 +1443,33 @@ private fun AgentAntigravityCard(
             if (auth.status == AntigravityAuthStatus.SIGNED_IN) {
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))
 
-                // Active Intelligence Model Tile
+                // Active Intelligence Model Tile (shared piece)
                 Column(modifier = Modifier.fillMaxWidth()) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text(
-                            "Active Intelligence Model",
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Medium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.weight(1f),
-                        )
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier
-                                .clickable(enabled = !state.antigravityModelsLoading) { onRefreshModels() }
-                                .padding(start = 6.dp, top = 2.dp, bottom = 2.dp),
-                        ) {
-                            if (state.antigravityModelsLoading) {
-                                CircularProgressIndicator(Modifier.size(11.dp), strokeWidth = 1.4.dp)
-                                Spacer(Modifier.width(4.dp))
-                            }
-                            Text(
-                                "Sync",
-                                fontSize = 11.sp,
-                                color = PocketOrange,
-                                fontWeight = FontWeight.SemiBold,
-                            )
-                        }
-                    }
+                    val currentModel = state.antigravityModel.ifBlank { "Select model" }
+                    AgentSyncLabel(
+                        label = "Active Intelligence Model",
+                        loading = state.antigravityModelsLoading,
+                        onSync = onRefreshModels,
+                    )
                     Spacer(Modifier.height(8.dp))
-                    Surface(
-                        shape = RoundedCornerShape(14.dp),
-                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
-                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { onOpenModelSheet() },
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(12.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(32.dp)
-                                    .background(PocketOrange.copy(alpha = 0.12f), RoundedCornerShape(9.dp)),
-                                contentAlignment = Alignment.Center,
-                            ) {
-                                Icon(
-                                    Icons.Default.AutoAwesome,
-                                    contentDescription = null,
-                                    tint = PocketOrange,
-                                    modifier = Modifier.size(16.dp),
-                                )
-                            }
-                            Spacer(Modifier.width(10.dp))
-                            Column(Modifier.weight(1f)) {
-                                val currentModel = state.antigravityModel.ifBlank { "Select model" }
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Text(
-                                        formatAntigravityModelName(currentModel),
-                                        modifier = Modifier.weight(1f),
-                                        fontWeight = FontWeight.SemiBold,
-                                        fontSize = 14.sp,
-                                        color = MaterialTheme.colorScheme.onSurface,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                    )
-                                }
-                                Text(
-                                    currentModel,
-                                    fontSize = 11.sp,
-                                    fontFamily = FontFamily.Monospace,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                            }
-                            Spacer(Modifier.width(6.dp))
+                    AgentModelTile(
+                        displayName = formatAntigravityModelName(currentModel),
+                        monoSub = currentModel,
+                        badge = {
                             Icon(
-                                Icons.Default.KeyboardArrowDown,
-                                contentDescription = "Choose model",
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                Icons.Default.AutoAwesome,
+                                contentDescription = null,
+                                tint = PocketOrange,
+                                modifier = Modifier.size(16.dp),
                             )
-                        }
-                    }
+                        },
+                        onClick = onOpenModelSheet,
+                    )
                 }
 
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))
 
-                // Reasoning Depth (Effort) Segmented Capsule
+                // Reasoning Depth (Effort) Segmented Capsule (shared piece)
                 Column(modifier = Modifier.fillMaxWidth()) {
                     val effortCaption = when (state.antigravityEffort) {
                         "low" -> "Fast response · light reasoning"
@@ -1580,64 +1496,20 @@ private fun AgentAntigravityCard(
                         )
                     }
                     Spacer(Modifier.height(8.dp))
-                    Surface(
-                        shape = RoundedCornerShape(12.dp),
-                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
-                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(3.dp),
-                            horizontalArrangement = Arrangement.spacedBy(3.dp),
-                        ) {
-                            listOf("low", "medium", "high").forEach { effort ->
-                                val isSelected = state.antigravityEffort == effort
-                                Surface(
-                                    shape = RoundedCornerShape(9.dp),
-                                    color = if (isSelected) PocketOrange else Color.Transparent,
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .clickable { onSetEffort(effort) },
-                                ) {
-                                    Box(
-                                        modifier = Modifier.padding(vertical = 7.dp),
-                                        contentAlignment = Alignment.Center,
-                                    ) {
-                                        Text(
-                                            effort.replaceFirstChar { if (it.isLowerCase()) it.titlecase(java.util.Locale.ROOT) else it.toString() },
-                                            fontSize = 12.sp,
-                                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                                            color = if (isSelected) Color(0xFF241107) else MaterialTheme.colorScheme.onSurfaceVariant,
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    AgentSegmentedCapsule(
+                        options = listOf("low", "medium", "high"),
+                        selected = state.antigravityEffort,
+                        onSelect = onSetEffort,
+                    )
                 }
             }
 
             if (auth.status == AntigravityAuthStatus.SIGNED_IN) {
-                OutlinedButton(
-                    onClick = onTest,
+                AgentTestConnectionButton(
+                    loading = state.apiPingStatus == ApiPingStatus.PINGING,
                     enabled = state.apiPingStatus != ApiPingStatus.PINGING,
-                    modifier = Modifier.fillMaxWidth().height(46.dp),
-                    shape = RoundedCornerShape(13.dp),
-                    border = BorderStroke(1.dp, PocketOrange.copy(alpha = 0.7f)),
-                ) {
-                    if (state.apiPingStatus == ApiPingStatus.PINGING) {
-                        CircularProgressIndicator(Modifier.size(15.dp), strokeWidth = 1.8.dp, color = PocketOrange)
-                        Spacer(Modifier.width(8.dp))
-                    } else {
-                        Icon(Icons.Default.Refresh, null, Modifier.size(16.dp), tint = PocketOrange)
-                        Spacer(Modifier.width(8.dp))
-                    }
-                    Text(
-                        if (state.apiPingStatus == ApiPingStatus.PINGING) "Testing connection…" else "Test connection",
-                        color = PocketOrange,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                }
+                    onClick = onTest,
+                )
 
                 state.apiPingMessage?.takeIf { state.apiPingStatus != ApiPingStatus.IDLE }?.let { message ->
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1659,14 +1531,7 @@ private fun AgentAntigravityCard(
                 }
             }
 
-            Text(
-                "Automatic tool approval · Runs inside the private Linux workspace",
-                fontSize = 10.sp,
-                lineHeight = 14.sp,
-                textAlign = TextAlign.Center,
-                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
-                modifier = Modifier.fillMaxWidth(),
-            )
+            AgentFooterNote(listOf("Automatic tool approval · Runs inside the private Linux workspace"))
         }
     }
 }

@@ -71,11 +71,13 @@ import com.jarves.mh.ui.theme.PocketOrange
 import com.jarves.mh.zweb.AuthProbePollPolicy
 import com.jarves.mh.zweb.ZaiAuthProbeClassifier
 import com.jarves.mh.zweb.ZaiDiagnostics
+import com.jarves.mh.zweb.ZaiModelCatalog
 import com.jarves.mh.zweb.ZaiProbeScripts
 import com.jarves.mh.zweb.probeTimeoutVerdict
 import com.jarves.mh.zweb.runAuthProbeScript
 import com.jarves.mh.zweb.ZaiPromptBuilder
 import com.jarves.mh.zweb.ZaiRunPhase
+import com.jarves.mh.zweb.ZaiThinkControls
 import com.jarves.mh.zweb.ZaiSheetDiagnostics
 import com.jarves.mh.zweb.ZaiSheetUserAgent
 import com.jarves.mh.zweb.ZaiWebUiState
@@ -106,6 +108,12 @@ fun AgentZaiCard(
     onClearResult: () -> Unit,
     onSheetDiagnostics: (ZaiSheetDiagnostics) -> Unit = {},
     onToggleChatEngine: (Boolean) -> Unit = {},
+    onOpenModelPicker: () -> Unit = {},
+    onSyncSiteState: () -> Unit = {},
+    onSetAutoThink: (Boolean) -> Unit = {},
+    onSetEffort: (String) -> Unit = {},
+    onPickModel: (String) -> Unit = {},
+    onDismissModelPicker: () -> Unit = {},
 ) {
     val zai = state.zaiWeb
     var task by remember { mutableStateOf("") }
@@ -114,6 +122,15 @@ fun AgentZaiCard(
     // config hot-update) so the card never shows a stale unknown state.
     LaunchedEffect(Unit) {
         if (zai.signedIn == null && !zai.checkingConnection) onCheckConnection()
+    }
+
+    // First successful sign-in in this session: read the site's model list and
+    // its own reasoning controls once, so the Antigravity-style sections have
+    // real data (or hide themselves when the site offers nothing).
+    LaunchedEffect(zai.signedIn) {
+        if (zai.signedIn == true && zai.cachedModels.isEmpty() && zai.thinkControls == null && !zai.busy) {
+            onSyncSiteState()
+        }
     }
 
     Surface(
@@ -128,53 +145,22 @@ fun AgentZaiCard(
         ) {
             Text("Z.ai account", fontSize = 20.sp, fontWeight = FontWeight.Bold)
 
-            // ── Account row (mirrors the Google account row) ──
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(34.dp)
-                        .background(PocketOrange.copy(alpha = 0.14f), RoundedCornerShape(10.dp))
-                        .border(1.dp, PocketOrange.copy(alpha = 0.3f), RoundedCornerShape(10.dp)),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text("Z", color = PocketOrange, fontWeight = FontWeight.Bold, fontSize = 15.sp)
-                }
-                Spacer(Modifier.width(10.dp))
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        zai.accountEmail
-                            ?: if (zai.signedIn == true) "Connected" else "Not signed in",
-                        fontWeight = FontWeight.SemiBold,
-                        fontSize = 13.sp,
-                        color = MaterialTheme.colorScheme.onSurface,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    Text(
-                        when {
-                            zai.checkingConnection -> "Checking chat.z.ai…"
-                            zai.signedIn == true -> "Connected with chat.z.ai"
-                            zai.signedIn == false -> "Required for Z.ai Web"
-                            else -> "Sign in with your free Z.ai account"
-                        },
-                        fontSize = 11.sp,
-                        color = if (zai.signedIn == true) Color(0xFF2E9D72) else MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                if (zai.signedIn == true) {
-                    Icon(
-                        Icons.Default.Logout,
-                        contentDescription = "Disconnect",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier
-                            .size(18.dp)
-                            .clickable { onDisconnect() },
-                    )
-                }
-            }
+            // ── Account row (shared piece — same visual system as Antigravity) ──
+            AgentAccountRow(
+                badge = "Z",
+                badgeColor = PocketOrange,
+                title = zai.accountEmail
+                    ?: zai.accountName
+                    ?: if (zai.signedIn == true) "Connected" else "Not signed in",
+                subtitle = when {
+                    zai.checkingConnection -> "Checking chat.z.ai…"
+                    zai.signedIn == true -> "Connected with chat.z.ai"
+                    zai.signedIn == false -> "Required for Z.ai Web"
+                    else -> "Sign in with your free Z.ai account"
+                },
+                subtitleColor = if (zai.signedIn == true) Color(0xFF2E9D72) else MaterialTheme.colorScheme.onSurfaceVariant,
+                onDisconnect = if (zai.signedIn == true) onDisconnect else null,
+            )
 
             // ── Sign-in / status actions ──
             if (zai.checkingConnection) {
@@ -227,27 +213,99 @@ fun AgentZaiCard(
             if (zai.signedIn == true) {
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))
 
-                // ── Connection test (mirrors the Antigravity test button) ──
-                OutlinedButton(
-                    onClick = onTest,
-                    enabled = !zai.busy,
-                    modifier = Modifier.fillMaxWidth().height(46.dp),
-                    shape = RoundedCornerShape(13.dp),
-                    border = BorderStroke(1.dp, PocketOrange.copy(alpha = 0.7f)),
-                ) {
-                    if (zai.testRunning) {
-                        CircularProgressIndicator(Modifier.size(15.dp), strokeWidth = 1.8.dp, color = PocketOrange)
-                        Spacer(Modifier.width(8.dp))
-                    } else {
-                        Icon(Icons.Default.Refresh, null, Modifier.size(16.dp), tint = PocketOrange)
-                        Spacer(Modifier.width(8.dp))
-                    }
-                    Text(
-                        if (zai.testRunning) "Testing connection…" else "Test connection",
-                        color = PocketOrange,
-                        fontWeight = FontWeight.SemiBold,
+                // ── Active Intelligence Model (shared pieces, site-driven) ──
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    AgentSyncLabel(
+                        label = "Active Intelligence Model",
+                        loading = zai.modelPickRunning,
+                        onSync = onSyncSiteState,
                     )
+                    Spacer(Modifier.height(8.dp))
+                    AgentModelTile(
+                        displayName = zai.currentModel ?: "Tap Sync to read the site's model",
+                        monoSub = zai.currentModel ?: "chat.z.ai · model label",
+                        badge = {
+                            Text("Z", color = PocketOrange, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                        },
+                        enabled = !zai.busy && !zai.modelPickRunning,
+                        onClick = onOpenModelPicker,
+                    )
+                    state.zaiModelPickError?.takeIf { it.isNotBlank() }?.let { note ->
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            note,
+                            fontSize = 10.sp,
+                            lineHeight = 14.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
+
+                // ── The site's OWN reasoning controls — rendered ONLY when the
+                //    probe actually found them on the page (never fake controls). ──
+                val think = zai.thinkControls
+                if (think != null && think.hasAnything) {
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))
+                    Column(modifier = Modifier.fillMaxWidth()) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                "Thinking",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.weight(1f),
+                            )
+                            Text(
+                                ZaiThinkControls.caption(think),
+                                fontSize = 11.sp,
+                                color = PocketOrange,
+                                fontWeight = FontWeight.Medium,
+                            )
+                        }
+                        Spacer(Modifier.height(8.dp))
+                        if (think.autoThink != null) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Column(Modifier.weight(1f)) {
+                                    Text("Deep Think", fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                                    Text(
+                                        "Read straight from the site's own menu; verified by re-reading it.",
+                                        fontSize = 10.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                                Switch(
+                                    checked = think.autoThink,
+                                    enabled = !zai.thinkControlsBusy && !zai.busy,
+                                    onCheckedChange = onSetAutoThink,
+                                )
+                            }
+                            Spacer(Modifier.height(8.dp))
+                        }
+                        if (think.effortOptions.isNotEmpty()) {
+                            AgentSegmentedCapsule(
+                                options = think.effortOptions,
+                                selected = think.effort,
+                                onSelect = onSetEffort,
+                            )
+                        }
+                        zai.thinkControlsNote?.takeIf { it.isNotBlank() }?.let { note ->
+                            Spacer(Modifier.height(6.dp))
+                            Text(note, fontSize = 10.sp, lineHeight = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                }
+
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))
+
+                // ── Connection test (shared piece — same as Antigravity) ──
+                AgentTestConnectionButton(
+                    loading = zai.testRunning,
+                    enabled = !zai.busy,
+                    onClick = onTest,
+                )
 
                 zai.runMessage?.takeIf {
                     zai.runPhase == ZaiRunPhase.CAPTCHA || zai.runPhase == ZaiRunPhase.TIMEOUT || zai.runPhase == ZaiRunPhase.ERROR
@@ -329,16 +387,24 @@ fun AgentZaiCard(
                             zai.runPhase == ZaiRunPhase.SENDING || zai.runPhase == ZaiRunPhase.GENERATING ||
                             zai.runPhase == ZaiRunPhase.EXTRACTING)
                     ) {
-                        LinearProgressIndicator(Modifier.fillMaxWidth())
+                        // Live view (same card the project chat uses): collapsible
+                        // Thinking + partial answer + tool step + phase/elapsed.
+                        ZaiLiveProcessCard(
+                            phaseLabel = zai.livePhaseLabel ?: zai.runMessage,
+                            thinking = zai.liveThinking,
+                            answer = zai.liveAnswer,
+                            stepStatus = zai.liveStepStatus,
+                            startedAtMillis = zai.runStartedAtMillis,
+                        )
                         Spacer(Modifier.height(6.dp))
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(
-                                zai.runMessage ?: "Working…",
-                                fontSize = 11.sp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.weight(1f),
+                            LinearProgressIndicator(
+                                Modifier.weight(1f),
+                                color = PocketOrange,
+                                trackColor = MaterialTheme.colorScheme.surfaceVariant,
                             )
-                            TextButton(onClick = onCancel) { Text("Stop") }
+                            Spacer(Modifier.width(10.dp))
+                            TextButton(onClick = onCancel) { Text("Stop", color = MaterialTheme.colorScheme.error) }
                         }
                         Spacer(Modifier.height(4.dp))
                     } else {
@@ -435,13 +501,11 @@ fun AgentZaiCard(
                 }
             }
 
-            Text(
-                "Runs chat.z.ai in a hidden in-app browser · Sign-in stays on this device",
-                fontSize = 10.sp,
-                lineHeight = 14.sp,
-                textAlign = TextAlign.Center,
-                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
-                modifier = Modifier.fillMaxWidth(),
+            AgentFooterNote(
+                listOf(
+                    "Runs chat.z.ai in a hidden in-app browser · Sign-in stays on this device",
+                    "Z.ai answers with text and files — it cannot run commands itself unless the autonomous RUN mode is enabled.",
+                ),
             )
 
             // ── Diagnostics (collapsed by default, copyable, no secrets) ──
@@ -525,6 +589,21 @@ fun AgentZaiCard(
             onClose = onCloseSignIn,
             onSignedIn = onSignedInViaSheet,
             onSheetDiagnostics = onSheetDiagnostics,
+        )
+    }
+
+    // The model picker is state-gated, so the tab and the project chat can
+    // both host it — only one screen is visible at a time.
+    if (state.zaiModelPickerOpen) {
+        ZaiModelPickerSheet(
+            currentModel = zai.currentModel,
+            persistedModels = zai.cachedModels,
+            pickRunning = zai.modelPickRunning,
+            errorMessage = state.zaiModelPickError,
+            preferredModel = state.zaiPreferredModel,
+            onPick = onPickModel,
+            onRefresh = onSyncSiteState,
+            onDismiss = onDismissModelPicker,
         )
     }
 }

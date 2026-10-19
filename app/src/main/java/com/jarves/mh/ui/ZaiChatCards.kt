@@ -571,9 +571,11 @@ fun ZaiEnginePickerSheet(
     zaiCheckingConnection: Boolean,
     zaiBusy: Boolean,
     zaiCurrentModel: String?,
+    zaiModels: List<ZaiModelCatalog.ModelOption>,
     onPickEngine: (String) -> Unit,
     onSignIn: () -> Unit,
     onOpenModelPicker: () -> Unit,
+    onPickModel: (String) -> Unit,
     onDismiss: () -> Unit,
 ) {
     AlertDialog(
@@ -608,6 +610,40 @@ fun ZaiEnginePickerSheet(
                     },
                 )
                 if (zaiActive || zaiSignedIn == true) {
+                    if (zaiModels.isNotEmpty()) {
+                        // The site's own models, like Antigravity's picker lists its models.
+                        zaiModels.take(4).forEach { model ->
+                            val selected = zaiCurrentModel != null && model.name.equals(zaiCurrentModel, ignoreCase = true)
+                            Surface(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable(enabled = !zaiBusy) {
+                                        onPickModel(model.name)
+                                        onDismiss()
+                                    },
+                                shape = RoundedCornerShape(10.dp),
+                                color = if (selected) {
+                                    MaterialTheme.colorScheme.primaryContainer
+                                } else {
+                                    MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
+                                },
+                            ) {
+                                Row(Modifier.padding(horizontal = 12.dp, vertical = 9.dp), verticalAlignment = Alignment.CenterVertically) {
+                                    Text(
+                                        model.name,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        modifier = Modifier.weight(1f),
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                    if (selected) {
+                                        Icon(Icons.Default.Check, "Current", tint = PocketGreen, modifier = Modifier.size(15.dp))
+                                    }
+                                }
+                            }
+                        }
+                    }
                     Surface(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -619,13 +655,13 @@ fun ZaiEnginePickerSheet(
                     ) {
                         Row(Modifier.padding(horizontal = 12.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
                             Text(
-                                "Model",
+                                if (zaiModels.isEmpty()) "Model · tap to read from the site" else "Model · all models + Sync",
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.Medium,
                                 modifier = Modifier.weight(1f),
                             )
                             Text(
-                                zaiCurrentModel ?: "tap to read from the site",
+                                zaiCurrentModel ?: "unknown yet",
                                 fontSize = 11.sp,
                                 color = if (zaiCurrentModel != null) {
                                     PocketGreen
@@ -634,7 +670,6 @@ fun ZaiEnginePickerSheet(
                                 },
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.weight(2f),
                             )
                             Icon(Icons.Default.ExpandMore, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
                         }

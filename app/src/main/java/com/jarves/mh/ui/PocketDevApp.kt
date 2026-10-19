@@ -197,6 +197,9 @@ import com.jarves.mh.model.providersForAgent
 import com.jarves.mh.model.ToolRequest
 import com.jarves.mh.model.WorkspaceEntry
 import com.jarves.mh.zweb.ZaiChatPromptBuilder
+import com.jarves.mh.zweb.ZaiRunLogEntry
+import com.jarves.mh.zweb.ZaiRunParser
+import com.jarves.mh.zweb.ZaiRunProtocol
 import com.jarves.mh.zweb.ZaiChatTurnPresenter
 import com.jarves.mh.zweb.ZaiPendingApply
 import com.jarves.mh.model.projectSlug
@@ -368,6 +371,9 @@ fun PocketDevApp(viewModel: MainViewModel = viewModel()) {
             onZaiRejectPlan = viewModel::zaiRejectPlan,
             onZaiAutoApply = viewModel::setZaiAutoApply,
             onDismissZaiNotice = viewModel::clearZaiChatNotice,
+            onZaiApproveRunCommands = viewModel::zaiApproveRunCommands,
+            onZaiSkipRunCommands = viewModel::zaiSkipPendingRunCommands,
+            onDismissZaiRunReport = viewModel::zaiDismissRunReport,
         )
         else -> RootScreenHost(state, viewModel, projectsListState)
     }
@@ -2149,6 +2155,7 @@ private fun RootScreenHost(
                     onZaiSetEffort = viewModel::zaiSetEffort,
                     onZaiPickModel = viewModel::zaiPickModel,
                     onZaiDismissModelPicker = viewModel::zaiDismissModelPicker,
+                    onZaiSetRunMode = viewModel::setZaiRunMode,
                 )
                 RootScreen.SETTINGS -> SettingsScreen(
                     state = state,
@@ -3918,6 +3925,9 @@ private fun WorkspaceScreen(
     onZaiRejectPlan: () -> Unit,
     onZaiAutoApply: (Boolean) -> Unit,
     onDismissZaiNotice: () -> Unit,
+    onZaiApproveRunCommands: (Set<Int>) -> Unit,
+    onZaiSkipRunCommands: () -> Unit,
+    onDismissZaiRunReport: () -> Unit,
 ) {
     BackHandler(onBack = onBack)
     val context = LocalContext.current
@@ -4195,12 +4205,18 @@ private fun WorkspaceScreen(
                     zaiLiveThinking = state.zaiWeb.liveThinking,
                     zaiLiveAnswer = state.zaiWeb.liveAnswer,
                     zaiLiveStepStatus = state.zaiWeb.liveStepStatus,
+                    zaiRunLoopLog = state.zaiRunLoopLog,
+                    zaiRunPendingCommands = state.zaiRunPendingCommands,
+                    zaiRunReport = state.zaiRunReport,
                     onZaiApplyFile = onZaiApplyFile,
                     onZaiApplyAll = onZaiApplyAll,
                     onZaiRejectPlan = onZaiRejectPlan,
                     onZaiAutoApply = onZaiAutoApply,
                     onZaiSignIn = onZaiSignIn,
                     onDismissZaiNotice = onDismissZaiNotice,
+                    onZaiApproveRunCommands = onZaiApproveRunCommands,
+                    onZaiSkipRunCommands = onZaiSkipRunCommands,
+                    onDismissZaiRunReport = onDismissZaiRunReport,
                 )
                 WorkspaceTab.FILES -> FilesTab(
                     files = state.workspaceFiles,
@@ -4585,12 +4601,18 @@ private fun ChatTab(
     zaiLiveThinking: String? = null,
     zaiLiveAnswer: String? = null,
     zaiLiveStepStatus: String? = null,
+    zaiRunLoopLog: List<ZaiRunLogEntry> = emptyList(),
+    zaiRunPendingCommands: List<ZaiRunParser.RunCommand> = emptyList(),
+    zaiRunReport: ZaiRunProtocol.LoopReport? = null,
     onZaiApplyFile: (String) -> Unit = {},
     onZaiApplyAll: () -> Unit = {},
     onZaiRejectPlan: () -> Unit = {},
     onZaiAutoApply: (Boolean) -> Unit = {},
     onZaiSignIn: () -> Unit = {},
     onDismissZaiNotice: () -> Unit = {},
+    onZaiApproveRunCommands: (Set<Int>) -> Unit = {},
+    onZaiSkipRunCommands: () -> Unit = {},
+    onDismissZaiRunReport: () -> Unit = {},
 ) {
     val view = LocalView.current
     // Keep the screen on while the selected agent is working in this chat. Released automatically
@@ -4655,6 +4677,26 @@ private fun ChatTab(
                                 thinkingActive = thinkingActive,
                             )
                         }
+                    }
+                }
+                // ── Phase 4: the RUN loop's live cards ──
+                if (zaiRunLoopLog.isNotEmpty()) {
+                    item(key = "zai-run-log") {
+                        ZaiRunActivityCard(entries = zaiRunLoopLog)
+                    }
+                }
+                if (zaiRunPendingCommands.isNotEmpty()) {
+                    item(key = "zai-run-approval") {
+                        ZaiRunApprovalCard(
+                            pending = zaiRunPendingCommands,
+                            onApprove = onZaiApproveRunCommands,
+                            onSkipAll = onZaiSkipRunCommands,
+                        )
+                    }
+                }
+                zaiRunReport?.let { report ->
+                    item(key = "zai-run-report") {
+                        ZaiRunReportCard(report = report, onDismiss = onDismissZaiRunReport)
                     }
                 }
                 approval?.let { request -> item { ApprovalCard(request, onApproval) } }

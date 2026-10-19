@@ -9,6 +9,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -29,6 +30,7 @@ import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -61,6 +63,10 @@ import com.jarves.mh.zweb.ZaiChatPromptBuilder
 import com.jarves.mh.zweb.ZaiChatTurnPresenter
 import com.jarves.mh.zweb.ZaiModelCatalog
 import com.jarves.mh.zweb.ZaiPendingApply
+import com.jarves.mh.zweb.ZaiRunLoopPolicy
+import com.jarves.mh.zweb.ZaiRunLogEntry
+import com.jarves.mh.zweb.ZaiRunParser
+import com.jarves.mh.zweb.ZaiRunProtocol
 import com.jarves.mh.zweb.ZaiWorkspaceApply
 import com.jarves.mh.ui.theme.PocketGreen
 import com.jarves.mh.ui.theme.PocketOrange
@@ -802,6 +808,215 @@ private fun EngineOptionRow(
             }
             if (selected) Icon(Icons.Default.Check, "Selected", tint = PocketGreen, modifier = Modifier.size(18.dp))
             trailing?.invoke()
+        }
+    }
+}
+
+// ── Phase 4: autonomous RUN loop cards (approval / live activity / report) ──
+
+/** Approval pause (ASK_EACH_COMMAND / SAFE_AUTO): review the requested commands. */
+@Composable
+fun ZaiRunApprovalCard(
+    pending: List<ZaiRunParser.RunCommand>,
+    onApprove: (Set<Int>) -> Unit,
+    onSkipAll: () -> Unit,
+) {
+    val haptics = LocalHapticFeedback.current
+    var selected by remember(pending) { mutableStateOf(pending.indices.toSet()) }
+    Surface(
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
+        border = BorderStroke(1.dp, PocketOrange.copy(alpha = 0.45f)),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(
+                "Z.ai wants to run ${pending.size} command(s)",
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 13.sp,
+            )
+            pending.forEachIndexed { index, run ->
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                    Checkbox(
+                        checked = index in selected,
+                        onCheckedChange = { checked ->
+                            selected = if (checked) selected + index else selected - index
+                        },
+                        modifier = Modifier.size(20.dp),
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        run.command,
+                        fontSize = 11.sp,
+                        fontFamily = FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 3,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+            }
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(
+                    onClick = {
+                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                        onSkipAll()
+                    },
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(11.dp),
+                ) {
+                    Text("Skip all", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Button(
+                    onClick = {
+                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                        onApprove(selected)
+                    },
+                    enabled = selected.isNotEmpty(),
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(11.dp),
+                ) {
+                    Text("Run selected", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                }
+            }
+            Text(
+                "Dangerous commands are refused by hard rails regardless of approval; token values travel only as environment variables.",
+                fontSize = 9.sp,
+                lineHeight = 13.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
+            )
+        }
+    }
+}
+
+/** The live activity log: every executed/refused command with its outcome. */
+@Composable
+fun ZaiRunActivityCard(entries: List<ZaiRunLogEntry>, expandedInitially: Boolean = false) {
+    var expanded by rememberSaveable("zai-run-log") { mutableStateOf(expandedInitially) }
+    val logHaptics = LocalHapticFeedback.current
+    Surface(
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable {
+                        expanded = !expanded
+                        logHaptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                    },
+            ) {
+                Text(
+                    "Z",
+                    color = PocketOrange,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 11.sp,
+                    modifier = Modifier
+                        .size(19.dp)
+                        .background(PocketOrange.copy(alpha = 0.14f), RoundedCornerShape(6.dp))
+                        .wrapContentSize(Alignment.Center),
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    "Commands run · ${entries.count { !it.refused }} ok, ${entries.count { it.refused }} refused",
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 12.sp,
+                    modifier = Modifier.weight(1f),
+                )
+                Text("${entries.size}", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Icon(
+                    Icons.Default.ExpandMore,
+                    contentDescription = if (expanded) "Collapse log" else "Expand log",
+                    modifier = Modifier
+                        .size(16.dp)
+                        .graphicsLayer { rotationZ = if (expanded) 180f else 0f },
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            AnimatedVisibility(visible = expanded) {
+                Column(Modifier.padding(top = 8.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                    entries.takeLast(30).forEach { entry ->
+                        Row(verticalAlignment = Alignment.Top) {
+                            val marker = when {
+                                entry.refused -> "✕"
+                                entry.timedOut -> "⏱"
+                                else -> "✓"
+                            }
+                            Text(
+                                marker,
+                                fontSize = 11.sp,
+                                color = if (entry.refused || entry.timedOut) {
+                                    MaterialTheme.colorScheme.error
+                                } else {
+                                    PocketGreen
+                                },
+                                modifier = Modifier.width(16.dp),
+                            )
+                            Column(Modifier.weight(1f)) {
+                                Text(
+                                    entry.command,
+                                    fontSize = 10.sp,
+                                    fontFamily = FontFamily.Monospace,
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                Text(
+                                    entry.summary.ifBlank { if (entry.refused) "refused" else "(no output)" },
+                                    fontSize = 9.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** The final report card after a loop task finishes. */
+@Composable
+fun ZaiRunReportCard(report: ZaiRunProtocol.LoopReport, onDismiss: () -> Unit) {
+    Surface(
+        shape = RoundedCornerShape(14.dp),
+        color = PocketGreen.copy(alpha = 0.08f),
+        border = BorderStroke(1.dp, PocketGreen.copy(alpha = 0.35f)),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(
+                ZaiRunProtocol.reportTitle(report),
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 13.sp,
+            )
+            Text(
+                buildString {
+                    append("Mode ").append(report.mode.lowercase().replace('_', ' '))
+                    append(" · ").append(report.refusals).append(" refused")
+                    append(" · stopped because ").append(report.stoppedBecause)
+                },
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (report.summary.isNotBlank()) {
+                Text(
+                    report.summary,
+                    fontSize = 12.sp,
+                    lineHeight = 16.sp,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 6,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            TextButton(onClick = onDismiss, contentPadding = PaddingValues(0.dp)) {
+                Text("Dismiss", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
         }
     }
 }

@@ -209,6 +209,7 @@ fun AgentScreen(
     onZaiSetEffort: (String) -> Unit = {},
     onZaiPickModel: (String) -> Unit = {},
     onZaiDismissModelPicker: () -> Unit = {},
+    onZaiSetRunMode: (com.jarves.mh.zweb.ZaiRunLoopPolicy.AutonomyMode) -> Unit = {},
 ) {
     val scope = rememberCoroutineScope()
     var selectedKind by rememberSaveable(state.provider.kind) { mutableStateOf(state.provider.kind) }
@@ -1110,6 +1111,7 @@ fun AgentScreen(
                         onSetEffort = onZaiSetEffort,
                         onPickModel = onZaiPickModel,
                         onDismissModelPicker = onZaiDismissModelPicker,
+                        onSetRunMode = onZaiSetRunMode,
                     )
                 } else if (!viewedAgentInstalled) {
                     // Installation/selection guidance is the install card shown

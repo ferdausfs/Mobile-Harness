@@ -76,6 +76,7 @@ import com.jarves.mh.zweb.ZaiProbeScripts
 import com.jarves.mh.zweb.probeTimeoutVerdict
 import com.jarves.mh.zweb.runAuthProbeScript
 import com.jarves.mh.zweb.ZaiPromptBuilder
+import com.jarves.mh.zweb.ZaiRunLoopPolicy
 import com.jarves.mh.zweb.ZaiRunPhase
 import com.jarves.mh.zweb.ZaiThinkControls
 import com.jarves.mh.zweb.ZaiSheetDiagnostics
@@ -114,6 +115,7 @@ fun AgentZaiCard(
     onSetEffort: (String) -> Unit = {},
     onPickModel: (String) -> Unit = {},
     onDismissModelPicker: () -> Unit = {},
+    onSetRunMode: (ZaiRunLoopPolicy.AutonomyMode) -> Unit = {},
 ) {
     val zai = state.zaiWeb
     var task by remember { mutableStateOf("") }
@@ -501,10 +503,61 @@ fun AgentZaiCard(
                 }
             }
 
+            // ── Autonomy (Phase 4): what the engine may DO in this workspace ──
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))
+            Column(modifier = Modifier.fillMaxWidth()) {
+                Text(
+                    "Autonomy",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(8.dp))
+                AgentSegmentedCapsule(
+                    options = listOf("Off", "Ask each", "Safe auto", "Full auto"),
+                    selected = when (state.zaiRunMode) {
+                        ZaiRunLoopPolicy.AutonomyMode.OFF -> "Off"
+                        ZaiRunLoopPolicy.AutonomyMode.ASK_EACH_COMMAND -> "Ask each"
+                        ZaiRunLoopPolicy.AutonomyMode.SAFE_AUTO -> "Safe auto"
+                        ZaiRunLoopPolicy.AutonomyMode.FULL_AUTO -> "Full auto"
+                    },
+                    onSelect = { label ->
+                        onSetRunMode(
+                            when (label) {
+                                "Off" -> ZaiRunLoopPolicy.AutonomyMode.OFF
+                                "Ask each" -> ZaiRunLoopPolicy.AutonomyMode.ASK_EACH_COMMAND
+                                "Safe auto" -> ZaiRunLoopPolicy.AutonomyMode.SAFE_AUTO
+                                else -> ZaiRunLoopPolicy.AutonomyMode.FULL_AUTO
+                            },
+                        )
+                    },
+                )
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    when (state.zaiRunMode) {
+                        ZaiRunLoopPolicy.AutonomyMode.OFF ->
+                            "Chat and files only — the engine never runs commands."
+                        ZaiRunLoopPolicy.AutonomyMode.ASK_EACH_COMMAND ->
+                            "Every command waits for your approval before it runs."
+                        ZaiRunLoopPolicy.AutonomyMode.SAFE_AUTO ->
+                            "Read-only commands run on their own; anything that changes or reaches out waits for you."
+                        ZaiRunLoopPolicy.AutonomyMode.FULL_AUTO ->
+                            "Commands run on their own inside the private workspace. Hard rails still refuse destructive or secret-printing commands."
+                    },
+                    fontSize = 10.sp,
+                    lineHeight = 14.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+
             AgentFooterNote(
                 listOf(
                     "Runs chat.z.ai in a hidden in-app browser · Sign-in stays on this device",
-                    "Z.ai answers with text and files — it cannot run commands itself unless the autonomous RUN mode is enabled.",
+                    if (state.zaiRunMode == ZaiRunLoopPolicy.AutonomyMode.OFF) {
+                        "Z.ai answers with text and files — it cannot run commands itself unless the autonomous RUN mode is enabled."
+                    } else {
+                        "Autonomous RUN mode: commands execute in the private workspace with hard safety rails."
+                    },
                 ),
             )
 

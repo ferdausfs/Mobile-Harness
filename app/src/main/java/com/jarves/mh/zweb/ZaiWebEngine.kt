@@ -203,7 +203,8 @@ class ZaiWebEngine(
                 it.copy(
                     checkingConnection = false,
                     signedIn = verdict.signedIn,
-                    accountEmail = if (verdict.signedIn) it.accountEmail else null,
+                    accountEmail = if (verdict.signedIn) verdict.accountEmail ?: it.accountEmail else null,
+                    accountName = if (verdict.signedIn) verdict.accountName ?: it.accountName else null,
                     lastProbeSummary = ZaiAuthProbeClassifier.summary(verdict),
                     runMessage = if (!verdict.signedIn && verdict.outcome == ZaiAuthProbeClassifier.ZaiCheckOutcome.PROBE_ERROR) {
                         "Could not verify the Z.ai session: ${verdict.errorText}"
@@ -589,6 +590,7 @@ class ZaiWebEngine(
             it.copy(
                 signedIn = false,
                 accountEmail = null,
+                accountName = null,
                 runPhase = ZaiRunPhase.IDLE,
                 runMessage = "Signed out of chat.z.ai on this device.",
                 lastReply = null,
@@ -860,6 +862,114 @@ class ZaiWebEngine(
                 success = false,
                 model = label,
                 message = "Switched the dropdown but the page still shows \"${label ?: "?"}\" — keeping the read-only label.",
+            )
+        }
+    }
+
+    // ── Tab parity: the site's own Deep Think controls ──
+
+    /**
+     * Opens the site's Deep Think menu (when the page renders one), reads its
+     * rows and closes it again. A not-found menu is a VALID outcome — the
+     * control only exists signed-in on capable models; the UI hides the
+     * section then. Never throws.
+     */
+    suspend fun refreshThinkControls() {
+        val config = configLoader.load() ?: return
+        val view = ensureWebView() ?: return
+        update { it.copy(thinkControlsBusy = true, thinkControlsNote = null) }
+        val controls = runCatching { readThinkControls(view, config) }.getOrNull()
+        view.evaluateJs(ZaiProbeScripts.buildDismissModelMenuScript())
+        update {
+            it.copy(
+                thinkControlsBusy = false,
+                thinkControls = controls ?: it.thinkControls,
+                thinkControlsNote = if (controls == null && it.thinkControls == null) {
+                    "No reasoning controls found on the current page — the site shows them only for some models after sign-in."
+                } else {
+                    null
+                },
+            )
+        }
+    }
+
+    private suspend fun readThinkControls(view: WebView, config: ZaiWebConfig): ZaiThinkControls.Controls? {
+        // The menu lives on a live chat.z.ai page; make sure the composer is there.
+        val live = runStateProbe(view, config)
+        if (live == null || !live.optBoolean("inputFound")) {
+            loadChatPage(view, config)
+            val ready = waitForComposer(view, config)
+            if (!ready.composerReady || ready.blocked != PageBlock.NONE) return null
+        }
+        val clicked = view.evaluateJs(ZaiProbeScripts.buildClickThinkMenuScript(config))
+        val found = runCatching {
+            JSONObject((clicked ?: "{}").unquoteEvalResult()).optBoolean("found")
+        }.getOrDefault(false)
+        if (!found) return null
+        delay(600)
+        val raw = view.evaluateJs(ZaiProbeScripts.buildThinkMenuReadScript(config))
+        return ZaiThinkControls.parse(raw)
+    }
+
+    /**
+     * Drives the site's own thinking controls: toggles Deep Think on/off
+     * ([autoThink]) and/or selects an effort level ([effort]), then VERIFIES
+     * by re-reading the menu. On any mismatch the outcome explains it and the
+     * UI keeps the read state (read-only fallback).
+     */
+    suspend fun driveThinkControls(autoThink: Boolean?, effort: String?): ZaiThinkDriveOutcome {
+        val config = configLoader.load() ?: return ZaiThinkDriveOutcome(false, "Selector config unavailable.")
+        val view = ensureWebView() ?: return ZaiThinkDriveOutcome(false, "The hidden browser is not available yet — try again.")
+        update { it.copy(thinkControlsBusy = true, thinkControlsNote = null) }
+        val outcome = runCatching { driveThink(view, config, autoThink, effort) }
+            .getOrElse { ZaiThinkDriveOutcome(false, "Could not drive the site's thinking controls: ${it.message}") }
+        view.evaluateJs(ZaiProbeScripts.buildDismissModelMenuScript())
+        update { it.copy(thinkControlsBusy = false) }
+        return outcome
+    }
+
+    private suspend fun driveThink(view: WebView, config: ZaiWebConfig, autoThink: Boolean?, effort: String?): ZaiThinkDriveOutcome {
+        if (autoThink == null && effort == null) {
+            return ZaiThinkDriveOutcome(false, "Nothing to change.")
+        }
+        val before = readThinkControls(view, config) ?: return ZaiThinkDriveOutcome(
+            false,
+            "The site's thinking menu is not available on this page/model — controls stay hidden until the site shows them.",
+        )
+        if (autoThink != null && before.autoThink != null && before.autoThink != autoThink) {
+            // Re-open and click the toggle row (the read left the menu closed).
+            view.evaluateJs(ZaiProbeScripts.buildClickThinkMenuScript(config))
+            delay(500)
+            val clickedRaw = view.evaluateJs(ZaiProbeScripts.buildClickMenuItemScript(config, "Deep Think"))
+            val clicked = runCatching {
+                JSONObject((clickedRaw ?: "{}").unquoteEvalResult()).optBoolean("ok")
+            }.getOrDefault(false)
+            if (!clicked) {
+                return ZaiThinkDriveOutcome(false, "Could not tap the site's Deep Think toggle.")
+            }
+            delay(500)
+        }
+        if (effort != null && before.effort?.equals(effort, ignoreCase = true) != true) {
+            view.evaluateJs(ZaiProbeScripts.buildClickThinkMenuScript(config))
+            delay(500)
+            val clickedRaw = view.evaluateJs(ZaiProbeScripts.buildClickMenuItemScript(config, effort))
+            val clicked = runCatching {
+                JSONObject((clickedRaw ?: "{}").unquoteEvalResult()).optBoolean("ok")
+            }.getOrDefault(false)
+            if (!clicked) {
+                return ZaiThinkDriveOutcome(false, "The site does not offer a \"$effort\" row in its thinking menu.")
+            }
+            delay(500)
+        }
+        // Verify by reading the menu state back.
+        val after = readThinkControls(view, config)
+        return if (after != null && ZaiThinkControls.verify(after, autoThink, effort)) {
+            update { it.copy(thinkControls = after) }
+            ZaiThinkDriveOutcome(true, null)
+        } else {
+            ZaiThinkDriveOutcome(
+                false,
+                "The menu did not reflect the change (site state: thinking=${after?.autoThink ?: "?"}, effort=${after?.effort ?: "?"}). Keeping the read-only view.",
             )
         }
     }

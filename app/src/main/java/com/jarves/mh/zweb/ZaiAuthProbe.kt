@@ -47,6 +47,9 @@ object ZaiAuthProbeClassifier {
         val hasLocalToken: Boolean,
         val bearer: ZaiAuthProbeSource?,
         val cookie: ZaiAuthProbeSource?,
+        /** Account display fields for the card (UI state only — never logged). */
+        val accountName: String? = null,
+        val accountEmail: String? = null,
     )
 
     /** Final decision + the fields the Diagnostics report shows (no secrets). */
@@ -58,6 +61,9 @@ object ZaiAuthProbeClassifier {
         val emailPresent: Boolean,
         val hasLocalToken: Boolean,
         val errorText: String,
+        /** Account display fields from the confirming source (UI state only). */
+        val accountName: String? = null,
+        val accountEmail: String? = null,
     )
 
     /** Outcome labels used by the connection check and the Diagnostics report. */
@@ -110,6 +116,8 @@ object ZaiAuthProbeClassifier {
                 emailPresent = confirming.emailPresent,
                 hasLocalToken = result.hasLocalToken,
                 errorText = "",
+                accountName = result.accountName?.takeIf(String::isNotBlank),
+                accountEmail = result.accountEmail?.takeIf(String::isNotBlank),
             )
         }
         val answered = listOfNotNull(result.bearer, result.cookie).filter { it.shape != SHAPE_ERROR }
@@ -182,6 +190,8 @@ object ZaiAuthProbeClassifier {
                 hasLocalToken = obj.optBoolean("hasLocalToken", false),
                 bearer = parseSource(obj.optJSONObject("bearer")),
                 cookie = parseSource(obj.optJSONObject("cookie")),
+                accountName = obj.optJSONObject("account")?.optString("name", "")?.take(120)?.ifBlank { null },
+                accountEmail = obj.optJSONObject("account")?.optString("email", "")?.take(120)?.ifBlank { null },
             )
         }.getOrNull()
     }

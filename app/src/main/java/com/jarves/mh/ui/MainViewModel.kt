@@ -4175,6 +4175,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun zaiDisconnect() = zaiWebController.disconnect()
 
+    /** Tab parity: Sync = model list + the site's own reasoning controls, both re-read from the page. */
+    fun zaiSyncSiteState() {
+        zaiWebController.refreshModelCatalog()
+        zaiWebController.refreshThinkControls()
+    }
+
+    fun zaiSetAutoThink(on: Boolean) {
+        zaiWebController.driveThinkControls(autoThink = on, effort = null) { outcome ->
+            if (!outcome.success) {
+                _state.update { it.copy(toastMessage = outcome.message ?: "Could not change the site's thinking toggle.") }
+            }
+        }
+    }
+
+    fun zaiSetEffort(effort: String) {
+        zaiWebController.driveThinkControls(autoThink = null, effort = effort) { outcome ->
+            if (!outcome.success) {
+                _state.update { it.copy(toastMessage = outcome.message ?: "Could not change the site's effort level.") }
+            }
+        }
+    }
+
     fun zaiClearResult() {
         val zai = _state.value.zaiWeb
         _state.update {

@@ -95,6 +95,21 @@ class ZaiWebController(private val appContext: Context, private val onState: (Za
         scope.launch { onResult(engine.pickModel(modelName)) }
     }
 
+    /** Tab parity: reads what reasoning controls the site currently offers (null = none found). */
+    fun refreshThinkControls() {
+        val engine = ensureEngine() ?: return
+        scope.launch { engine.refreshThinkControls() }
+    }
+
+    /** Tab parity: drives the site's own Deep Think toggle / effort selection with verify-by-reread. */
+    fun driveThinkControls(autoThink: Boolean?, effort: String?, onResult: (ZaiThinkDriveOutcome) -> Unit = {}) {
+        val engine = ensureEngine() ?: run {
+            onResult(ZaiThinkDriveOutcome(false, "The Z.ai engine is not started yet."))
+            return
+        }
+        scope.launch { onResult(engine.driveThinkControls(autoThink, effort)) }
+    }
+
     fun cancel() {
         engine?.cancel()
     }

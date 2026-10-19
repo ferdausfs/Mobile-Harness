@@ -8,6 +8,8 @@ data class ZaiWebUiState(
     /** null = not checked yet; true/false = result of the last connection check. */
     val signedIn: Boolean? = null,
     val accountEmail: String? = null,
+    /** Display name from the session probe (UI state only — never logged). */
+    val accountName: String? = null,
     val checkingConnection: Boolean = false,
     val runPhase: ZaiRunPhase = ZaiRunPhase.IDLE,
     /** Human-readable progress/error line for the current phase. */
@@ -66,6 +68,13 @@ data class ZaiWebUiState(
     val cachedModels: List<ZaiModelCatalog.ModelOption> = emptyList(),
     /** True while a pick/refresh automation is driving the hidden WebView. */
     val modelPickRunning: Boolean = false,
+    // ── Tab parity (v1.0.30): the site's own Deep Think controls ──
+    /** What the site ACTUALLY offers (probe result); null = not found/not read → UI hides the section. */
+    val thinkControls: ZaiThinkControls.Controls? = null,
+    /** True while the think-menu automation is open/driving. */
+    val thinkControlsBusy: Boolean = false,
+    /** Outcome of the last drive attempt (verification or failure message). */
+    val thinkControlsNote: String? = null,
 ) {
     val busy: Boolean
         get() = checkingConnection || testRunning ||

@@ -54,6 +54,25 @@ class ZaiWebEngine(
     private var runJob: Job? = null
     private var runNumber = 0
 
+    /**
+     * v1.0.35: the Z.ai conversation id last seen on the hidden page — from
+     * the URL (`/c/<id>`), the site's own chat-detail fetches (performance
+     * resource entries), or a probe payload. Captured the MOMENT it appears
+     * (every live-status poll) so file sync never depends on the URL still
+     * carrying it (the v1.0.34 "no chat id in URL" phone failure).
+     */
+    @Volatile
+    private var pageChatId: String? = null
+
+    /**
+     * v1.0.35: the project's PERSISTED conversation id (per app project chat,
+     * kept by the ViewModel in filesDir/zweb/chat-ids.json). Set per turn and
+     * before a manual sync. Used as the sync target when the page's own id is
+     * unknown, and as the reopen target on continue-mode reloads.
+     */
+    @Volatile
+    private var storedChatId: String? = null
+
     private var previousRunLoaded = false
 
     @Volatile
@@ -247,6 +266,11 @@ class ZaiWebEngine(
         ledger.record(outcome, signedIn)
     }
 
+    /** v1.0.35: the ViewModel hands in the project's persisted conversation id. */
+    fun setProjectChatId(zaiChatId: String?) {
+        storedChatId = zaiChatId?.takeIf { ZaiChatId.isValid(it) }
+    }
+
     /**
      * Sends [task] through the hidden WebView and waits for generation to finish.
      * [test] selects the tiny deterministic connection-test prompt.
@@ -259,8 +283,16 @@ class ZaiWebEngine(
      * falls back to the normal fresh-load path — the prompt itself always
      * carries the full context, so either way the turn is self-contained.
      * Tab-task runs (AgentZaiCard) keep the default fresh-conversation mode.
+     * v1.0.35: [reopenChatId] — the project's persisted conversation id; a
+     * reload in continue-mode reopens THAT conversation (`/c/<id>`) so one
+     * project keeps ONE conversation across restarts.
      */
-    suspend fun runPrompt(task: String, test: Boolean, continueChat: Boolean = false) {
+    suspend fun runPrompt(
+        task: String,
+        test: Boolean,
+        continueChat: Boolean = false,
+        reopenChatId: String? = null,
+    ) {
         val config = configLoader.load()
         if (config == null) {
             update { it.copy(runPhase = ZaiRunPhase.ERROR, runMessage = "Selector config unavailable — Z.ai Web disabled.") }
@@ -275,6 +307,13 @@ class ZaiWebEngine(
         canceled = false
         runNumber += 1
         val thisRun = runNumber
+        // v1.0.35: a FRESH turn starts a NEW conversation on the site — forget
+        // the previous page's conversation id so a stale one is never reused
+        // for sync. Continue turns keep it (same conversation continues).
+        if (!continueChat) {
+            pageChatId = null
+            update { it.copy(pageChatId = null) }
+        }
         update {
             it.copy(
                 runPhase = ZaiRunPhase.OPENING_PAGE,
@@ -303,17 +342,24 @@ class ZaiWebEngine(
                 val ready: PageReady = if (continueChat) {
                     val live = runStateProbe(view, config)
                     when {
-                        live == null -> {
-                            loadChatPage(view, config)
-                            waitForComposer(view, config)
-                        }
+                        live == null -> reloadForConversation(view, config, reopenChatId)
                         live.optBoolean("captchaMatched") -> PageReady(false, PageBlock.CAPTCHA)
                         live.optBoolean("loginMatched") -> PageReady(false, PageBlock.LOGIN)
-                        live.optBoolean("inputFound") -> PageReady(true, PageBlock.NONE)
-                        else -> {
-                            loadChatPage(view, config)
-                            waitForComposer(view, config)
+                        live.optBoolean("inputFound") -> {
+                            // v1.0.35: keep ONE conversation per project. When the
+                            // live page demonstrably sits on a DIFFERENT conversation
+                            // than the project's stored one, reopen the stored one
+                            // instead of appending this turn to the wrong chat.
+                            val urlId = ZaiChatId.fromUrl(live.optString("url"))
+                            if (reopenChatId != null && ZaiChatId.isValid(reopenChatId) &&
+                                urlId != null && urlId != reopenChatId
+                            ) {
+                                reloadForConversation(view, config, reopenChatId)
+                            } else {
+                                PageReady(true, PageBlock.NONE)
+                            }
                         }
+                        else -> reloadForConversation(view, config, reopenChatId)
                     }
                 } else {
                     loadChatPage(view, config)
@@ -646,6 +692,29 @@ class ZaiWebEngine(
         }
     }
 
+    /**
+     * v1.0.35: continue-mode reload that can REOPEN the project's stored
+     * conversation directly (`/c/<id>`) — one conversation per project even
+     * after an app restart or a page reset. Falls back to the root page when
+     * the site cannot restore it (composer never appears), so the turn still
+     * proceeds as a fresh conversation with the recap in the prompt.
+     */
+    private suspend fun reloadForConversation(view: WebView, config: ZaiWebConfig, reopenChatId: String?): PageReady {
+        if (reopenChatId != null && ZaiChatId.isValid(reopenChatId)) {
+            withContext(Dispatchers.Main) {
+                CookieManager.getInstance().flush()
+                view.evaluateJavascript("window.__mhProbePrev=null; 'ok'", null)
+                val base = config.startUrl.removeSuffix("/")
+                runCatching { view.loadUrl("$base/c/$reopenChatId") }
+            }
+            val ready = waitForComposer(view, config)
+            if (ready.composerReady) return ready
+            update { it.copy(runMessage = "Reopening the project's Z.ai conversation failed — starting a fresh page…") }
+        }
+        loadChatPage(view, config)
+        return waitForComposer(view, config)
+    }
+
     private suspend fun waitForComposer(view: WebView, config: ZaiWebConfig): PageReady {
         val deadline = System.currentTimeMillis() + config.timing.pageLoadTimeoutMs
         while (System.currentTimeMillis() < deadline) {
@@ -739,6 +808,15 @@ class ZaiWebEngine(
     private suspend fun streamLiveStatus(view: WebView, config: ZaiWebConfig): ZaiLiveStatus.Live? {
         val raw = view.evaluateJs(ZaiProbeScripts.buildLiveStatusScript(config)) ?: return null
         val live = ZaiLiveStatus.parse(raw) ?: return null
+        // v1.0.35: capture the conversation id the MOMENT it appears (the SPA
+        // pushStates /c/<id> ~2 s after the first send — live-verified). Every
+        // poll is a capture chance, so sync never depends on the URL later.
+        ZaiLiveStatus.parseChatId(raw)?.let { captured ->
+            if (captured != pageChatId) {
+                pageChatId = captured
+                update { it.copy(pageChatId = captured) }
+            }
+        }
         update { current ->
             current.copy(
                 liveThinking = live.thinking,
@@ -1004,15 +1082,20 @@ class ZaiWebEngine(
      * them. Runs even when a turn timed out earlier and the site has since
      * finished. Returns the honesty report.
      */
-    suspend fun syncFilesFromSite(): ZaiFileSync.SyncReport {
+    suspend fun syncFilesFromSite(storedChatId: String? = null): ZaiFileSync.SyncReport {
         val config = configLoader.load()
         if (config == null) return syncFailure("Selector config unavailable — cannot reach chat.z.ai.")
         val view = ensureWebView() ?: return syncFailure("The hidden browser is not available yet — try again.")
+        // v1.0.35: the project's own persisted id is the sync target for the
+        // manual pull (the page may have moved on; the project's conversation
+        // is what the user wants to read). Freshens the engine's memory when
+        // the ViewModel has a better one.
+        storedChatId?.takeIf { ZaiChatId.isValid(it) }?.let { this.storedChatId = it }
         // The captured reply carries no fence lines (rendered DOM), so the
         // parser's plain-content tier resolves markers here; the DOM probe only
         // backs up the site-side files.
         val markers = ZaiFileExtractor.parseCaptured(currentState().lastReply.orEmpty(), emptyList()).files
-        val payload = runFileSyncProbe(view)
+        val payload = runFileSyncProbe(view, preferStored = true)
         val merged = ZaiFileSync.merge(payload, markers)
         update {
             it.copy(
@@ -1034,6 +1117,7 @@ class ZaiWebEngine(
             sourceNotes = listOf(message),
             probeOk = false,
             attempts = 0,
+            failureReason = message,
         )
     }
 
@@ -1085,13 +1169,36 @@ class ZaiWebEngine(
         update { it.copy(runPhase = ZaiRunPhase.EXTRACTING, runMessage = "Reading Z.ai's reply…") }
         // The live streaming card hands over to the full reply now.
         clearLiveStatus()
-        val raw = view.evaluateJs(ZaiProbeScripts.buildExtractScript(config))
-        val extraction = parseExtraction(raw)
+        // v1.0.35: the reply is read with a bounded RETRY schedule (~30 s,
+        // backoff) instead of the single v1.0.34 read — the page's markdown
+        // tree can still be hydrating when the stop indicator disappears, and
+        // one transient miss must not become a hard error. Every attempt
+        // leaves a redacted diagnostic (selector hits, stop state, length).
+        var extraction: ExtractionResult? = null
+        var lastDiag: ZaiReplyCapturePolicy.CaptureDiag? = null
+        val maxAttempts = ZaiReplyCapturePolicy.maxAttempts()
+        for (attempt in 0 until maxAttempts) {
+            if (canceled) return
+            val d = ZaiReplyCapturePolicy.delayBeforeAttempt(attempt)
+            if (d > 0) delay(d)
+            if (canceled) return
+            val raw = view.evaluateJs(ZaiProbeScripts.buildExtractScript(config))
+            val (parsed, diag) = parseExtractionWithDiag(raw, attempt)
+            lastDiag = diag
+            if (parsed != null) {
+                extraction = parsed
+                break
+            }
+            Log.w(TAG, "reply capture attempt ${attempt + 1}/$maxAttempts: ${diag.summary()}")
+        }
+        update { it.copy(lastCaptureDiag = lastDiag?.summary()) }
         if (extraction == null) {
+            val reason = lastDiag?.summary() ?: "no readable reply after $maxAttempts attempt(s)"
             update {
                 it.copy(
                     runPhase = ZaiRunPhase.ERROR,
-                    runMessage = "Generation finished but the reply could not be read. Try again.",
+                    runMessage = "Generation finished but the reply could not be read. " +
+                        "($reason) Use “Sync files from Z.ai”, or paste the reply text via “Paste reply / import files”.",
                     testRunning = false,
                     lastFinishedAtMillis = System.currentTimeMillis(),
                 )
@@ -1133,11 +1240,17 @@ class ZaiWebEngine(
      * Never throws: an unreadable probe degrades to an empty payload and the
      * merge falls back to the reply-text markers alone.
      */
-    private suspend fun runFileSyncProbe(view: WebView): ZaiFileSync.ProbePayload {
+    private suspend fun runFileSyncProbe(view: WebView, preferStored: Boolean = false): ZaiFileSync.ProbePayload {
         update { it.copy(fileSyncRunning = true) }
+        // v1.0.35: the conversation id for this sync. finishRun prefers the
+        // page's own (freshest for THIS turn); a manual sync prefers the
+        // project's persisted one. "stored" beats the URL — the page may have
+        // left the conversation by sync time. When none was captured, the
+        // script still tries URL + performance entries on its own.
+        val syncId = if (preferStored) (storedChatId ?: pageChatId) else (pageChatId ?: storedChatId)
         val raw = runStoreAndPoll(
             view = view,
-            injectScript = ZaiProbeScripts.buildFileSyncProbeScript(),
+            injectScript = ZaiProbeScripts.buildFileSyncProbeScript(syncId),
             readerScript = ZaiProbeScripts.buildFileSyncResultReaderScript(),
             isReadable = { it != null && it != "null" && it.isNotBlank() },
             poll = FILE_SYNC_POLL,
@@ -1147,12 +1260,16 @@ class ZaiWebEngine(
             return ZaiFileSync.ProbePayload(
                 chatFound = false, messageId = null,
                 note = "the site's file data could not be read (probe timeout)",
-                turnSource = null,
+                turnSource = null, chatIdSource = null, chatId = pageChatId,
                 writes = emptyList(), edits = emptyList(), versionFiles = emptyList(),
                 versionContents = emptyMap(), binaryKeys = emptyList(), failedKeys = emptyList(),
             )
         }
-        return ZaiFileSync.parseProbe(raw)
+        val payload = ZaiFileSync.parseProbe(raw)
+        // The probe itself is a capture chance (it may resolve the id from the
+        // site's own chat-detail response when the URL never carried it).
+        payload.chatId?.let { capturePageChatId(it, "probe") }
+        return payload
     }
 
     /**
@@ -1191,27 +1308,67 @@ class ZaiWebEngine(
     /** ~16s worst case for the chat-detail + versions + per-file fetch chain. */
     private val FILE_SYNC_POLL = SyncPollConfig(rounds = 4, readsPerRound = 10, readDelayMs = 400)
 
-    private fun parseExtraction(raw: String?): ExtractionResult? {
-        if (raw == null) return null
+    private fun parseExtraction(raw: String?): ExtractionResult? = parseExtractionWithDiag(raw, 0).first
+
+    /**
+     * v1.0.35: extraction parse + redacted diagnostic in one pass. The diag is
+     * built on EVERY outcome (ok or not) from the script's `diag` object —
+     * selector-group hit index, element count, stop-button state, text length,
+     * page path — never reply content. A valid `chatId` in the diag is ALSO a
+     * capture chance for the per-project conversation memory.
+     */
+    private fun parseExtractionWithDiag(
+        raw: String?,
+        attempt: Int,
+    ): Pair<ExtractionResult?, ZaiReplyCapturePolicy.CaptureDiag> {
+        val empty = ZaiReplyCapturePolicy.CaptureDiag(
+            attempt = attempt, ok = false, assistantSelectorHit = null, assistantElementCount = 0,
+            stopPresent = false, textLength = 0, urlPath = null, why = "no result",
+        )
+        if (raw == null) return null to empty
         return try {
             val json = JSONObject(raw.unquoteEvalResult())
-            if (!json.optBoolean("ok")) return null
-            val blocks = json.optJSONArray("blocks") ?: JSONArray()
-            val codeBlocks = ArrayList<ZaiFileExtractor.CodeBlock>(blocks.length())
-            for (i in 0 until blocks.length()) {
-                val b = blocks.optJSONObject(i) ?: continue
-                codeBlocks.add(
-                    ZaiFileExtractor.CodeBlock(
-                        language = b.optString("lang"),
-                        text = b.optString("text"),
-                    ),
-                )
-            }
-            ExtractionResult(text = json.optString("text"), codeBlocks = codeBlocks)
+            val diagObj = json.optJSONObject("diag")
+            diagObj?.optString("chatId")?.takeIf { ZaiChatId.isValid(it) }?.let { capturePageChatId(it, "finish") }
+            val extraction = if (json.optBoolean("ok")) {
+                val blocks = json.optJSONArray("blocks") ?: JSONArray()
+                val codeBlocks = ArrayList<ZaiFileExtractor.CodeBlock>(blocks.length())
+                for (i in 0 until blocks.length()) {
+                    val b = blocks.optJSONObject(i) ?: continue
+                    codeBlocks.add(
+                        ZaiFileExtractor.CodeBlock(
+                            language = b.optString("lang"),
+                            text = b.optString("text"),
+                        ),
+                    )
+                }
+                ExtractionResult(text = json.optString("text"), codeBlocks = codeBlocks)
+            } else null
+            val diag = ZaiReplyCapturePolicy.CaptureDiag(
+                attempt = attempt,
+                ok = extraction != null,
+                assistantSelectorHit = diagObj?.optInt("assistantSelectorHit", -1)?.takeIf { it >= 0 },
+                assistantElementCount = diagObj?.optInt("assistantCount", 0) ?: 0,
+                stopPresent = diagObj?.optBoolean("stopPresent", false) ?: false,
+                textLength = extraction?.text?.length ?: 0,
+                urlPath = diagObj?.optString("url")?.takeIf { it.isNotEmpty() },
+                why = if (extraction == null) {
+                    diagObj?.optString("why")?.takeIf { it.isNotEmpty() } ?: "unreadable"
+                } else null,
+            )
+            extraction to diag
         } catch (e: Exception) {
             Log.w(TAG, "Extraction parse failed: ${e.message}")
-            null
+            null to empty.copy(why = "parse-error")
         }
+    }
+
+    /** Records a conversation-id capture (engine-level + published state). */
+    private fun capturePageChatId(id: String, source: String) {
+        if (!ZaiChatId.isValid(id) || pageChatId == id) return
+        pageChatId = id
+        update { it.copy(pageChatId = id) }
+        Log.i(TAG, "Z.ai conversation id captured via $source")
     }
 
     private data class ExtractionResult(

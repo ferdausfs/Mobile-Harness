@@ -82,6 +82,18 @@ data class ZaiWebUiState(
     val thinkControlsBusy: Boolean = false,
     /** Outcome of the last drive attempt (verification or failure message). */
     val thinkControlsNote: String? = null,
+    // ── v1.0.35: conversation capture + honest capture diagnostics ──
+    /**
+     * The Z.ai conversation id last seen on the hidden page (URL or the site's
+     * own chat-detail fetches). Captured the moment it appears so file sync
+     * never depends on the URL still carrying it. Null = not captured yet.
+     */
+    val pageChatId: String? = null,
+    /**
+     * One-line redacted summary of the last reply-capture attempt series
+     * (selector hits, stop-button state, text length — never content).
+     */
+    val lastCaptureDiag: String? = null,
 ) {
     val busy: Boolean
         get() = checkingConnection || testRunning ||

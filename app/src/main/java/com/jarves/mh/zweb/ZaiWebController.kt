@@ -71,10 +71,13 @@ class ZaiWebController(private val appContext: Context, private val onState: (Za
      * One turn of the project workspace chat when Z.ai is the chat engine.
      * [continueChat] keeps the page's current chat.z.ai conversation
      * (see [ZaiWebEngine.runPrompt]); the Z.ai tab's task runner never uses it.
+     * v1.0.35: [storedChatId] — the project's persisted Z.ai conversation id;
+     * the engine reopens it when the page must reload and syncs against it.
      */
-    fun runChatTurn(prompt: String, continueChat: Boolean) {
+    fun runChatTurn(prompt: String, continueChat: Boolean, storedChatId: String? = null) {
         val engine = ensureEngine() ?: return
-        scope.launch { engine.runPrompt(prompt, test = false, continueChat = continueChat) }
+        engine.setProjectChatId(storedChatId)
+        scope.launch { engine.runPrompt(prompt, test = false, continueChat = continueChat, reopenChatId = storedChatId) }
     }
 
     fun runTest() {
@@ -128,18 +131,19 @@ class ZaiWebController(private val appContext: Context, private val onState: (Za
      * conversation without sending anything. [onResult] carries the honesty
      * report; the candidate files land in the published state (lastFiles).
      */
-    fun syncFilesFromSite(onResult: (ZaiFileSync.SyncReport) -> Unit = {}) {
+    fun syncFilesFromSite(storedChatId: String? = null, onResult: (ZaiFileSync.SyncReport) -> Unit = {}) {
         val engine = ensureEngine() ?: run {
             onResult(
                 ZaiFileSync.SyncReport(
                     wroteCount = 0, readablePaths = emptyList(), unreadablePaths = emptyList(),
                     binarySkipped = emptyList(), sourceNotes = listOf("The Z.ai engine is not started yet."),
                     probeOk = false, attempts = 0,
+                    failureReason = "The Z.ai engine is not started yet.",
                 ),
             )
             return
         }
-        scope.launch { onResult(engine.syncFilesFromSite()) }
+        scope.launch { onResult(engine.syncFilesFromSite(storedChatId)) }
     }
 
     /** v1.0.33: re-reads the page after a timeout (no send) and finishes normally when it can. */

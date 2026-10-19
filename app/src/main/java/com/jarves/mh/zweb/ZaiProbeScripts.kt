@@ -272,28 +272,52 @@ object ZaiProbeScripts {
      * fenced code block inside it (language + exact textContent).
      */
     fun buildExtractScript(config: ZaiWebConfig): String {
-        val sel = selJson(config, "assistantMessage", "codeBlock")
+        val sel = selJson(config, "assistantMessage", "codeBlock", "stopIndicator")
         return """
             (function(){
               $HELPERS_JS
               var S=$sel;
               var pick=null;
+              var pickIndex=-1,pickCount=0;
               for(var i=0;i<S.assistantMessage.length;i++){
                 try{var els=document.querySelectorAll(S.assistantMessage[i]);
-                  if(els&&els.length>0){pick={by:S.assistantMessage[i],els:els};break;}}catch(e){}
+                  if(els&&els.length>0){pick={by:S.assistantMessage[i],els:els};pickIndex=i;pickCount=els.length;break;}}catch(e){}
               }
-              if(!pick)return JSON.stringify({ok:false,why:'no-assistant'});
+              // v1.0.35: redacted diagnostics ride on EVERY outcome — counts and
+              // lengths only, never reply content — so "the reply could not be
+              // read" becomes diagnosable from the honesty card instead of blind.
+              function chatIdNow(){
+                var m=location.pathname.match(/\/c\/([0-9a-fA-F-]{8,})/);
+                if(m)return m[1];
+                try{
+                  var ents=performance.getEntriesByType('resource');
+                  for(var i=ents.length-1;i>=0;i--){
+                    var mm=(ents[i].name||'').match(/\/api\/v1\/chats\/([0-9a-fA-F-]{8,})/);
+                    if(mm)return mm[1];
+                  }
+                }catch(e){}
+                return null;
+              }
+              var stopEl=null;
+              try{stopEl=__mhFirst(S.stopIndicator);}catch(e){}
+              var diag={url:location.pathname.slice(0,80),chatId:chatIdNow(),
+                stopPresent:!!stopEl,
+                assistantSelectorHit:pickIndex,assistantCount:pickCount};
+              if(!pick){diag.why='no-assistant';
+                return JSON.stringify({ok:false,diag:diag});}
               var last=pick.els[pick.els.length-1];
               var codeEls=[];
               for(var j=0;j<S.codeBlock.length;j++){
-                try{codeEls=last.querySelectorAll(S.codeBlock[j]);if(codeEls&&codeEls.length>0)break;}catch(e){}
+                try{codeEls=last.querySelectorAll(S.codeBlock[j]);if(codeEls&&codeEls.length>0){diag.codeSelectorHit=j;diag.codeCount=codeEls.length;break;}}catch(e){}
               }
               var blocks=[];
               for(var k=0;k<codeEls.length;k++){
                 var c=codeEls[k];var m=((c.className||'')+'').match(/language-([A-Za-z0-9_+#.-]+)/);
                 blocks.push({lang:m?m[1]:'',text:c.textContent||''});
               }
-              return JSON.stringify({ok:true,text:last.innerText||'',blocks:blocks});
+              var text=last.innerText||'';
+              diag.textLen=text.length;
+              return JSON.stringify({ok:true,text:text,blocks:blocks,diag:diag});
             })()
         """.trimIndent()
     }
@@ -332,17 +356,27 @@ object ZaiProbeScripts {
               var thinkingActive=false;
               if(thinkPick){
                 var last=thinkPick.els[thinkPick.els.length-1];
-                thinkingText=last.innerText||'';
                 try{thinkingActive=last.tagName.toLowerCase()==='details'?(last.hasAttribute('open')&&last.open):false;}catch(e){thinkingActive=false;}
-                if(!thinkingText&&last.querySelector){var sum=last.querySelector('summary');thinkingText=sum?(sum.innerText||''):'';}
+                // v1.0.35 duplicate-"Thinking" fix: read the reasoning BODY
+                // without the <summary> label, so the app's own header is not
+                // echoed a second time. Detached-clone innerText falls back to
+                // textContent per spec, so closed <details> bodies stay readable.
+                try{
+                  var clone=last.cloneNode(true);
+                  var sum=clone.querySelector?clone.querySelector('summary'):null;
+                  if(sum&&sum.parentNode)sum.parentNode.removeChild(sum);
+                  thinkingText=(clone.innerText||clone.textContent||'')+'';
+                  if(!thinkingText.trim()&&clone.textContent)thinkingText=clone.textContent;
+                }catch(e){thinkingText=last.innerText||'';}
+                if(!thinkingText.trim()){try{var s2=last.querySelector('summary');thinkingText=s2?(s2.innerText||''):'';}catch(e){}}
               }
               var ansPick=pickAll(S.partialAnswer);
               var answerText=ansPick?(ansPick.els[ansPick.els.length-1].innerText||''):'';
               var stepPick=pickAll(S.stepStatus);
               var stepText='';
               if(stepPick){
-                for(var s=stepPick.els.length-1;s>=0;s--){
-                  var t=(stepPick.els[s].innerText||'').trim();
+                for(var s3=stepPick.els.length-1;s3>=0;s3--){
+                  var t=(stepPick.els[s3].innerText||'').trim();
                   if(t){stepText=t;break;}
                 }
               }
@@ -352,6 +386,18 @@ object ZaiProbeScripts {
                 answerText:answerText,
                 stepText:stepText,
                 stopPresent:!!stop,
+                chatId:(function(){
+                  var m=location.pathname.match(/\/c\/([0-9a-fA-F-]{8,})/);
+                  if(m)return m[1];
+                  try{
+                    var ents=performance.getEntriesByType('resource');
+                    for(var i=ents.length-1;i>=0;i--){
+                      var mm=(ents[i].name||'').match(/\/api\/v1\/chats\/([0-9a-fA-F-]{8,})/);
+                      if(mm)return mm[1];
+                    }
+                  }catch(e){}
+                  return null;
+                })(),
                 url:location.href
               });
             })()
@@ -760,7 +806,17 @@ object ZaiProbeScripts {
      * files, 2 MB per file, ~4.5 MB total payload. Overflow files are reported
      * as failures, never silently dropped.
      */
-    fun buildFileSyncProbeScript(): String {
+    /**
+     * v1.0.35: [explicitChatId] — a previously captured conversation id for
+     * THIS project chat (URL `/c/<id>`, performance-entries, or a finish-time
+     * read), persisted per project by the ViewModel. When present the probe
+     * uses it DIRECTLY and never requires the current URL to carry the id
+     * (the real-phone failure: the SPA had re-navigated by sync time →
+     * "no chat id in URL" → 0 files). When null the probe falls back to the
+     * URL exactly as before. The payload records which source matched.
+     */
+    fun buildFileSyncProbeScript(explicitChatId: String? = null): String {
+        val injected = explicitChatId?.let { JSONObject.quote(it) } ?: "null"
         return """
             (function(){
               var now=Date.now();
@@ -768,13 +824,27 @@ object ZaiProbeScripts {
               window.__mhFileSyncInFlight=true;
               window.__mhFileSyncAt=now;
               window.__mhFileSync=null;
-              var m=location.pathname.match(/\/c\/([0-9a-fA-F-]{8,})/);
-              if(!m){
-                window.__mhFileSync=JSON.stringify({chatFound:false,note:'no chat id in URL'});
+              var idSource=null,chatId=null;
+              var explicit=$injected;
+              if(explicit){chatId=explicit;idSource='stored';}
+              else{
+                var m=location.pathname.match(/\/c\/([0-9a-fA-F-]{8,})/);
+                if(m){chatId=m[1];idSource='url';}
+                else{
+                  try{
+                    var ents=performance.getEntriesByType('resource');
+                    for(var i=ents.length-1;i>=0;i--){
+                      var mm=(ents[i].name||'').match(/\/api\/v1\/chats\/([0-9a-fA-F-]{8,})/);
+                      if(mm){chatId=mm[1];idSource='perf';break;}
+                    }
+                  }catch(e){}
+                }
+              }
+              if(!chatId){
+                window.__mhFileSync=JSON.stringify({chatFound:false,note:'no chat id in URL, none stored',chatIdSource:'none'});
                 window.__mhFileSyncInFlight=false;
                 return;
               }
-              var chatId=m[1];
               var tok=null;
               try{tok=window.localStorage?window.localStorage.getItem('token'):null;}catch(e){tok=null;}
               function hdrs(){
@@ -901,7 +971,8 @@ object ZaiProbeScripts {
                   var writes=[],edits=[];
                   turnMsgs.slice(-10).forEach(function(msg){collectToolCalls(msg,writes,edits);});
                   var payload={chatFound:true,messageId:lastMsg?lastMsg.id:null,writes:writes,edits:edits,
-                    turnSource:currentId&&hist[currentId]?'chain':'fallback'};
+                    turnSource:currentId&&hist[currentId]?'chain':'fallback',
+                    chatIdSource:idSource||'unknown',chatId:chatId};
                   if(!lastMsg){
                     payload.note='no assistant message found for this turn';
                     window.__mhFileSync=JSON.stringify(payload);

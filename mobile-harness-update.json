@@ -1,12 +1,12 @@
 {
-  "versionCode": 31,
-  "versionName": "1.0.30",
-  "notes": "New: the Z.ai tab now looks and works like the Antigravity tab - 'Z.ai Web \u00b7 <current model>' header, account card with email/name and a Disconnect text button, 'Active Intelligence Model' with Sync (reads chat.z.ai's own model dropdown, drives + verifies picks, read-only fallback), a Thinking section rendered only when the site actually offers its Deep Think controls (verified by re-reading the site's menu - hidden otherwise), full-width Test connection, and the live Thinking/answer/elapsed card in the task area with Stop. Engine picker lists the site's models. Nothing else changed; same key, one-tap update.",
+  "versionCode": 32,
+  "versionName": "1.0.31",
+  "notes": "HOTFIX for the v1.0.30 startup crash ('installs fine but never opens again'). v1.0.31 is crash-safe and self-diagnosing: crashes are captured from the first process step, and when a crash report is newer than the last successful open the app shows a 'Startup problem detected' screen BEFORE the main UI with Copy report / Reset app data / Continue anyway (a crash loop escalates to a full-screen gate). Startup hardened: engine coroutines and boot can no longer kill the process on a throw, the task-queue reconcile and project cleanup moved off the main thread, one malformed saved project no longer erases the whole project list, vault decrypt failures stay non-fatal. Regression tests load real v1.0.27-30-era payloads into the current loaders. Plus subtle Z.ai card motion polish (respects remove-animations). If v1.0.30 crashed for you: install over it and use Copy report on the screen that appears.",
   "artifacts": {
     "online": {
-      "url": "https://github.com/ferdausfs/Mobile-Harness/releases/download/v1.0.30/mobile-harness-online-v1.0.30.apk",
-      "sha256": "6e28937267958efe67aeb9a336461e405dbbd8bae49c2c0219aa6ec0afa69622",
-      "sizeBytes": 88590711
+      "url": "https://github.com/ferdausfs/Mobile-Harness/releases/download/v1.0.31/mobile-harness-online-v1.0.31.apk",
+      "sha256": "1ec456c447acee6b2792657faea405d48e77edd2d700ccc2d5d02d9e6c3ee3a9",
+      "sizeBytes": 88685687
     }
   }
 }

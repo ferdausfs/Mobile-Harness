@@ -25,6 +25,7 @@ Protocol — follow exactly:
 - After your commands run, their results come back as the next message (each block shows the command, its exit code, and the redacted output). Continue the task from there.
 - When the task is COMPLETE, reply with `DONE:` followed by a short final summary of what you did and what changed. Nothing runs after DONE.
 - If you need file contents instead, `NEED_FILES:` works as before.
+- RUNNING COMMANDS IS OPTIONAL: if the task needs no commands, just answer (or finish with `DONE:`) — a reply without RUN lines is always a valid answer, never a failure.
 
 Safety rails (non-negotiable, they never ask):
 - Dangerous commands are refused before they run — destructive system operations, deleting files outside /workspace, force pushes, rewriting git history, deleting remote repos/databases/deploys, fork bombs, piping downloads into a shell, printing environment variables or token values. A refusal comes back as `refused: <reason>` — adapt your approach instead of retrying.

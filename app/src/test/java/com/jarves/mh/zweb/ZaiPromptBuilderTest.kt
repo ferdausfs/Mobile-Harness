@@ -16,6 +16,18 @@ class ZaiPromptBuilderTest {
         assertTrue(prompt.contains("Summary:"))
     }
 
+    @Test
+    fun `v1_0_33 prompt teaches whole files, disclosure and optional commands`() {
+        val prompt = ZaiPromptBuilder.buildTaskPrompt("Build a todo app")
+        // Whole files only — partial snippets cannot be synced.
+        assertTrue(prompt.contains(ZaiPromptBuilder.FILE_WHOLENESS_RULE))
+        // The app reads sandbox-written files; every change must be listed.
+        assertTrue(prompt.contains(ZaiPromptBuilder.FILE_DISCLOSURE_RULE))
+        // Commands stay optional — a reply without RUN is still valid.
+        assertTrue(prompt.contains(ZaiPromptBuilder.RUN_OPTIONAL_RULE))
+        assertTrue(prompt.contains("OPTIONAL"))
+    }
+
     @Test(expected = IllegalArgumentException::class)
     fun `blank task is rejected`() {
         ZaiPromptBuilder.buildTaskPrompt("   ")

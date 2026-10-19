@@ -12,6 +12,18 @@ object ZaiPromptBuilder {
     const val FILE_MARKER_RULE =
         "- Before each file you create or modify, write a line on its own in exactly this format: FILE: relative/path/to/file.name"
 
+    /** v1.0.33: whole files only — partial snippets cannot be synced. */
+    const val FILE_WHOLENESS_RULE =
+        "- Every FILE: block must contain the file's COMPLETE content — never a partial snippet, a diff, or an ellipsis."
+
+    /** v1.0.33: the app reads files the site's own tools wrote; list every changed file. */
+    const val FILE_DISCLOSURE_RULE =
+        "- If you created or changed files with your own tools, say so: list every file's relative path in your summary so the app can sync them."
+
+    /** v1.0.33: commands stay optional — a reply without RUN lines is still a valid answer. */
+    const val RUN_OPTIONAL_RULE =
+        "- Command execution is OPTIONAL: you never need a command to finish; answer directly when no command is needed."
+
     private val TASK_TEMPLATE = buildString {
         appendLine("You are assisting inside the Mobile Harness app. Work on the task below.")
         appendLine()
@@ -21,6 +33,9 @@ object ZaiPromptBuilder {
         appendLine("OUTPUT FORMAT (required):")
         appendLine(FILE_MARKER_RULE)
         appendLine("- Immediately after each FILE: line, output that file's complete content in one fenced code block (one code block per file, never merge files).")
+        appendLine(FILE_WHOLENESS_RULE)
+        appendLine(FILE_DISCLOSURE_RULE)
+        appendLine(RUN_OPTIONAL_RULE)
         appendLine("- Always output the complete content of every file - never truncate, never use ellipses or placeholders.")
         appendLine("- After all files, end with a short plain-text summary section starting with \"Summary:\" (outside any code block) describing what you did.")
         appendLine("- If the task needs no files, just answer directly and still end with the \"Summary:\" section.")

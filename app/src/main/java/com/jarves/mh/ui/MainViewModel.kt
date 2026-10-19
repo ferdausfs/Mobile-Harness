@@ -69,6 +69,8 @@ import com.jarves.mh.zweb.ZaiWebUiState
 import com.jarves.mh.zweb.ZaiChatPromptBuilder
 import com.jarves.mh.zweb.ZaiChatTurnPolicy
 import com.jarves.mh.zweb.ZaiChatTurnPresenter
+import com.jarves.mh.zweb.ZaiFileSync
+import com.jarves.mh.zweb.ZaiFileExtractor
 import com.jarves.mh.zweb.ZaiNeedFilesParser
 import com.jarves.mh.zweb.ZaiModelCatalog
 import com.jarves.mh.tokens.SecretRedactor
@@ -302,6 +304,16 @@ data class AppUiState(
     val zaiPendingApply: ZaiPendingApply? = null,
     /** Terminal chat-engine notice in the chat (sign-in / captcha / timeout / error / stopped). */
     val zaiChatNotice: com.jarves.mh.zweb.ZaiChatTurnPresenter.TurnNotice? = null,
+    // ── v1.0.33: file sync from the site ──
+    /**
+     * Honesty report of the last Z.ai file-sync attempt (wrote vs read vs
+     * binary-skipped). Drives the sync result card and the amber warning.
+     */
+    val zaiSyncReport: ZaiFileSync.SyncReport? = null,
+    /** Paths actually synced to the project after an apply ("Files synced: N"). */
+    val zaiAppliedPaths: List<String> = emptyList(),
+    /** True while the manual file-sync probe reads the site (v1.0.33). */
+    val zaiSyncRunning: Boolean = false,
     // ── Phase 1 model picker ──
     /** True while the Z.ai model picker sheet is open. */
     val zaiModelPickerOpen: Boolean = false,
@@ -4208,6 +4220,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private var zaiTurnContext: ZaiActiveTurn? = null
 
+    /**
+     * v1.0.33: the turn that last hit the no-progress timeout — kept so
+     * "Re-read reply" can restore the loop/turn context and finish normally
+     * when the site has finished in the meantime. Null = nothing to re-read.
+     */
+    private var zaiTimedOutTurn: ZaiActiveTurn? = null
+
     /** True between sendZaiPrompt and the turn's terminal phase. */
     @Volatile
     private var zaiTurnActive = false
@@ -4862,6 +4881,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 currentTaskRequest = requestText,
                 zaiChatNotice = null,
                 zaiPendingApply = null,
+                zaiSyncReport = null,
+                zaiAppliedPaths = emptyList(),
             )
         }
         touchProject(project.id)
@@ -5034,6 +5055,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun handleZaiTurnFailed(current: ZaiWebUiState) {
+        // v1.0.33: a TIMED-OUT turn stays recoverable — the page may still be
+        // working on the site. The notice card offers Re-read / Sync files now.
+        if (current.runPhase == ZaiRunPhase.TIMEOUT) {
+            zaiTimedOutTurn = zaiTurnContext
+        }
         zaiTurnActive = false
         zaiTurnContext = null
         zaiPageConversationChatId = null
@@ -5390,6 +5416,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         zaiTurnActive = false
         zaiTurnContext = null
         zaiPageConversationChatId = turn.chatId
+        zaiTimedOutTurn = null
         // Phase 3: queue entry DONE + the "answer ready" notification.
         markZaiQueueTerminal(ZaiRunPhase.DONE)
         stopZaiForeground(
@@ -5405,6 +5432,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 liveProcess = emptyList(),
                 liveThinking = false,
                 taskFinishedAtMillis = System.currentTimeMillis(),
+                // v1.0.33: the engine's honesty report rides along (what Z.ai
+                // wrote vs what could be read). Null = probe never ran.
+                zaiSyncReport = current.lastSync ?: it.zaiSyncReport,
             )
         }
         persistMessages()
@@ -5461,6 +5491,176 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _state.update { it.copy(zaiPendingApply = null) }
     }
 
+    // ── v1.0.33: file sync from the site ──
+
+    /** Clears the sync result card. */
+    fun zaiDismissSyncReport() {
+        _state.update { it.copy(zaiSyncReport = null, zaiAppliedPaths = emptyList()) }
+    }
+
+    /**
+     * Manual "Sync files from Z.ai": pulls the files the site wrote for the
+     * current conversation into the review pipeline — without sending a new
+     * message. Works after a timeout once the site actually finished, and any
+     * time the user wants to re-pull. Appends a small transcript marker so the
+     * review card has a home under the newest assistant entry.
+     */
+    fun zaiSyncFilesNow() {
+        val project = _state.value.activeProject
+        val chatId = _state.value.activeChatId
+        if (project == null || chatId == null) {
+            _state.update { it.copy(toastMessage = "Open a project chat first — syncing needs a project to write into.") }
+            return
+        }
+        if (_state.value.isRunning) return
+        _state.update { it.copy(zaiSyncRunning = true) }
+        zaiWebController.syncFilesFromSite { report ->
+            _state.update { it.copy(zaiSyncRunning = false, zaiSyncReport = report) }
+            if (report.readablePaths.isEmpty()) {
+                val note = when {
+                    !report.probeOk -> "Z.ai's file data could not be read right now. Try again once the site finishes."
+                    else -> "Z.ai wrote ${report.wroteCount} file(s) but none could be read just now. Try again shortly."
+                }
+                _state.update { it.copy(toastMessage = note) }
+                return@syncFilesFromSite
+            }
+            buildPendingApplyFromSiteFiles(project, chatId, "Files synced from chat.z.ai — review before applying.")
+        }
+    }
+
+    /**
+     * Builds the review plan for [com.jarves.mh.zweb.ZaiWebUiState.lastFiles]
+     * (site-written + text markers) against the workspace, appends the
+     * transcript marker message and parks the plan for review.
+     */
+    private fun buildPendingApplyFromSiteFiles(project: Project, chatId: String, markerText: String) {
+        viewModelScope.launch(backgroundGuard) {
+            val files = _state.value.zaiWeb.lastFiles
+            if (files.isEmpty()) return@launch
+            val workspace = projectWorkspaceRoot(project)
+            val plan = withContext(Dispatchers.IO) {
+                ZaiWorkspaceApply.plan(files, workspace) { before, after ->
+                    zaiCheckpoints.buildDiffLines(before, after)
+                }
+            }
+            withContext(Dispatchers.Main) {
+                if (!plan.hasWork && plan.rejected.isEmpty()) {
+                    _state.update {
+                        it.copy(
+                            toastMessage = "Everything Z.ai wrote is already identical in the project — nothing to apply.",
+                            zaiAppliedPaths = plan.unchanged,
+                        )
+                    }
+                    return@withContext
+                }
+                val marker = ChatMessage(fromUser = false, text = markerText)
+                _state.update { current ->
+                    current.copy(
+                        messages = current.messages + marker,
+                        zaiPendingApply = ZaiPendingApply(
+                            projectId = project.id,
+                            chatId = chatId,
+                            messageId = marker.id,
+                            files = plan.files,
+                            rejected = plan.rejected,
+                            unchanged = plan.unchanged,
+                        ),
+                    )
+                }
+                persistMessages()
+            }
+        }
+    }
+
+    /** "Keep both" on a conflicting file: writes the Z.ai copy next to the original. */
+    fun zaiKeepBothFile(path: String) {
+        val pending = _state.value.zaiPendingApply ?: return
+        val file = pending.files.firstOrNull { it.path == path } ?: return
+        viewModelScope.launch(backgroundGuard) {
+            val workspace = projectWorkspaceRoot(zaiProjectHandle(pending.projectId))
+            val planned = withContext(Dispatchers.IO) {
+                val taken = { candidate: String ->
+                    File(workspace, candidate).exists() ||
+                        pending.files.any { it.path == candidate } ||
+                        pending.rejected.any { it.path == candidate }
+                }
+                val newPath = ZaiFileSync.keepBothPath(path, taken)
+                val sanitized = ZaiFileExtractor.sanitizeZaiPath(newPath) ?: return@withContext null
+                ZaiWorkspaceApply.PlannedFile(
+                    path = sanitized,
+                    newContent = file.newContent,
+                    status = ZaiWorkspaceApply.FileStatus.NEW,
+                    diffLines = zaiCheckpoints.buildDiffLines(ByteArray(0), file.newContent.toByteArray(Charsets.UTF_8)),
+                )
+            }
+            withContext(Dispatchers.Main) {
+                if (planned == null) {
+                    _state.update { it.copy(toastMessage = "Could not derive a safe \"keep both\" name for $path.") }
+                    return@withContext
+                }
+                _state.update { current ->
+                    current.copy(
+                        zaiPendingApply = current.zaiPendingApply?.copy(
+                            files = current.zaiPendingApply.files
+                                .filterNot { it.path == path } + planned,
+                        ),
+                        toastMessage = "Will keep the original and save Z.ai's copy as ${planned.path}.",
+                    )
+                }
+            }
+        }
+    }
+
+    /**
+     * "Re-read reply" after a timeout: restores the stashed turn context so a
+     * finished reply still lands in THIS chat (and the RUN loop still reports
+     * honestly), then re-attaches to the page without sending anything.
+     */
+    fun zaiReattachReply() {
+        val stashed = zaiTimedOutTurn ?: return
+        if (_state.value.isRunning) return
+        zaiTimedOutTurn = null
+        zaiTurnContext = stashed
+        zaiTurnActive = true
+        _state.update {
+            it.copy(
+                zaiChatNotice = null,
+                isRunning = true,
+                liveProcess = listOf(ActivityItem("Re-reading Z.ai", "Checking whether the site finished…", false)),
+            )
+        }
+        zaiWebController.reattachToReply()
+    }
+
+    /** Opens a synced/applied file in the built-in viewer (Files tab context). */
+    fun zaiOpenSyncedFile(path: String) {
+        val project = _state.value.activeProject ?: return
+        val sanitized = ZaiFileExtractor.sanitizeZaiPath(path) ?: return
+        _state.update { it.copy(openedFilePath = sanitized, openedFileContent = null, fileContentLoading = true) }
+        viewModelScope.launch {
+            val content = withContext(Dispatchers.IO) {
+                val file = File(projectWorkspaceRoot(project), sanitized)
+                runCatching {
+                    if (file.length() > 512_000L) {
+                        file.inputStream().use { stream ->
+                            val buf = ByteArray(512_000)
+                            val read = stream.read(buf)
+                            String(buf, 0, read)
+                        } + "\n\n[File truncated — too large to display fully]"
+                    } else {
+                        file.readText(Charsets.UTF_8)
+                    }
+                }.getOrNull()
+            }
+            _state.update {
+                it.copy(
+                    openedFileContent = content ?: "[Could not read this file — it may be binary or missing.]",
+                    fileContentLoading = false,
+                )
+            }
+        }
+    }
+
     private fun applyZaiPlannedFiles(pending: ZaiPendingApply, files: List<PlannedFile>) {
         if (files.isEmpty()) return
         val handle = zaiProjectHandle(pending.projectId)
@@ -5496,7 +5696,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             changes = (current.changes.filterNot { it.path in appliedSet } + details)
                                 .sortedBy { it.path },
                             zaiPendingApply = current.zaiPendingApply?.takeIf { !it.isEmpty },
-                            toastMessage = "Applied ${outcome.applied.size} file(s) — Undo is available in Changes.",
+                            // v1.0.33: honest "files synced to project" result.
+                            zaiAppliedPaths = (current.zaiAppliedPaths + outcome.applied).distinct(),
+                            toastMessage = "Synced ${outcome.applied.size} file(s) to the project — Undo is available in Changes.",
                         )
                     }
                     refreshProjectFiles()

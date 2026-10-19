@@ -197,12 +197,15 @@ import com.jarves.mh.model.providersForAgent
 import com.jarves.mh.model.ToolRequest
 import com.jarves.mh.model.WorkspaceEntry
 import com.jarves.mh.zweb.ZaiChatPromptBuilder
+import com.jarves.mh.zweb.ZaiFileSync
 import com.jarves.mh.zweb.ZaiRunLogEntry
 import com.jarves.mh.zweb.ZaiRunParser
 import com.jarves.mh.zweb.ZaiRunProtocol
 import com.jarves.mh.zweb.ZaiChatTurnPresenter
 import com.jarves.mh.zweb.ZaiPendingApply
 import com.jarves.mh.model.projectSlug
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import com.jarves.mh.runtime.RuntimeExecutionService
 import com.jarves.mh.runtime.RuntimeSetupService
 import com.jarves.mh.runtime.supportsArm64Runtime
@@ -370,6 +373,11 @@ fun PocketDevApp(viewModel: MainViewModel = viewModel()) {
             onZaiApplyAll = viewModel::zaiApplyAllFiles,
             onZaiRejectPlan = viewModel::zaiRejectPlan,
             onZaiAutoApply = viewModel::setZaiAutoApply,
+            onZaiKeepBothFile = viewModel::zaiKeepBothFile,
+            onZaiRereadReply = viewModel::zaiReattachReply,
+            onZaiSyncFilesNow = viewModel::zaiSyncFilesNow,
+            onZaiOpenSyncedFile = viewModel::zaiOpenSyncedFile,
+            onDismissZaiSyncReport = viewModel::zaiDismissSyncReport,
             onDismissZaiNotice = viewModel::clearZaiChatNotice,
             onZaiApproveRunCommands = viewModel::zaiApproveRunCommands,
             onZaiSkipRunCommands = viewModel::zaiSkipPendingRunCommands,
@@ -3924,6 +3932,11 @@ private fun WorkspaceScreen(
     onZaiApplyAll: () -> Unit,
     onZaiRejectPlan: () -> Unit,
     onZaiAutoApply: (Boolean) -> Unit,
+    onZaiKeepBothFile: (String) -> Unit,
+    onZaiRereadReply: () -> Unit,
+    onZaiSyncFilesNow: () -> Unit,
+    onZaiOpenSyncedFile: (String) -> Unit,
+    onDismissZaiSyncReport: () -> Unit,
     onDismissZaiNotice: () -> Unit,
     onZaiApproveRunCommands: (Set<Int>) -> Unit,
     onZaiSkipRunCommands: () -> Unit,
@@ -4208,11 +4221,19 @@ private fun WorkspaceScreen(
                     zaiRunLoopLog = state.zaiRunLoopLog,
                     zaiRunPendingCommands = state.zaiRunPendingCommands,
                     zaiRunReport = state.zaiRunReport,
+                    zaiSyncReport = state.zaiSyncReport,
+                    zaiAppliedPaths = state.zaiAppliedPaths,
+                    zaiSyncRunning = state.zaiSyncRunning || state.zaiWeb.fileSyncRunning,
                     onZaiApplyFile = onZaiApplyFile,
                     onZaiApplyAll = onZaiApplyAll,
                     onZaiRejectPlan = onZaiRejectPlan,
                     onZaiAutoApply = onZaiAutoApply,
+                    onZaiKeepBothFile = onZaiKeepBothFile,
                     onZaiSignIn = onZaiSignIn,
+                    onRereadReply = onZaiRereadReply,
+                    onSyncFilesNow = onZaiSyncFilesNow,
+                    onOpenSyncedFile = onZaiOpenSyncedFile,
+                    onDismissZaiSyncReport = onDismissZaiSyncReport,
                     onDismissZaiNotice = onDismissZaiNotice,
                     onZaiApproveRunCommands = onZaiApproveRunCommands,
                     onZaiSkipRunCommands = onZaiSkipRunCommands,
@@ -4604,11 +4625,19 @@ private fun ChatTab(
     zaiRunLoopLog: List<ZaiRunLogEntry> = emptyList(),
     zaiRunPendingCommands: List<ZaiRunParser.RunCommand> = emptyList(),
     zaiRunReport: ZaiRunProtocol.LoopReport? = null,
+    zaiSyncReport: ZaiFileSync.SyncReport? = null,
+    zaiAppliedPaths: List<String> = emptyList(),
+    zaiSyncRunning: Boolean = false,
     onZaiApplyFile: (String) -> Unit = {},
     onZaiApplyAll: () -> Unit = {},
     onZaiRejectPlan: () -> Unit = {},
     onZaiAutoApply: (Boolean) -> Unit = {},
+    onZaiKeepBothFile: (String) -> Unit = {},
     onZaiSignIn: () -> Unit = {},
+    onRereadReply: () -> Unit = {},
+    onSyncFilesNow: () -> Unit = {},
+    onOpenSyncedFile: (String) -> Unit = {},
+    onDismissZaiSyncReport: () -> Unit = {},
     onDismissZaiNotice: () -> Unit = {},
     onZaiApproveRunCommands: (Set<Int>) -> Unit = {},
     onZaiSkipRunCommands: () -> Unit = {},
@@ -4651,6 +4680,7 @@ private fun ChatTab(
                                 onAutoApply = onZaiAutoApply,
                                 onApplyAll = onZaiApplyAll,
                                 onApplyFile = onZaiApplyFile,
+                                onKeepBothFile = onZaiKeepBothFile,
                                 onReject = onZaiRejectPlan,
                             )
                         }
@@ -4699,10 +4729,30 @@ private fun ChatTab(
                         ZaiRunReportCard(report = report, onDismiss = onDismissZaiRunReport)
                     }
                 }
+                // ── v1.0.33: file-sync honesty report (wrote vs read vs skipped) ──
+                if (zaiSyncReport != null) {
+                    item(key = "zai-sync-report") {
+                        ZaiFileSyncReportCard(
+                            report = zaiSyncReport,
+                            appliedPaths = zaiAppliedPaths,
+                            syncRunning = zaiSyncRunning,
+                            onOpenFile = onOpenSyncedFile,
+                            onSyncNow = onSyncFilesNow,
+                            onDismiss = onDismissZaiSyncReport,
+                        )
+                    }
+                }
                 approval?.let { request -> item { ApprovalCard(request, onApproval) } }
                 zaiChatNotice?.let { notice ->
                     item(key = "zai-chat-notice") {
-                        ZaiChatNoticeCard(notice, onSignIn = onZaiSignIn, onDismiss = onDismissZaiNotice)
+                        ZaiChatNoticeCard(
+                            notice,
+                            onSignIn = onZaiSignIn,
+                            onDismiss = onDismissZaiNotice,
+                            onRereadReply = onRereadReply,
+                            onSyncFilesNow = onSyncFilesNow,
+                            syncRunning = zaiSyncRunning,
+                        )
                     }
                 }
             }
@@ -4780,6 +4830,39 @@ private fun ChatTab(
                     .fillMaxWidth()
                     .padding(horizontal = 14.dp, vertical = 8.dp)
             ) {
+                // v1.0.33: manual file sync — pull the files Z.ai wrote on the
+                // site into this project, any time (also right after a timeout).
+                if (engineTitle == ZaiChatPromptBuilder.ZAI_ENGINE_TITLE) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp),
+                        horizontalArrangement = Arrangement.End,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        val haptics = LocalHapticFeedback.current
+                        TextButton(
+                            onClick = {
+                                haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                onSyncFilesNow()
+                            },
+                            enabled = !isRunning && !zaiSyncRunning,
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                        ) {
+                            if (zaiSyncRunning) {
+                                CircularProgressIndicator(Modifier.size(13.dp), strokeWidth = 2.dp)
+                                Spacer(Modifier.width(6.dp))
+                                Text("Reading Z.ai's files…", fontSize = 12.sp)
+                            } else {
+                                Icon(
+                                    Icons.Default.Refresh,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(15.dp),
+                                )
+                                Spacer(Modifier.width(6.dp))
+                                Text("Sync files from Z.ai", fontSize = 12.sp)
+                            }
+                        }
+                    }
+                }
                 if (pendingAttachments.isNotEmpty()) {
                     Row(
                         Modifier

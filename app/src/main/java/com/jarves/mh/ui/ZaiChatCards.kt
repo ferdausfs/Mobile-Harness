@@ -61,6 +61,7 @@ import com.jarves.mh.model.DiffLine
 import com.jarves.mh.model.DiffLineType
 import com.jarves.mh.zweb.ZaiChatPromptBuilder
 import com.jarves.mh.zweb.ZaiChatTurnPresenter
+import com.jarves.mh.zweb.ZaiFileSync
 import com.jarves.mh.zweb.ZaiModelCatalog
 import com.jarves.mh.zweb.ZaiPendingApply
 import com.jarves.mh.zweb.ZaiRunLoopPolicy
@@ -119,6 +120,9 @@ fun ZaiChatNoticeCard(
     notice: ZaiChatTurnPresenter.TurnNotice,
     onSignIn: () -> Unit,
     onDismiss: () -> Unit,
+    onRereadReply: () -> Unit = {},
+    onSyncFilesNow: () -> Unit = {},
+    syncRunning: Boolean = false,
 ) {
     val accent = when (notice.kind) {
         ZaiChatTurnPresenter.NoticeKind.NEEDS_LOGIN, ZaiChatTurnPresenter.NoticeKind.CAPTCHA -> PocketOrange
@@ -138,7 +142,8 @@ fun ZaiChatNoticeCard(
                     when (notice.kind) {
                         ZaiChatTurnPresenter.NoticeKind.NEEDS_LOGIN -> "Sign-in needed"
                         ZaiChatTurnPresenter.NoticeKind.CAPTCHA -> "Verification needed"
-                        ZaiChatTurnPresenter.NoticeKind.TIMEOUT -> "Z.ai timed out"
+                        // v1.0.33: the site may still be working — not a failure.
+                        ZaiChatTurnPresenter.NoticeKind.TIMEOUT -> "Still running on the website"
                         ZaiChatTurnPresenter.NoticeKind.ERROR -> "Z.ai error"
                         ZaiChatTurnPresenter.NoticeKind.CANCELED -> "Stopped"
                     },
@@ -157,6 +162,24 @@ fun ZaiChatNoticeCard(
                         Text("Sign in to Z.ai")
                     }
                 }
+                // v1.0.33: timeout recovery — re-read the reply, or sync the
+                // files the site wrote once it finishes. Never a dead end.
+                if (notice.kind == ZaiChatTurnPresenter.NoticeKind.TIMEOUT) {
+                    Button(onClick = onRereadReply, shape = RoundedCornerShape(10.dp)) {
+                        Text("Re-read reply")
+                    }
+                    OutlinedButton(
+                        onClick = onSyncFilesNow,
+                        enabled = !syncRunning,
+                        shape = RoundedCornerShape(10.dp),
+                    ) {
+                        if (syncRunning) {
+                            CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
+                            Spacer(Modifier.width(6.dp))
+                        }
+                        Text(if (syncRunning) "Reading…" else "Sync files now")
+                    }
+                }
                 TextButton(onClick = onDismiss) { Text("Dismiss") }
             }
         }
@@ -170,6 +193,7 @@ fun ZaiFileReviewCard(
     onAutoApply: (Boolean) -> Unit,
     onApplyAll: () -> Unit,
     onApplyFile: (String) -> Unit,
+    onKeepBothFile: (String) -> Unit = {},
     onReject: () -> Unit,
 ) {
     Surface(
@@ -307,12 +331,25 @@ fun ZaiFileReviewCard(
                         }
                     }
                     AnimatedVisibility(visible = expanded) {
-                        OutlinedButton(
-                            onClick = { onApplyFile(file.path) },
-                            modifier = Modifier.fillMaxWidth(),
-                            shape = RoundedCornerShape(10.dp),
-                        ) {
-                            Text("Apply ${file.path.substringAfterLast('/')}")
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            OutlinedButton(
+                                onClick = { onApplyFile(file.path) },
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(10.dp),
+                            ) {
+                                Text("Apply ${file.path.substringAfterLast('/')}")
+                            }
+                            // v1.0.33: never overwrite silently — a conflicting
+                            // file can also be kept next to the original.
+                            if (file.status == ZaiWorkspaceApply.FileStatus.MODIFIED) {
+                                OutlinedButton(
+                                    onClick = { onKeepBothFile(file.path) },
+                                    modifier = Modifier.fillMaxWidth(),
+                                    shape = RoundedCornerShape(10.dp),
+                                ) {
+                                    Text("Keep both (save as ${keepBothPreview(file.path)})")
+                                }
+                            }
                         }
                     }
                 }
@@ -351,6 +388,170 @@ fun ZaiFileReviewCard(
                 fontSize = 11.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+        }
+    }
+}
+
+/** Short preview of the "keep both" name (matches ZaiFileSync.keepBothPath's first candidate). */
+private fun keepBothPreview(path: String): String {
+    val dot = path.lastIndexOf('.')
+    val base = if (dot > 0) path.substring(0, dot) else path
+    val ext = if (dot > 0) path.substring(dot) else ""
+    return "$base-zai-1$ext"
+}
+
+/**
+ * v1.0.33 file-sync honesty report card. Shows what Z.ai actually wrote vs
+ * what could be read vs what was skipped, with the amber warning when the
+ * site wrote files but NONE made it into the project — a task must never
+ * render green when nothing was synced. Also lists the paths that DID reach
+ * the project with an Open button each.
+ */
+@Composable
+fun ZaiFileSyncReportCard(
+    report: ZaiFileSync.SyncReport,
+    appliedPaths: List<String>,
+    syncRunning: Boolean,
+    onOpenFile: (String) -> Unit,
+    onSyncNow: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val reducedMotion = rememberReducedMotion()
+    val amber = Color(0xFFB98A2B)
+    val amberDark = Color(0xFFE3B95F)
+    val accent = if (report.wroteButNoneReadable) amberDark else PocketGreen
+    Surface(
+        color = MaterialTheme.colorScheme.surface,
+        shape = RoundedCornerShape(14.dp),
+        border = BorderStroke(1.dp, accent.copy(alpha = 0.55f)),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(13.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    modifier = Modifier
+                        .size(26.dp)
+                        .background(accent.copy(alpha = 0.14f), RoundedCornerShape(8.dp)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text("Z", color = accent, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                }
+                Spacer(Modifier.width(8.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        "Files from Z.ai",
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 13.sp,
+                    )
+                    Text(
+                        when {
+                            syncRunning -> "Reading the site's files…"
+                            report.wroteButNoneReadable ->
+                                "Z.ai wrote ${report.wroteCount} file(s) — none could be read"
+                            else ->
+                                "Z.ai wrote ${report.wroteCount} · ready to sync ${report.readablePaths.size}"
+                        },
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                if (syncRunning && !reducedMotion) {
+                    CircularProgressIndicator(Modifier.size(15.dp), strokeWidth = 2.dp)
+                }
+            }
+
+            if (report.wroteButNoneReadable) {
+                Surface(
+                    color = amber.copy(alpha = 0.14f),
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(
+                        "Z.ai says it wrote files but none reached the project. " +
+                            "Use \"Sync files from Z.ai\" below once the site has finished.",
+                        Modifier.padding(9.dp),
+                        fontSize = 11.sp,
+                        color = amberDark,
+                    )
+                }
+            }
+
+            if (appliedPaths.isNotEmpty()) {
+                Text(
+                    "Files synced to project: ${appliedPaths.size}",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = PocketGreen,
+                )
+                appliedPaths.take(12).forEach { path ->
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(
+                            path,
+                            Modifier.weight(1f),
+                            fontSize = 11.sp,
+                            fontFamily = FontFamily.Monospace,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        TextButton(
+                            onClick = { onOpenFile(path) },
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                        ) { Text("Open", fontSize = 11.sp) }
+                    }
+                }
+                if (appliedPaths.size > 12) {
+                    Text(
+                        "… and ${appliedPaths.size - 12} more (see the Files tab)",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+
+            if (report.unreadablePaths.isNotEmpty()) {
+                Text(
+                    "Files Z.ai wrote but could NOT be read: ${report.unreadablePaths.size} — " +
+                        report.unreadablePaths.take(6).joinToString(),
+                    fontSize = 11.sp,
+                    color = amberDark,
+                    maxLines = 4,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            if (report.binarySkipped.isNotEmpty()) {
+                Text(
+                    "Skipped (binary, not synced): ${report.binarySkipped.take(6).joinToString()}",
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 3,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            if (report.sourceNotes.isNotEmpty()) {
+                Text(
+                    report.sourceNotes.first(),
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(
+                    onClick = onSyncNow,
+                    enabled = !syncRunning,
+                    shape = RoundedCornerShape(10.dp),
+                ) {
+                    Icon(Icons.Default.Refresh, null, Modifier.size(14.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text(if (syncRunning) "Reading…" else "Sync files from Z.ai")
+                }
+                TextButton(onClick = onDismiss) { Text("Dismiss") }
+            }
         }
     }
 }

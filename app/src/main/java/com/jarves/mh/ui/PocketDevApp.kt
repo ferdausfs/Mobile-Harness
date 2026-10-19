@@ -377,6 +377,7 @@ fun PocketDevApp(viewModel: MainViewModel = viewModel()) {
             onZaiRereadReply = viewModel::zaiReattachReply,
             onZaiSyncFilesNow = viewModel::zaiSyncFilesNow,
             onZaiOpenSyncedFile = viewModel::zaiOpenSyncedFile,
+            onZaiOpenPreview = viewModel::zaiOpenPreview,
             onDismissZaiSyncReport = viewModel::zaiDismissSyncReport,
             onDismissZaiNotice = viewModel::clearZaiChatNotice,
             onZaiApproveRunCommands = viewModel::zaiApproveRunCommands,
@@ -3936,6 +3937,7 @@ private fun WorkspaceScreen(
     onZaiRereadReply: () -> Unit,
     onZaiSyncFilesNow: () -> Unit,
     onZaiOpenSyncedFile: (String) -> Unit,
+    onZaiOpenPreview: () -> Unit,
     onDismissZaiSyncReport: () -> Unit,
     onDismissZaiNotice: () -> Unit,
     onZaiApproveRunCommands: (Set<Int>) -> Unit,
@@ -4224,6 +4226,9 @@ private fun WorkspaceScreen(
                     zaiSyncReport = state.zaiSyncReport,
                     zaiAppliedPaths = state.zaiAppliedPaths,
                     zaiSyncRunning = state.zaiSyncRunning || state.zaiWeb.fileSyncRunning,
+                    zaiFilesClaimed = state.zaiFilesClaimed,
+                    zaiSyncedFiles = state.zaiSyncedFiles,
+                    zaiPreviewAvailable = state.zaiPreviewAvailable,
                     onZaiApplyFile = onZaiApplyFile,
                     onZaiApplyAll = onZaiApplyAll,
                     onZaiRejectPlan = onZaiRejectPlan,
@@ -4233,6 +4238,10 @@ private fun WorkspaceScreen(
                     onRereadReply = onZaiRereadReply,
                     onSyncFilesNow = onZaiSyncFilesNow,
                     onOpenSyncedFile = onZaiOpenSyncedFile,
+                    onOpenPreview = {
+                        onZaiOpenPreview()
+                        selectedTab = WorkspaceTab.PREVIEW
+                    },
                     onDismissZaiSyncReport = onDismissZaiSyncReport,
                     onDismissZaiNotice = onDismissZaiNotice,
                     onZaiApproveRunCommands = onZaiApproveRunCommands,
@@ -4628,6 +4637,9 @@ private fun ChatTab(
     zaiSyncReport: ZaiFileSync.SyncReport? = null,
     zaiAppliedPaths: List<String> = emptyList(),
     zaiSyncRunning: Boolean = false,
+    zaiFilesClaimed: Boolean = false,
+    zaiSyncedFiles: List<ZaiFileSync.SyncedFileDetail> = emptyList(),
+    zaiPreviewAvailable: Boolean = false,
     onZaiApplyFile: (String) -> Unit = {},
     onZaiApplyAll: () -> Unit = {},
     onZaiRejectPlan: () -> Unit = {},
@@ -4637,6 +4649,7 @@ private fun ChatTab(
     onRereadReply: () -> Unit = {},
     onSyncFilesNow: () -> Unit = {},
     onOpenSyncedFile: (String) -> Unit = {},
+    onOpenPreview: () -> Unit = {},
     onDismissZaiSyncReport: () -> Unit = {},
     onDismissZaiNotice: () -> Unit = {},
     onZaiApproveRunCommands: (Set<Int>) -> Unit = {},
@@ -4726,7 +4739,20 @@ private fun ChatTab(
                 }
                 zaiRunReport?.let { report ->
                     item(key = "zai-run-report") {
-                        ZaiRunReportCard(report = report, onDismiss = onDismissZaiRunReport)
+                        // v1.0.34 honesty: amber + Sync button when the reply
+                        // named files but none reached the project (nothing
+                        // applied, nothing waiting in the review card).
+                        val filesNotSynced = ZaiFileSync.filesNotSyncedWarning(
+                            claimsFiles = zaiFilesClaimed,
+                            appliedCount = zaiAppliedPaths.size,
+                            pendingReviewCount = zaiPendingApply?.files?.size ?: 0,
+                        )
+                        ZaiRunReportCard(
+                            report = report,
+                            filesNotSynced = filesNotSynced,
+                            onSyncNow = onSyncFilesNow,
+                            onDismiss = onDismissZaiRunReport,
+                        )
                     }
                 }
                 // ── v1.0.33: file-sync honesty report (wrote vs read vs skipped) ──
@@ -4734,10 +4760,12 @@ private fun ChatTab(
                     item(key = "zai-sync-report") {
                         ZaiFileSyncReportCard(
                             report = zaiSyncReport,
-                            appliedPaths = zaiAppliedPaths,
+                            syncedFiles = zaiSyncedFiles,
                             syncRunning = zaiSyncRunning,
+                            previewAvailable = zaiPreviewAvailable,
                             onOpenFile = onOpenSyncedFile,
                             onSyncNow = onSyncFilesNow,
+                            onOpenPreview = onOpenPreview,
                             onDismiss = onDismissZaiSyncReport,
                         )
                     }

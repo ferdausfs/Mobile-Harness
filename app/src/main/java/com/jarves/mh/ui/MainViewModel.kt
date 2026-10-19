@@ -45,6 +45,7 @@ import com.jarves.mh.network.ProviderApiClient
 import com.jarves.mh.network.GitHubRepository
 import com.jarves.mh.runtime.ClaudeRuntimeBridge
 import com.jarves.mh.runtime.DshRuntimeBridge
+import com.jarves.mh.runtime.ProjectPreviewServer
 import com.jarves.mh.runtime.AgentRegistry
 import com.jarves.mh.runtime.AgentUpdateInfo
 import com.jarves.mh.runtime.AntigravityAuthController
@@ -314,6 +315,18 @@ data class AppUiState(
     val zaiAppliedPaths: List<String> = emptyList(),
     /** True while the manual file-sync probe reads the site (v1.0.33). */
     val zaiSyncRunning: Boolean = false,
+    // ── v1.0.34: honest report + verified per-file results ──
+    /**
+     * The finished reply named files (FILE: markers, unmatched or invalid, or
+     * the site probe saw sandbox writes). Drives the amber "Files not synced"
+     * state on the final report card — never a green finish when files were
+     * claimed and none arrived.
+     */
+    val zaiFilesClaimed: Boolean = false,
+    /** Synced files verified by reading them back from disk (path + byte count). */
+    val zaiSyncedFiles: List<ZaiFileSync.SyncedFileDetail> = emptyList(),
+    /** The workspace has an index.html — the sync card offers "Open preview". */
+    val zaiPreviewAvailable: Boolean = false,
     // ── Phase 1 model picker ──
     /** True while the Z.ai model picker sheet is open. */
     val zaiModelPickerOpen: Boolean = false,
@@ -4938,6 +4951,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         zaiRunLoopLog = emptyList(),
                         zaiRunPendingCommands = emptyList(),
                         zaiRunReport = null,
+                        // A new turn replaces the previous claim: the amber
+                        // "Files not synced" verdict always reflects the LATEST reply.
+                        zaiFilesClaimed = false,
                     )
                 }
                 startZaiForeground("Sending: ${requestText.take(60)}")
@@ -5340,6 +5356,36 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             atMillis = System.currentTimeMillis(),
         )
         _state.update { it.copy(zaiRunLoopLog = it.zaiRunLoopLog + entry) }
+        mirrorZaiRunToTerminal(turn, entry)
+    }
+
+    /**
+     * v1.0.34 (CONCERN B, optional part): the RUN loop's commands and their
+     * bounded output also appear in the project's Terminal tab, marked with a
+     * [Z.ai] prefix, so every engine's command history is visible in the same
+     * place. Persisted with the terminal history; never contains raw secrets
+     * (the summary is already redacted upstream).
+     */
+    private fun mirrorZaiRunToTerminal(turn: ZaiActiveTurn, entry: ZaiRunLogEntry) {
+        runCatching {
+            val line = TerminalOutputLine(
+                command = "[Z.ai] ${entry.command}",
+                output = entry.summary.ifBlank {
+                    when {
+                        entry.refused -> "refused"
+                        entry.timedOut -> "timed out"
+                        else -> "(no output)"
+                    }
+                },
+                exitCode = entry.exitCode ?: -1,
+            )
+            _state.update { it.copy(projectTerminalLines = it.projectTerminalLines + line) }
+            saveProjectTerminal(
+                turn.project.id,
+                projectGuestRoot(turn.project),
+                _state.value.projectTerminalLines,
+            )
+        }
     }
 
     /**
@@ -5425,6 +5471,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             "Answer ready in ${turn.project.name}.",
         )
         val assistantMessage = ChatMessage(fromUser = false, text = reply)
+        // v1.0.34 honesty: did THIS reply claim files? Any FILE: marker the
+        // parser found, named without content, or rejected as unsafe — or the
+        // site probe reporting sandbox writes — counts as a claim. The report
+        // card turns amber when nothing reached the project.
+        val claimsFiles = runCatching {
+            ZaiFileSync.replyClaimsFiles(
+                ZaiFileExtractor.parseCaptured(reply, emptyList()),
+                current.lastSync,
+            )
+        }.getOrDefault(false)
         _state.update {
             it.copy(
                 messages = it.messages + assistantMessage,
@@ -5435,6 +5491,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 // v1.0.33: the engine's honesty report rides along (what Z.ai
                 // wrote vs what could be read). Null = probe never ran.
                 zaiSyncReport = current.lastSync ?: it.zaiSyncReport,
+                zaiFilesClaimed = claimsFiles,
             )
         }
         persistMessages()
@@ -5496,6 +5553,51 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /** Clears the sync result card. */
     fun zaiDismissSyncReport() {
         _state.update { it.copy(zaiSyncReport = null, zaiAppliedPaths = emptyList()) }
+    }
+
+    /** Local static server for the project folder (v1.0.34 CONCERN B). */
+    private var zaiPreviewServer: ProjectPreviewServer? = null
+    private var zaiPreviewServerRoot: String? = null
+
+    /**
+     * "Open preview" after a sync: serves the project folder on 127.0.0.1 and
+     * readies [state.previewUrl] for the Preview tab — the same tab Antigravity
+     * projects use, regardless of which engine wrote the files.
+     */
+    fun zaiOpenPreview() {
+        val project = _state.value.activeProject ?: return
+        viewModelScope.launch(backgroundGuard) {
+            val root = projectWorkspaceRoot(project)
+            if (!File(root, "index.html").isFile) {
+                withContext(Dispatchers.Main) {
+                    _state.update {
+                        it.copy(toastMessage = "This project has no index.html yet — create one first.")
+                    }
+                }
+                return@launch
+            }
+            withContext(Dispatchers.IO) {
+                runCatching {
+                    if (zaiPreviewServer == null || zaiPreviewServerRoot != root.canonicalPath) {
+                        zaiPreviewServer?.stop()
+                        zaiPreviewServer = ProjectPreviewServer(root).also { it.start() }
+                        zaiPreviewServerRoot = root.canonicalPath
+                    } else {
+                        zaiPreviewServer?.start()
+                    }
+                }
+            }
+            val url = zaiPreviewServer?.url
+            withContext(Dispatchers.Main) {
+                _state.update {
+                    if (url == null) {
+                        it.copy(toastMessage = "Could not start the local preview server.")
+                    } else {
+                        it.copy(previewReady = true, previewUrl = url)
+                    }
+                }
+            }
+        }
     }
 
     /**
@@ -5688,8 +5790,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 if (outcome.applied.isNotEmpty()) {
                     lastZaiApplyActive = true
                     val appliedSet = outcome.applied.toSet()
+                    // v1.0.34: verify by reading every applied file back from
+                    // disk (path + byte count). A missing file shows as
+                    // unverified instead of being counted as synced.
+                    val verified = withContext(Dispatchers.IO) {
+                        ZaiFileSync.verifyOnDisk(outcome.applied) { path ->
+                            val f = File(workspace, path)
+                            if (f.isFile) f.length() else null
+                        }
+                    }
                     val details = withContext(Dispatchers.IO) {
                         zaiCheckpoints.buildChangeDetails(pending.projectId, workspace, outcome.applied)
+                    }
+                    // v1.0.34 CONCERN B: a synced index.html makes the project
+                    // previewable regardless of which engine wrote it.
+                    val previewNowAvailable = withContext(Dispatchers.IO) {
+                        File(workspace, "index.html").isFile
                     }
                     _state.update { current ->
                         current.copy(
@@ -5698,6 +5814,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             zaiPendingApply = current.zaiPendingApply?.takeIf { !it.isEmpty },
                             // v1.0.33: honest "files synced to project" result.
                             zaiAppliedPaths = (current.zaiAppliedPaths + outcome.applied).distinct(),
+                            zaiSyncedFiles = (current.zaiSyncedFiles.filterNot { it.path in appliedSet } + verified)
+                                .sortedBy { it.path },
+                            zaiPreviewAvailable = current.zaiPreviewAvailable || previewNowAvailable,
                             toastMessage = "Synced ${outcome.applied.size} file(s) to the project — Undo is available in Changes.",
                         )
                     }
@@ -5804,6 +5923,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     override fun onCleared() {
         zaiWebController.shutdown()
+        zaiPreviewServer?.stop()
+        zaiPreviewServer = null
         super.onCleared()
     }
 

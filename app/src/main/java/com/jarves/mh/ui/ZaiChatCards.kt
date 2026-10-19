@@ -25,6 +25,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.Preview
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Warning
@@ -410,13 +411,16 @@ private fun keepBothPreview(path: String): String {
 @Composable
 fun ZaiFileSyncReportCard(
     report: ZaiFileSync.SyncReport,
-    appliedPaths: List<String>,
+    syncedFiles: List<ZaiFileSync.SyncedFileDetail>,
     syncRunning: Boolean,
+    previewAvailable: Boolean,
     onOpenFile: (String) -> Unit,
     onSyncNow: () -> Unit,
+    onOpenPreview: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     val reducedMotion = rememberReducedMotion()
+    val haptics = LocalHapticFeedback.current
     val amber = Color(0xFFB98A2B)
     val amberDark = Color(0xFFE3B95F)
     val accent = if (report.wroteButNoneReadable) amberDark else PocketGreen
@@ -476,35 +480,48 @@ fun ZaiFileSyncReportCard(
                 }
             }
 
-            if (appliedPaths.isNotEmpty()) {
+            if (syncedFiles.isNotEmpty()) {
                 Text(
-                    "Files synced to project: ${appliedPaths.size}",
+                    "Files synced to project: ${syncedFiles.size} (verified on disk)",
                     fontSize = 12.sp,
                     fontWeight = FontWeight.SemiBold,
                     color = PocketGreen,
                 )
-                appliedPaths.take(12).forEach { path ->
+                syncedFiles.take(12).forEach { file ->
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier.fillMaxWidth(),
                     ) {
                         Text(
-                            path,
+                            file.path,
                             Modifier.weight(1f),
                             fontSize = 11.sp,
                             fontFamily = FontFamily.Monospace,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
+                        Text(
+                            if (file.verified) ZaiFileSync.formatBytes(file.bytes) else "?",
+                            fontSize = 10.sp,
+                            color = if (file.verified) {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            } else {
+                                MaterialTheme.colorScheme.error
+                            },
+                        )
+                        Spacer(Modifier.width(6.dp))
                         TextButton(
-                            onClick = { onOpenFile(path) },
+                            onClick = {
+                                haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                onOpenFile(file.path)
+                            },
                             contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
                         ) { Text("Open", fontSize = 11.sp) }
                     }
                 }
-                if (appliedPaths.size > 12) {
+                if (syncedFiles.size > 12) {
                     Text(
-                        "… and ${appliedPaths.size - 12} more (see the Files tab)",
+                        "… and ${syncedFiles.size - 12} more (see the Files tab)",
                         fontSize = 11.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -549,6 +566,19 @@ fun ZaiFileSyncReportCard(
                     Icon(Icons.Default.Refresh, null, Modifier.size(14.dp))
                     Spacer(Modifier.width(6.dp))
                     Text(if (syncRunning) "Reading…" else "Sync files from Z.ai")
+                }
+                if (previewAvailable) {
+                    OutlinedButton(
+                        onClick = {
+                            haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            onOpenPreview()
+                        },
+                        shape = RoundedCornerShape(10.dp),
+                    ) {
+                        Icon(Icons.Default.Preview, null, Modifier.size(14.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Open preview")
+                    }
                 }
                 TextButton(onClick = onDismiss) { Text("Dismiss") }
             }
@@ -1181,13 +1211,25 @@ fun ZaiRunActivityCard(entries: List<ZaiRunLogEntry>, expandedInitially: Boolean
     }
 }
 
-/** The final report card after a loop task finishes. */
+/**
+ * The final report card after a loop task finishes. v1.0.34: when the reply
+ * claimed files but none reached the project, the card is AMBER with a
+ * "Files not synced" block and the sync button — never a green finish.
+ */
 @Composable
-fun ZaiRunReportCard(report: ZaiRunProtocol.LoopReport, onDismiss: () -> Unit) {
+fun ZaiRunReportCard(
+    report: ZaiRunProtocol.LoopReport,
+    filesNotSynced: Boolean,
+    onSyncNow: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val amber = Color(0xFFB98A2B)
+    val amberDark = Color(0xFFE3B95F)
+    val accent = if (filesNotSynced) amberDark else PocketGreen
     Surface(
         shape = RoundedCornerShape(14.dp),
-        color = PocketGreen.copy(alpha = 0.08f),
-        border = BorderStroke(1.dp, PocketGreen.copy(alpha = 0.35f)),
+        color = accent.copy(alpha = 0.08f),
+        border = BorderStroke(1.dp, accent.copy(alpha = 0.35f)),
         modifier = Modifier.fillMaxWidth(),
     ) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -1205,6 +1247,21 @@ fun ZaiRunReportCard(report: ZaiRunProtocol.LoopReport, onDismiss: () -> Unit) {
                 fontSize = 11.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            if (filesNotSynced) {
+                Surface(
+                    color = amber.copy(alpha = 0.14f),
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(
+                        "Files not synced — Z.ai named files in this reply but none reached " +
+                            "the project. Sync them from the site now.",
+                        Modifier.padding(9.dp),
+                        fontSize = 11.sp,
+                        color = amberDark,
+                    )
+                }
+            }
             if (report.summary.isNotBlank()) {
                 Text(
                     report.summary,
@@ -1215,8 +1272,20 @@ fun ZaiRunReportCard(report: ZaiRunProtocol.LoopReport, onDismiss: () -> Unit) {
                     overflow = TextOverflow.Ellipsis,
                 )
             }
-            TextButton(onClick = onDismiss, contentPadding = PaddingValues(0.dp)) {
-                Text("Dismiss", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (filesNotSynced) {
+                    OutlinedButton(
+                        onClick = onSyncNow,
+                        shape = RoundedCornerShape(10.dp),
+                    ) {
+                        Icon(Icons.Default.Refresh, null, Modifier.size(14.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Sync files now", fontSize = 12.sp)
+                    }
+                }
+                TextButton(onClick = onDismiss, contentPadding = PaddingValues(0.dp)) {
+                    Text("Dismiss", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
             }
         }
     }

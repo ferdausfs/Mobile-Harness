@@ -1,12 +1,12 @@
 {
-  "versionCode": 26,
-  "versionName": "1.0.25",
-  "notes": "New: pick Z.ai as the engine of your PROJECT workspace chat. Tap the engine name under the chat title (or flip \"Project chat engine\" on the Z.ai tab) and the same chat screen runs on Z.ai: each message carries your project's file tree and the files that matter, the model answers with a plan and FULL files marked \"FILE: path\", you get a review card with per-file diffs and Apply / Apply all / Reject (a checkpoint is created before applying, so Undo always works in Changes), and \"NEED_FILES\" requests are fulfilled automatically. A hard prompt budget with clear truncation markers keeps every message under chat.z.ai's input limit. Your three CLI agents are completely unchanged. Progress (\"sending\"/\"generating\"/\"reading answer\"), a Stop button and clear errors (not signed in / captcha / timeout) with a sign-in button are all in the chat. Same signing key - installs over v1.0.24 with one tap.",
+  "versionCode": 27,
+  "versionName": "1.0.26",
+  "notes": "Fix: the in-app updater no longer crashes the moment a download starts. On 1.0.24/1.0.25 every in-app update from Settings > App update died with UnknownFormatConversionException as soon as the download size became known - the progress text fed a pattern ending in a lone '%' to String.format. Progress lines are now built without ever using visible text as a format pattern, and a new source-scan test guards against that whole bug class. Download resume, the SHA-256 check and the installer hand-off are unchanged, and the Last crash card in Settings still lets you copy and clear a crash report. Same signing key - installs over 1.0.25 with one tap.",
   "artifacts": {
     "online": {
-      "url": "https://github.com/ferdausfs/Mobile-Harness/releases/download/v1.0.25/mobile-harness-online-v1.0.25.apk",
-      "sha256": "ed3e20c8a836c16d463a252515589143e871f0572a98d1ce4ccf6f8282fba6a5",
-      "sizeBytes": 88222047
+      "url": "https://github.com/ferdausfs/Mobile-Harness/releases/download/v1.0.26/mobile-harness-online-v1.0.26.apk",
+      "sha256": "fb183c05039b8b07965781b89ae6d16eb40f98be325e4fdd346d080ad13053b5",
+      "sizeBytes": 88222939
     }
   }
 }

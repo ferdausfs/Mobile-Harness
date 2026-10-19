@@ -1,12 +1,12 @@
 {
-  "versionCode": 34,
-  "versionName": "1.0.33",
-  "notes": "Files Z.ai writes on chat.z.ai now land in your project. Z.ai works in its own sandbox on the website; v1.0.33 reads those files back (the site's tool-call records and its per-message versions storage) and syncs them into the project with a review card: per-file diff, Apply / Apply all / Reject, a new Keep both choice for conflicting files (saves the Z.ai copy as name-zai-1.ext, never overwrites silently), and an honest result card - Files synced to project: N with Open buttons, Files Z.ai wrote but could NOT be read: N, binary files skipped with a message, and an amber warning (never a green finish) when Z.ai wrote files but none could be read. A manual Sync files from Z.ai button sits in the project chat above the composer, so you can pull files after the site finished. The reply protocol now teaches Z.ai to write WHOLE files with their relative paths and to list every file it changed; commands (RUN) stay optional and a reply without them is never a failure. Timeout rework: the app keeps waiting while the site is still generating (stop indicator, streaming text, or tool activity all count as progress); it times out only after 300s of NO page change, with a 30-minute absolute cap, and a timeout now shows Still running on the website with Re-read reply / Sync files now buttons instead of a dead failure. Nothing new runs at startup.",
+  "versionCode": 35,
+  "versionName": "1.0.34",
+  "notes": "File sync from Z.ai now works when the website's viewer consumed the code fences: v1.0.34 parses the FILE: blocks from the reply text the app already captured for the turn (fences or no fences, plain pasted content, language labels, CRLF, Bengali prose around the blocks), and the site-side lookup walks the website's own message chain with tolerant response shapes and timestamps. The final report card turns AMBER with \"Files not synced\" and a Sync button whenever Z.ai claimed files but none reached the project - never a green \"Task finished\". Synced files are verified by reading them back from disk (path + byte count) with Open buttons. Project tabs are identical for Z.ai and Antigravity (Chat / Files / Terminal / Preview): a synced index.html gets an \"Open preview\" button that serves the project folder on localhost, and RUN-loop commands appear in the project Terminal marked [Z.ai]. Everything from v1.0.33 (conflict choices, keep-both, undo, the no-progress timeout with Re-read / Sync files now, the manual \"Sync files from Z.ai\" button) works the same. Nothing new runs at startup.",
   "artifacts": {
     "online": {
-      "url": "https://github.com/ferdausfs/Mobile-Harness/releases/download/v1.0.33/mobile-harness-online-v1.0.33.apk",
-      "sha256": "8eb9abd2ce23cad74af5999b52d4a3acb9d33e200bcc14150f4ed540d1671d19",
-      "sizeBytes": 88893275
+      "url": "https://github.com/ferdausfs/Mobile-Harness/releases/download/v1.0.34/mobile-harness-online-v1.0.34.apk",
+      "sha256": "c4ba34f839b540b44c987fb016f410bc140a810611e54bacc689615c8e74ce28",
+      "sizeBytes": 88944663
     }
   }
 }

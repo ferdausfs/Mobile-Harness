@@ -121,7 +121,7 @@ import com.jarves.mh.ui.theme.PocketGreen
 import com.jarves.mh.ui.theme.PocketOrange
 import kotlinx.coroutines.launch
 
-private enum class SettingsSection { APPEARANCE, TOOLS, RUNTIME, UPDATE_CHANNEL }
+private enum class SettingsSection { APPEARANCE, TOKENS, TOOLS, RUNTIME, UPDATE_CHANNEL }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -152,6 +152,15 @@ fun SettingsScreen(
     onCheckAppUpdate: () -> Unit = {},
     onInstallAppUpdate: () -> Unit = {},
     onDismissAppUpdateError: () -> Unit = {},
+    onAddToken: (String, String, String, String) -> Unit = { _, _, _, _ -> },
+    onUpdateTokenValue: (String, String) -> Unit = { _, _ -> },
+    onRemoveToken: (String) -> Unit = {},
+    onTestToken: (String) -> Unit = {},
+    onMarkTokenRotated: (String) -> Unit = {},
+    onSetTokenEnabled: (String, Boolean) -> Unit = { _, _ -> },
+    onSetTokenAutoDisable: (String, Boolean) -> Unit = { _, _ -> },
+    onSetTokenAllowedProjects: (String, Set<String>) -> Unit = { _, _ -> },
+    onDismissRotationNotice: () -> Unit = {},
     initialDebugUpdateManifestUrl: String = "",
     onSetDebugUpdateManifestUrl: (String) -> Unit = {},
     onClearDebugUpdateManifestUrl: () -> Unit = {},
@@ -391,6 +400,39 @@ fun SettingsScreen(
                             ) { Text("Open Developer options") }
                         }
                     }
+                }
+            }
+
+            item {
+                val flaggedCount = state.tokens.count { it.needsRotation }
+                SettingsAccordion(
+                    title = "Tokens",
+                    subtitle = when {
+                        state.tokens.isEmpty() -> "Provider tokens for task automation"
+                        flaggedCount > 0 -> "${state.tokens.size} stored · $flaggedCount need rotation"
+                        else -> "${state.tokens.size} stored · encrypted, never sent to models"
+                    },
+                    icon = Icons.Default.Psychology,
+                    expanded = expanded == SettingsSection.TOKENS,
+                    onClick = { toggle(SettingsSection.TOKENS) },
+                ) {
+                    TokensSection(
+                        tokens = state.tokens,
+                        projects = state.projects,
+                        testRunningId = state.tokenTestRunningId,
+                        testResults = state.tokenTestResults,
+                        testValid = state.tokenTestValid,
+                        rotationNotice = state.rotationNotice,
+                        onAddToken = onAddToken,
+                        onUpdateTokenValue = onUpdateTokenValue,
+                        onRemoveToken = onRemoveToken,
+                        onTestToken = onTestToken,
+                        onMarkRotated = onMarkTokenRotated,
+                        onSetTokenEnabled = onSetTokenEnabled,
+                        onSetTokenAutoDisable = onSetTokenAutoDisable,
+                        onSetTokenAllowedProjects = onSetTokenAllowedProjects,
+                        onDismissRotationNotice = onDismissRotationNotice,
+                    )
                 }
             }
 

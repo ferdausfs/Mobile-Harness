@@ -1,12 +1,12 @@
 {
-  "versionCode": 28,
-  "versionName": "1.0.27",
-  "notes": "New: watch Z.ai think and answer LIVE in your project chat - a collapsible Thinking section, the partial answer as it streams, the latest tool/step line, phase and elapsed time, refreshed about once a second. The current model (read from chat.z.ai's own label) shows in the chat header and engine picker, and the new model picker lists the options from chat.z.ai's own dropdown: picking one drives the hidden page and is verified by reading the label back, with a clear message and the read-only label if automation ever fails. Your pick is remembered. Sign-in, NEED_FILES, review-and-apply and the prompt budget are unchanged; the three CLI agents are untouched. Same signing key - installs over 1.0.26 with one tap.",
+  "versionCode": 29,
+  "versionName": "1.0.28",
+  "notes": "New: Settings > Tokens - your own token vault. Add named tokens for GitHub, Cloudflare, Vercel, Firebase, Supabase, npm or a custom env var name. Values are encrypted with the Android keystore, shown only masked, and never sent to any model: prompts to chat.z.ai, transcripts, crash reports, logs and clipboard exports have token values (and common shapes like ghp_/glpat-) replaced by ***. A Test token button runs a read-only provider call with a plain-language result. After every task that had tokens enabled you get a Rotate-these-tokens card and notification with a per-provider button to the token management page; badges persist until you tap Rotated or replace the token, with an optional auto-disable after each task. Nothing is ever deleted without your tap.",
   "artifacts": {
     "online": {
-      "url": "https://github.com/ferdausfs/Mobile-Harness/releases/download/v1.0.27/mobile-harness-online-v1.0.27.apk",
-      "sha256": "a77c30a86f11ba6792a3a6d555a1373ee156b96f4130f88815ddb0c507d6e3ec",
-      "sizeBytes": 88310891
+      "url": "https://github.com/ferdausfs/Mobile-Harness/releases/download/v1.0.28/mobile-harness-online-v1.0.28.apk",
+      "sha256": "60d27cb8f43ad27d4b188dbaacd3bf3805000ab85e583e61568af89852179bb3",
+      "sizeBytes": 88493899
     }
   }
 }

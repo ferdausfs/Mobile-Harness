@@ -14,6 +14,8 @@ object ZaiRunLoopPolicy {
 
     /** Run autonomy modes. FULL_AUTO is the DEFAULT (user's explicit order). */
     enum class AutonomyMode {
+        /** No RUN loop: plain chat-engine turns (protocol not taught). */
+        OFF,
         ASK_EACH_COMMAND,
         SAFE_AUTO,
         FULL_AUTO,
@@ -68,7 +70,7 @@ object ZaiRunLoopPolicy {
     fun nextAction(reply: String, budget: Budget): Decision {
         if (budget.iterationsUsed >= budget.maxIterations) {
             return Decision.Exhausted(
-                "Reached the iteration limit ($budget.maxIterations commands). " +
+                "Reached the iteration limit (${budget.maxIterations} commands). " +
                     "Send the task again to continue from where it stopped.",
             )
         }
@@ -99,5 +101,36 @@ object ZaiRunLoopPolicy {
         val cleaned = output.trim()
         if (cleaned.length <= maxChars) return cleaned
         return "… (output truncated, showing the last $maxChars characters)\n" + cleaned.takeLast(maxChars)
+    }
+
+    /**
+     * SAFE_AUTO gate: commands that only LOOK at the workspace run without
+     * asking; anything that writes, installs, removes, moves, or reaches the
+     * network pauses for the user. Deliberately conservative — every listed
+     * read-only head must be the FIRST word (or `git <sub>`), and the line
+     * must not contain a redirect/pipe-to-write/substitution, which the
+     * denylist segmentation would otherwise hide from this quick check.
+     */
+    fun isReadOnlyCommand(command: String): Boolean {
+        val trimmed = command.trim()
+        if (trimmed.isEmpty()) return false
+        if (Regex("[><] |\\|\\s*\\S|\\$\\(|`|&&|;|\\|\\s*$").containsMatchIn(trimmed)) return false
+        val first = trimmed.split(Regex("\\s+")).firstOrNull()?.lowercase() ?: return false
+        val readOnlyHeads = setOf(
+            "ls", "cat", "head", "tail", "grep", "rg", "find", "wc", "file", "du", "df",
+            "pwd", "which", "whoami", "date", "stat", "tree", "less", "more", "diff",
+            "sort", "uniq", "cut", "sed", "awk", "xargs", "basename", "dirname", "realpath",
+        )
+        if (first in readOnlyHeads) return true
+        if (first == "git") {
+            val sub = trimmed.split(Regex("\\s+")).getOrNull(1)?.lowercase()
+            return sub in setOf("status", "log", "diff", "show", "branch", "remote", "config", "--version")
+        }
+        if (first == "node" || first == "python" || first == "python3" || first == "npm" || first == "java") {
+            // Version checks are read-only; scripts are not (they can do anything).
+            val versionish = Regex("(^|\\s)-{1,2}v(ersion)?\\b").containsMatchIn(trimmed)
+            return versionish
+        }
+        return false
     }
 }

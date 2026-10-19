@@ -113,9 +113,12 @@ object ZaiProbeScripts {
      * settling, later injectors skip WITHOUT clearing, so a slow result still
      * lands and is picked up by the next read.
      *
-     * Secrets: the script never returns the token value or the account email —
-     * presence booleans, the role string and truncated error text only. The
-     * top-level `signedIn` boolean is a compat mirror of
+     * Secrets: the script never returns the token VALUE. The account NAME and
+     * EMAIL travel in the payload ONLY so the account card can show them
+     * (v1.0.30, same data the site renders for the signed-in user) — they are
+     * published into UI state and are never written to logs, the Diagnostics
+     * summary or the secret-free probe report (summary() stays presence-only).
+     * The top-level `signedIn` boolean is a compat mirror of
      * [com.jarves.mh.zweb.ZaiAuthProbeClassifier.classify] for callers that
      * have not switched to the parsed sources yet.
      */
@@ -127,19 +130,21 @@ object ZaiProbeScripts {
             (function(){
               var path=$pathJson;
               function slim(j,status){
-                if(j===null||typeof j!=='object')return{status:status,shape:'empty',role:'',emailPresent:false,guest:false,error:''};
-                if(j.detail!=null&&j.detail!==undefined)return{status:status,shape:'detail',role:'',emailPresent:false,guest:false,error:String(j.detail).slice(0,160)};
+                if(j===null||typeof j!=='object')return{status:status,shape:'empty',role:'',emailPresent:false,guest:false,error:'',name:'',email:''};
+                if(j.detail!=null&&j.detail!==undefined)return{status:status,shape:'detail',role:'',emailPresent:false,guest:false,error:String(j.detail).slice(0,160),name:'',email:''};
                 var role=(typeof j.role==='string')?j.role:'';
                 var email=(typeof j.email==='string')?j.email:'';
+                var name=(typeof j.name==='string')?j.name:'';
                 return{status:status,shape:'user',role:role,emailPresent:!!email,
-                  guest:(role==='guest')||/guest[0-9.\-]*@guest\.com$/i.test(email),error:''};
+                  guest:(role==='guest')||/guest[0-9.\-]*@guest\.com$/i.test(email),error:'',
+                  name:name.slice(0,120),email:email.slice(0,120)};
               }
               function call(headers){
                 return fetch(path,{credentials:'include',headers:headers})
                   .then(function(r){
                     return r.json().then(function(j){return slim(j,r.status);},function(){return slim(null,r.status);});
                   })
-                  .catch(function(e){return{status:null,shape:'error',role:'',emailPresent:false,guest:false,error:String(e).slice(0,160)};});
+                  .catch(function(e){return{status:null,shape:'error',role:'',emailPresent:false,guest:false,error:String(e).slice(0,160),name:'',email:''};});
               }
               var now=Date.now();
               if(window.__mhAuthProbeInFlight&&(now-(window.__mhAuthProbeAt||0))<15000){return;}
@@ -154,11 +159,13 @@ object ZaiProbeScripts {
                 var b=rs[0],c=rs[1];
                 var bu=!!b&&b.shape==='user'&&!b.guest&&b.role!=='';
                 var cu=!!c&&c.shape==='user'&&!c.guest&&c.role!=='';
+                var acc=(bu?b:(cu?c:null));
                 window.__mhAuthResult=JSON.stringify({
                   signedIn:bu||cu,
                   hasLocalToken:!!ls,
                   bearer:b,
-                  cookie:c
+                  cookie:c,
+                  account:{name:acc?acc.name:'',email:acc?acc.email:''}
                 });
                 window.__mhAuthProbeInFlight=false;
               });
@@ -465,6 +472,119 @@ object ZaiProbeScripts {
           return JSON.stringify({ok:true});
         })()
     """.trimIndent()
+
+    // ── Tab parity: the site's own "Deep Think" menu (autoThink + effort) ──
+    //
+    // Strings are bundle-verified ("Deep Think", "Reasoning Effort",
+    // low/high/max); the DOM shape is probed defensively over several menu
+    // containers. The menu only exists signed-in on capable models — a
+    // not-found result is a VALID outcome (the app then hides the section).
+
+    /** Clicks the Deep Think trigger if present. Returns found:false otherwise. */
+    fun buildClickThinkMenuScript(config: ZaiWebConfig): String {
+        val sel = selJson(config, "thinkMenuButton")
+        return """
+            (function(){
+              $HELPERS_JS
+              var S=$sel;
+              var el=__mhFirst(S.thinkMenuButton);
+              if(!el||!el.el)return JSON.stringify({found:false});
+              try{el.el.click();}catch(e){return JSON.stringify({found:false,why:'click-failed'});}
+              return JSON.stringify({found:true,by:el.by});
+            })()
+        """.trimIndent()
+    }
+
+    /**
+     * Reads the OPEN think menu: every item row (text + checked state).
+     * Menu containers vary by bits-ui version — several fallbacks, and any
+     * visible [role=menuitem*] row on the page is accepted as a last resort.
+     */
+    fun buildThinkMenuReadScript(config: ZaiWebConfig): String {
+        val sel = selJson(config, "thinkMenuContent", "thinkMenuItem")
+        return """
+            (function(){
+              var S=$sel;
+              function pickAll(list){
+                for(var i=0;i<list.length;i++){
+                  try{var els=document.querySelectorAll(list[i]);
+                    if(els&&els.length>0)return{by:list[i],els:els};}catch(e){}
+                }
+                return null;
+              }
+              var content=pickAll(S.thinkMenuContent);
+              var root=null;
+              if(content){root=content.els[0];}
+              var rows=[];
+              if(root){
+                var all=root.querySelectorAll('[role="menuitem"],[role="menuitemcheckbox"],[role="menuitemradio"],[role="switch"],[data-state]');
+                for(var i=0;i<all.length&&rows.length<24;i++){
+                  var el=all[i];
+                  if(el.getClientRects&&el.getClientRects().length===0)continue;
+                  var t=(el.innerText||'').trim();
+                  if(!t)continue;
+                  var checked=el.getAttribute('aria-checked');
+                  if(checked===null||checked===undefined)checked=el.getAttribute('data-state');
+                  rows.push({text:t.split('\n')[0].trim(),checked:checked===null||checked===undefined?'':String(checked)});
+                }
+              }
+              if(rows.length===0){
+                var loose=pickAll(S.thinkMenuItem);
+                if(loose){
+                  for(var k=0;k<loose.els.length&&rows.length<24;k++){
+                    var le=loose.els[k];
+                    if(le.getClientRects&&le.getClientRects().length===0)continue;
+                    var lt=(le.innerText||'').trim();
+                    if(!lt)continue;
+                    var lc=le.getAttribute('aria-checked');
+                    if(lc===null||lc===undefined)lc=le.getAttribute('data-state');
+                    rows.push({text:lt.split('\n')[0].trim(),checked:lc===null||lc===undefined?'':String(lc)});
+                  }
+                }
+              }
+              return JSON.stringify({found:rows.length>0,items:rows});
+            })()
+        """.trimIndent()
+    }
+
+    /**
+     * Clicks the visible menu row whose text equals/contains [label]
+     * (case-insensitive). Only meaningful right after the menu was opened.
+     */
+    fun buildClickMenuItemScript(config: ZaiWebConfig, label: String): String {
+        val sel = selJson(config, "thinkMenuItem", "thinkMenuContent")
+        val labelJson = JSONObject.quote(label)
+        return """
+            (function(){
+              $HELPERS_JS
+              var S=$sel;
+              var want=$labelJson.toLowerCase();
+              var cands=[];
+              for(var i=0;i<S.thinkMenuItem.length;i++){
+                try{var els=document.querySelectorAll(S.thinkMenuItem[i]);
+                  for(var k=0;k<els.length;k++)cands.push(els[k]);}catch(e){}
+              }
+              if(cands.length===0&&S.thinkMenuContent.length>0){
+                try{
+                  var root=document.querySelector(S.thinkMenuContent[0]);
+                  if(root)cands=Array.prototype.slice.call(root.querySelectorAll('*'));
+                }catch(e){}
+              }
+              for(var c=0;c<cands.length;c++){
+                var el=cands[c];
+                if(el.getClientRects&&el.getClientRects().length===0)continue;
+                var t=((el.innerText||'')+'').trim().toLowerCase();
+                if(!t)continue;
+                var first=t.split('\n')[0].trim();
+                if(first===want||(first.indexOf(want)!==-1&&want.length>=4)){
+                  try{el.click();return JSON.stringify({ok:true,text:first});}
+                  catch(e){return JSON.stringify({ok:false,why:'click-failed'});}
+                }
+              }
+              return JSON.stringify({ok:false,why:'no-match'});
+            })()
+        """.trimIndent()
+    }
 
     // ── Sign-in sheet automation (visible WebView) ──
     //

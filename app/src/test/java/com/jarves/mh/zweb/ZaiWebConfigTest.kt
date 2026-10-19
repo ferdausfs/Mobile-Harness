@@ -73,6 +73,16 @@ class ZaiWebConfigTest {
     }
 
     @Test
+    fun `bundled config v4 carries the tab-parity think-menu groups`() {
+        val config = parseBundled()
+        assertTrue(config.version >= 4)
+        // Strings bundle-verified ("Deep Think"); DOM shapes probed defensively.
+        assertTrue(config.selectorsFor("thinkMenuButton").any { it.contains("deep think") })
+        assertTrue(config.selectorsFor("thinkMenuContent").any { it.contains("data-dropdown-menu-content") })
+        assertTrue(config.selectorsFor("thinkMenuItem").any { it.contains("menuitem") })
+    }
+
+    @Test
     fun `older config without the phase 1 groups still parses`() {
         // A cached v2 remote config must keep working: the new groups are optional.
         val v2 = """

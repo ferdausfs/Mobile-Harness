@@ -288,7 +288,10 @@ class ZaiProbeScriptsTest {
            "stepStatus":["span.shimmer",".shimmer"],
            "modelLabel":["button.modelSelectorButton"],
            "modelMenuButton":["button.modelSelectorButton"],
-           "modelOption":[".popoverContainer div[class*='line-clamp-1'][class*='select-none']","[data-dropdown-select-content] [role='option']"]},
+           "modelOption":[".popoverContainer div[class*='line-clamp-1'][class*='select-none']","[data-dropdown-select-content] [role='option']"],
+           "thinkMenuButton":["text-button:=deep think"],
+           "thinkMenuContent":["[data-dropdown-menu-content]","[role='menu']"],
+           "thinkMenuItem":["[data-dropdown-menu-content] [role='menuitem']","[role='menu'] [role='menuitem']"]},
          "timing":{}}
         """.trimIndent(),
     )
@@ -366,6 +369,28 @@ class ZaiProbeScriptsTest {
             assertTrue("$name must be an IIFE", js.trimStart().startsWith("(function(){"))
             assertTrue("$name must close the IIFE", js.trimEnd().endsWith("})()"))
             assertTrue("$name must stringify its result", js.contains("JSON.stringify"))
+        }
+    }
+
+    @Test
+    fun `think menu scripts carry the phase 4 groups and stay synchronous`() {
+        val click = ZaiProbeScripts.buildClickThinkMenuScript(phase1Config)
+        val read = ZaiProbeScripts.buildThinkMenuReadScript(phase1Config)
+        val item = ZaiProbeScripts.buildClickMenuItemScript(phase1Config, "Max")
+        assertTrue(click.contains("text-button:=deep think"))
+        assertTrue(click.contains("found"))
+        assertTrue(read.contains("data-dropdown-menu-content"))
+        assertTrue(read.contains("aria-checked"))
+        assertTrue(read.contains("data-state"))
+        assertTrue(item.contains("Max"))
+        // JSONObject.quote escapes the label
+        val tricky = ZaiProbeScripts.buildClickMenuItemScript(phase1Config, "Deep \"Think\"")
+        assertTrue(tricky.contains("\\\"Think\\\""))
+        listOf(click, read, item).forEach { js ->
+            assertFalse(js.contains("fetch("))
+            assertFalse(js.contains("Promise"))
+            assertTrue(js.trimStart().startsWith("(function(){"))
+            assertTrue(js.trimEnd().endsWith("})()"))
         }
     }
 }

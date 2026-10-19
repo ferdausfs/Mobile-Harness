@@ -1,5 +1,5 @@
 {
-  "version": 3,
+  "version": 4,
   "remoteUpdateUrl": "https://raw.githubusercontent.com/ferdausfs/Mobile-Harness/main/app/src/main/assets/zweb/selectors.json",
   "page": {
     "startUrl": "https://chat.z.ai/",
@@ -109,6 +109,25 @@
       "[data-dropdown-select-content] [role='option']",
       "[data-bits-select-content] [role='option']",
       "[class*='selectContent'] [role='option']"
+    ],
+    "thinkMenuButton": [
+      "text-button:=deep think",
+      "text-button:=thinking",
+      "button[aria-label*='deep think' i]",
+      "[aria-label*='deep think' i]",
+      "button[aria-label*='think' i]"
+    ],
+    "thinkMenuContent": [
+      "[data-dropdown-menu-content]",
+      "[data-bits-menu-content]",
+      "[role='menu']",
+      "[class*='menuContent' i]"
+    ],
+    "thinkMenuItem": [
+      "[data-dropdown-menu-content] [role='menuitem'], [data-dropdown-menu-content] [role='menuitemcheckbox'], [data-dropdown-menu-content] [role='menuitemradio']",
+      "[role='menu'] [role='menuitem'], [role='menu'] [role='menuitemcheckbox'], [role='menu'] [role='menuitemradio']",
+      "[data-dropdown-menu-content] > *",
+      "[role='menu'] > *"
     ]
   },
   "timing": {

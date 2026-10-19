@@ -4,6 +4,34 @@ Newest entries prepended. Never delete entries.
 
 ---
 
+## 2026-10-19 — v1.0.29 release: Phase 3 of the autonomous Z.ai agent — dataSync foreground service (screen-off execution, 6h-limit checkpoint) + persisted task queue with clean kill reporting/resume (versionCode 30)
+
+- **Agent/tool**: Z.ai (GLM) agent session, direct repo work on `ferdausfs/Mobile-Harness` branch `main`. PHASE 3 of the four-phase plan; Phases 1–2 (v1.0.27/28) shipped earlier in this session. Phase 4 (autonomous RUN loop) follows.
+
+### What changed (each commit separately revertable)
+| Concern | Commit | What |
+|------|--------|------|
+| pure | `88d02cd` | `ZaiTaskQueue` (enqueue→RUNNING→terminal, cap 50 entries / 8k prompt / 300 error chars, startup reconcile: RUNNING→FAILED "killed before this task finished", PENDING→RESUME only inside a 10-minute crash window AND signed in, else KEEP-PENDING-then-report; prune; JSON round-trip) + `ZaiTaskQueueStore` (atomic tmp+rename file at `filesDir/zweb/task-queue.json`) + `ZaiForegroundPolicy` (Android 14+ dataSync math: 6h/24h limit, checkpoint deadline = limit − 10 min lead, notification detail line = step > phase > fallback + elapsed, wake-lock ≤ window). 15 JVM tests. |
+| service + wiring | `a762aff` | **ZaiEngineService** with `foregroundServiceType="dataSync"` (+ `FOREGROUND_SERVICE_DATA_SYNC` permission): holds the hidden-WebView engine's process with a partial wake lock capped at the dataSync window so generation keeps running with the screen OFF. Persistent notification ("Z.ai is working" + live phase/tool-step/elapsed, throttled 1 update / 5 s) with a working **Stop** action (`ZaiEngineStopController` — the same static-hook pattern as the CLI `RuntimeTaskController`). Terminal intents: "Z.ai answered" / **"Z.ai needs your attention"** (login or captcha) / "Z.ai task ended" on the `task-results` channel. **6-hour limit handled gracefully**: a 60 s ticker fires the checkpoint hook at the deadline (queue persisted), swaps the notification to the checkpoint message and steps down (wake lock released, foreground detached) BEFORE the platform can kill it. **ViewModel wiring**: every chat-engine turn enqueues (redacted prompt) BEFORE sending, RUNNING while generating, terminal on DONE/Stop/error/login/captcha; live phase mirrors into the notification; startup reconciliation reports killed/stale tasks via notification; a fresh PENDING entry auto-resumes ONLY when the engine reports signed-in AND its project chat is still active (one attempt per process, never hijacks the screen). |
+| version | (this commit) | v1.0.29 / versionCode 30; changelog `30.txt`; manifest sha256 `c638c6b1…7eda`, 88,525,963 bytes. |
+
+### Decisions (made without asking, as authorized)
+- `dataSync` over `specialUse`: the engine's documented job is data transfer with a remote service; specialUse stays reserved for the CLI runtime's local execution (both types now declared). Justification recorded here per Android 14+ policy.
+- Auto-resume deliberately NARROW (active chat + signed-in + <10 min + never started): re-sending a task the user forgot about into a DIFFERENT project would hijack the screen; reporting covers everything else. Resume bypasses prompt rebuilding — the stored (already redacted) prompt is re-sent as-is.
+- The queue stores the full prompt (needed for a faithful resume) — it is the SAME redacted string that went to chat.z.ai, on-device only, pruned to 50 entries.
+
+### Verification
+- `:app:testOnlineDebugUnitTest` → **442 tests, 0 failures, 0 skipped** (426 + 16: queue lifecycle/reconcile/resume/prune/JSON 11, store 2, foreground policy 3).
+- `:app:assembleOnlineRelease` → BUILD SUCCESSFUL; aapt: versionCode '30' versionName '1.0.29'; APK 88,525,963 bytes, sha256 `c638c6b18873a760d5e4833287a8b91b22ca6f288d35ad2d51a69dfe88d79eda`; apksigner cert `d07ba804…dccfe` — identical release line, NOT rotated.
+- **Honesty ledger — verified here**: queue/reconcile/resume/prune and the 6h-checkpoint math on the JVM; release build + cert equality; manifest declares dataSync correctly (aapt). **NOT verifiable here (no device)**: actual screen-off WebView execution, the real 6h-limit behavior on Android 16 (One UI may add its own background rules), notification rendering, and the kill-and-restart report — those need the user's phone; the queue file + notification are the oracles.
+
+### User test script (on the phone, after installing v1.0.29)
+1. Start a Z.ai chat task, then turn the screen OFF and lock the phone. After a few minutes unlock: the task should still be running/completed (notification "Z.ai is working…" visible the whole time with live phase + Stop).
+2. Tap **Stop** on the notification → the turn cancels and the "Z.ai task ended" notification appears.
+3. Start another task and FORCE-CLOSE the app from recents while it generates. Reopen within ~10 minutes to the same project chat → after the Z.ai session is checked, the task should re-send itself automatically (queue resume) and complete.
+4. Start a task, force-close, reopen to a DIFFERENT chat → within a minute you should get a "Z.ai task not finished" notification reporting the killed task instead of a silent loss.
+5. Everything from v1.0.28 (tokens) and v1.0.27 (live card, model picker) must behave as before.
+
 ## 2026-10-19 — v1.0.28 release: Phase 2 of the autonomous Z.ai agent — Tokens vault (encrypted, masked, per-project), read-only Test-token calls, SecretRedactor on every egress path, rotation reminders with per-provider buttons (versionCode 29)
 
 - **Agent/tool**: Z.ai (GLM) agent session, direct repo work on `ferdausfs/Mobile-Harness` branch `main`. PHASE 2 of the four-phase plan, its own patch release; Phase 1 (v1.0.27, live visibility + model picker) already shipped earlier in this session. Phases 3–4 follow.

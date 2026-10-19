@@ -715,4 +715,201 @@ object ZaiProbeScripts {
             })()
         """.trimIndent()
     }
+
+    // ── v1.0.33: file sync from the site ──
+    //
+    // Z.ai on chat.z.ai works in its OWN sandbox: tool traces ("Wrote N files")
+    // and a per-message versions store hold the files it wrote. These snippets
+    // read them via the site's own APIs (same origin, same session) and follow
+    // the v1.0.23 store-and-poll contract: the injector RETURNS NOTHING, kicks
+    // off the fetches, and stores one JSON payload; the reader is a tiny
+    // synchronous expression. Never a Promise completion value.
+
+    /**
+     * Kicks off the file-sync fetches and stores the payload in
+     * `window.__mhFileSync`. Single-flight with a 25s expiry (mirrors the auth
+     * probe's guard): while a previous run is settling, later injectors skip
+     * WITHOUT clearing so a slow result still lands.
+     *
+     * What it reads (bundle-verified endpoints, prod-fe-1.1.107):
+     *  1. chat id from `location.pathname` (`/c/{uuid}`, live-verified shape);
+     *  2. `GET /api/v1/chats/{chatId}` → messages; the assistant messages at or
+     *     after the LAST user message are this turn's rounds. Structured
+     *     `tool_calls` blocks (and a legacy top-level `tool_calls`) carry every
+     *     Write (file_path + full content) and Edit/MultiEdit (file_path only).
+     *  3. `GET /api/v1/storage/versions/{lastAssistantId}/files?prefix=download&max_keys=50`
+     *     → `{success,data:{files:[{key,last_modified}]}}`; each key downloads
+     *     from `.../file?path={key}` — text-ish content types captured as text
+     *     (capped), anything else recorded as binary.
+     *
+     * Caps (fail-safe against huge workspaces): 40 tool writes, 25 version
+     * files, 2 MB per file, ~4.5 MB total payload. Overflow files are reported
+     * as failures, never silently dropped.
+     */
+    fun buildFileSyncProbeScript(): String {
+        return """
+            (function(){
+              var now=Date.now();
+              if(window.__mhFileSyncInFlight&&(now-(window.__mhFileSyncAt||0))<25000){return;}
+              window.__mhFileSyncInFlight=true;
+              window.__mhFileSyncAt=now;
+              window.__mhFileSync=null;
+              var m=location.pathname.match(/\/c\/([0-9a-fA-F-]{8,})/);
+              if(!m){
+                window.__mhFileSync=JSON.stringify({chatFound:false,note:'no chat id in URL'});
+                window.__mhFileSyncInFlight=false;
+                return;
+              }
+              var chatId=m[1];
+              var tok=null;
+              try{tok=window.localStorage?window.localStorage.getItem('token'):null;}catch(e){tok=null;}
+              function hdrs(){
+                var h={Accept:'application/json'};
+                if(tok)h.Authorization='Bearer '+tok;
+                return h;
+              }
+              var MAX_WRITE=40,MAX_VF=25,MAX_FILE_CHARS=2000000,MAX_TOTAL=4500000,total=0;
+              function argObj(fn){
+                if(!fn)return null;
+                var a=fn.parsed_arguments;
+                if(a&&typeof a==='object')return a;
+                if(typeof a==='string'){try{return JSON.parse(a);}catch(e){return null;}}
+                return null;
+              }
+              function pushWrite(list,path,content){
+                if(list.length>=MAX_WRITE)return;
+                var entry={path:String(path||'').slice(0,300)};
+                if(typeof content==='string'){
+                  if(content.length>MAX_FILE_CHARS){entry.content=content.slice(0,MAX_FILE_CHARS);entry.truncated=true;}
+                  else entry.content=content;
+                }
+                list.push(entry);
+              }
+              function collectToolCalls(msg,writes,edits){
+                var seen=0;
+                function handleOne(tc){
+                  if(seen>=MAX_WRITE)return;
+                  var fn=tc&&tc.function?tc.function:null;
+                  var name=fn&&fn.name?String(fn.name):'';
+                  var args=argObj(fn);
+                  if(!args)return;
+                  if(name==='Write'){
+                    pushWrite(writes,args.file_path||args.path||'',args.content);
+                    seen++;
+                  }else if(name==='Edit'){
+                    edits.push({path:String(args.file_path||args.path||'').slice(0,300)});
+                    seen++;
+                  }else if(name==='MultiEdit'){
+                    var p=String(args.file_path||args.path||'').slice(0,300);
+                    edits.push({path:p});
+                    seen++;
+                  }
+                }
+                try{
+                  if(msg&&msg.blocks&&msg.blocks.forEach){
+                    msg.blocks.forEach(function(b){
+                      if(b&&b.type==='tool_calls'&&b.content&&b.content.forEach){
+                        b.content.forEach(function(tc){handleOne(tc);});
+                      }
+                    });
+                  }
+                  if(msg&&msg.tool_calls&&msg.tool_calls.forEach){
+                    msg.tool_calls.forEach(function(tc){handleOne(tc);});
+                  }
+                }catch(e){}
+              }
+              fetch('/api/v1/chats/'+chatId,{credentials:'include',headers:hdrs()})
+                .then(function(r){return r.ok?r.json():Promise.reject('chat '+r.status);})
+                .then(function(chat){
+                  var hist=(chat&&chat.history&&chat.history.messages)||{};
+                  var msgs=[];
+                  for(var k in hist){if(Object.prototype.hasOwnProperty.call(hist,k))msgs.push(hist[k]);}
+                  var lastUserTs=-1;
+                  msgs.forEach(function(msg){if(msg&&msg.role==='user'&&typeof msg.timestamp==='number'){if(msg.timestamp>lastUserTs)lastUserTs=msg.timestamp;}});
+                  var turnMsgs=msgs.filter(function(msg){
+                    return msg&&msg.role==='assistant'&&typeof msg.timestamp==='number'&&msg.timestamp>=lastUserTs;
+                  }).sort(function(a,b){return a.timestamp-b.timestamp;});
+                  var lastMsg=turnMsgs.length?turnMsgs[turnMsgs.length-1]:null;
+                  var writes=[],edits=[];
+                  turnMsgs.slice(-10).forEach(function(msg){collectToolCalls(msg,writes,edits);});
+                  var payload={chatFound:true,messageId:lastMsg?lastMsg.id:null,writes:writes,edits:edits};
+                  if(!lastMsg){
+                    payload.note='no assistant message found for this turn';
+                    window.__mhFileSync=JSON.stringify(payload);
+                    window.__mhFileSyncInFlight=false;
+                    return;
+                  }
+                  var listUrl='/api/v1/storage/versions/'+encodeURIComponent(lastMsg.id)+
+                    '/files?prefix=download&max_keys=50';
+                  fetch(listUrl,{credentials:'include',headers:hdrs()})
+                    .then(function(r){return r.ok?r.json():Promise.reject('versions '+r.status);})
+                    .then(function(list){
+                      var files=(list&&list.data&&list.data.files)||[];
+                      var vfs=[],keys=[];
+                      files.forEach(function(f){
+                        if(!f||!f.key)return;
+                        if(keys.length>=MAX_VF)return;
+                        keys.push(f.key);
+                        vfs.push({key:f.key,lastModified:f.last_modified||''});
+                      });
+                      payload.versionFiles=vfs;
+                      payload.versionContents={};
+                      payload.binaryKeys=[];
+                      payload.failedKeys=[];
+                      var i=0;
+                      function nextFile(){
+                        if(i>=keys.length){
+                          window.__mhFileSync=JSON.stringify(payload);
+                          window.__mhFileSyncInFlight=false;
+                          return;
+                        }
+                        var key=keys[i++];
+                        if(total>MAX_TOTAL){
+                          payload.failedKeys.push(key);
+                          nextFile();
+                          return;
+                        }
+                        var furl='/api/v1/storage/versions/'+encodeURIComponent(lastMsg.id)+
+                          '/file?path='+encodeURIComponent(key);
+                        fetch(furl,{credentials:'include',headers:hdrs()})
+                          .then(function(fr){
+                            var ct=(fr.headers.get('Content-Type')||'').toLowerCase();
+                            var textual=ct.indexOf('json')!==-1||ct.indexOf('text')!==-1||
+                              ct.indexOf('xml')!==-1||ct.indexOf('csv')!==-1||ct.indexOf('latex')!==-1;
+                            if(!fr.ok||!textual){
+                              if(fr.ok)payload.binaryKeys.push(key);
+                              else payload.failedKeys.push(key);
+                              nextFile();
+                              return null;
+                            }
+                            return fr.text();
+                          })
+                          .then(function(text){
+                            if(text!==null&&text!==undefined){
+                              var piece=text.length>MAX_FILE_CHARS?text.slice(0,MAX_FILE_CHARS):text;
+                              total+=piece.length;
+                              payload.versionContents[key]=piece;
+                            }
+                            nextFile();
+                          })
+                          .catch(function(){payload.failedKeys.push(key);nextFile();});
+                      }
+                      nextFile();
+                    })
+                    .catch(function(e){
+                      payload.note='versions listing unavailable ('+String(e).slice(0,80)+')';
+                      window.__mhFileSync=JSON.stringify(payload);
+                      window.__mhFileSyncInFlight=false;
+                    });
+                })
+                .catch(function(e){
+                  window.__mhFileSync=JSON.stringify({chatFound:false,note:String(e).slice(0,120)});
+                  window.__mhFileSyncInFlight=false;
+                });
+            })()
+        """.trimIndent()
+    }
+
+    /** Synchronous reader for [buildFileSyncProbeScript]'s stored payload. */
+    fun buildFileSyncResultReaderScript(): String = "window.__mhFileSync||null"
 }

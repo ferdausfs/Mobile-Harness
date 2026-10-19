@@ -19,6 +19,13 @@ data class ZaiWebUiState(
     val lastFiles: List<ZaiFileExtractor.ZaiExtractedFile> = emptyList(),
     val lastFilesDir: String? = null,
     val lastFinishedAtMillis: Long? = null,
+    /**
+     * v1.0.33: honesty report for the last file-sync attempt (what Z.ai wrote
+     * vs what could be read). Null = never attempted / feature not used.
+     */
+    val lastSync: ZaiFileSync.SyncReport? = null,
+    /** v1.0.33: true while the file-sync probe is being read from the page. */
+    val fileSyncRunning: Boolean = false,
     val testRunning: Boolean = false,
     /** Opens the visible sign-in WebView overlay when true. */
     val signInSheetOpen: Boolean = false,

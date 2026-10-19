@@ -424,15 +424,24 @@ class ZaiWebEngine(
                 update { it.copy(runPhase = ZaiRunPhase.GENERATING, runMessage = "Z.ai is generating…") }
                 var detectorState = ZaiFinishDetector.ZaiDetectorState(baselineAssistantCount = baseline)
                 var pollElapsed = 0L
+                // v1.0.33: the live-status fingerprint feeds the detector's
+                // progress signal — tool/step text churns during long silent
+                // phases on the site, and that churn must read as progress.
+                var lastLiveFingerprint = ""
                 while (isActive && !canceled && thisRun == runNumber) {
                     delay(config.timing.pollIntervalMs)
                     pollElapsed += config.timing.pollIntervalMs
                     val probe = runStateProbe(view, config) ?: continue
                     val observation = observationFromProbe(probe)
+                    val live = streamLiveStatus(view, config)
+                    val liveFingerprint = listOfNotNull(live?.thinking, live?.answer, live?.stepStatus)
+                        .joinToString("\u0000")
+                    val liveProgress = live != null && liveFingerprint != lastLiveFingerprint
+                    lastLiveFingerprint = liveFingerprint
                     val (decision, newState) = ZaiFinishDetector.evaluate(
                         nowMs = pollElapsed,
                         startedMs = 0L,
-                        observation = observation,
+                        observation = observation.copy(liveProgress = liveProgress),
                         state = detectorState,
                         timing = config.timing,
                     )
@@ -477,7 +486,13 @@ class ZaiWebEngine(
                             update {
                                 it.copy(
                                     runPhase = ZaiRunPhase.TIMEOUT,
-                                    runMessage = "Z.ai did not finish within ${config.timing.generationTimeoutMs / 1000}s. Try a smaller task or send it again.",
+                                    // v1.0.33: the page is QUIET (no progress for
+                                    // the no-progress budget, or the overall cap
+                                    // hit) — the site may still finish it; the
+                                    // notice card offers Re-read / Sync files now.
+                                    runMessage = "Z.ai went quiet on chat.z.ai (no page change for " +
+                                        "${config.timing.noProgressTimeoutMs / 1000}s). The task may still be running there — " +
+                                        "use Re-read reply or Sync files now in a moment.",
                                     testRunning = false,
                                 )
                             }
@@ -716,12 +731,14 @@ class ZaiWebEngine(
 
     /**
      * Phase 1 live visibility: evaluates the live-status probe and publishes
-     * the bounded snapshot into the state. Never throws; a failed probe just
-     * leaves the previous snapshot in place (the card keeps its last view).
+     * the bounded snapshot into the state. Returns the parsed snapshot so the
+     * run loop can feed its fingerprint into the finish detector's progress
+     * signal. Never throws; a failed probe just leaves the previous snapshot
+     * in place (the card keeps its last view).
      */
-    private suspend fun streamLiveStatus(view: WebView, config: ZaiWebConfig) {
-        val raw = view.evaluateJs(ZaiProbeScripts.buildLiveStatusScript(config)) ?: return
-        val live = ZaiLiveStatus.parse(raw) ?: return
+    private suspend fun streamLiveStatus(view: WebView, config: ZaiWebConfig): ZaiLiveStatus.Live? {
+        val raw = view.evaluateJs(ZaiProbeScripts.buildLiveStatusScript(config)) ?: return null
+        val live = ZaiLiveStatus.parse(raw) ?: return null
         update { current ->
             current.copy(
                 liveThinking = live.thinking,
@@ -731,6 +748,7 @@ class ZaiWebEngine(
                 liveUpdatedAtMillis = System.currentTimeMillis(),
             )
         }
+        return live
     }
 
     /** Drops the live snapshot (turn start / finish) so no stale text lingers. */
@@ -974,6 +992,91 @@ class ZaiWebEngine(
         }
     }
 
+    // ── v1.0.33: file sync from the site ──
+
+    /**
+     * Manual "Sync files from Z.ai": reads the files the site wrote for the
+     * CURRENT conversation (tool calls + versions store) without sending
+     * anything, merges them with FILE: markers from the last reply the app
+     * saw, and publishes them into the state ([ZaiWebUiState.lastFiles] +
+     * [ZaiWebUiState.lastSync]) so the chat engine's apply pipeline can review
+     * them. Runs even when a turn timed out earlier and the site has since
+     * finished. Returns the honesty report.
+     */
+    suspend fun syncFilesFromSite(): ZaiFileSync.SyncReport {
+        val config = configLoader.load()
+        if (config == null) return syncFailure("Selector config unavailable — cannot reach chat.z.ai.")
+        val view = ensureWebView() ?: return syncFailure("The hidden browser is not available yet — try again.")
+        val markers = ZaiFileExtractor.parse(currentState().lastReply.orEmpty()).files
+        val payload = runFileSyncProbe(view)
+        val merged = ZaiFileSync.merge(payload, markers)
+        update {
+            it.copy(
+                lastFiles = merged.files,
+                lastSync = merged.report,
+                lastFilesDir = null,
+            )
+        }
+        return merged.report
+    }
+
+    private suspend fun syncFailure(message: String): ZaiFileSync.SyncReport {
+        update { it.copy(fileSyncRunning = false) }
+        return ZaiFileSync.SyncReport(
+            wroteCount = 0,
+            readablePaths = emptyList(),
+            unreadablePaths = emptyList(),
+            binarySkipped = emptyList(),
+            sourceNotes = listOf(message),
+            probeOk = false,
+            attempts = 0,
+        )
+    }
+
+    /**
+     * "Re-read reply": re-attaches to the page after a timeout WITHOUT sending
+     * anything. When the site has finished meanwhile, the normal finish flow
+     * runs (reply extraction + file sync → DONE). When it is still generating,
+     * the state says so honestly and stays in TIMEOUT so the notice card keeps
+     * its buttons. Never throws.
+     */
+    suspend fun reattachToReply() {
+        val config = configLoader.load() ?: return
+        val view = ensureWebView() ?: return
+        val probe = runStateProbe(view, config) ?: run {
+            update {
+                it.copy(
+                    runPhase = ZaiRunPhase.TIMEOUT,
+                    runMessage = "chat.z.ai could not be reached for a re-check. Try again in a moment.",
+                )
+            }
+            return
+        }
+        val blocked = probe.optBoolean("loginMatched") || probe.optBoolean("captchaMatched")
+        if (blocked) {
+            update {
+                it.copy(
+                    runPhase = if (probe.optBoolean("loginMatched")) ZaiRunPhase.NEEDS_LOGIN else ZaiRunPhase.CAPTCHA,
+                    runMessage = "chat.z.ai is asking for sign-in / verification on the re-check.",
+                    testRunning = false,
+                )
+            }
+            return
+        }
+        val generating = probe.optBoolean("stopPresent")
+        if (generating) {
+            update {
+                it.copy(
+                    runPhase = ZaiRunPhase.TIMEOUT,
+                    runMessage = "Z.ai is still generating on the website — try Re-read again shortly, or Sync files once it finishes.",
+                )
+            }
+            return
+        }
+        // Looks finished: run the normal finish flow (reply + files → DONE).
+        finishRun(view, config, test = false)
+    }
+
     private suspend fun finishRun(view: WebView, config: ZaiWebConfig, test: Boolean) {
         update { it.copy(runPhase = ZaiRunPhase.EXTRACTING, runMessage = "Reading Z.ai's reply…") }
         // The live streaming card hands over to the full reply now.
@@ -992,24 +1095,96 @@ class ZaiWebEngine(
             return
         }
         val parsed = ZaiFileExtractor.parse(extraction.text)
-        val savedDir = if (parsed.files.isNotEmpty() && !test) saveFiles(parsed.files) else null
+        // v1.0.33: files Z.ai wrote in its OWN sandbox (tool calls + the site's
+        // versions store) are read through the file-sync probe and MERGED with
+        // the text markers. A connection test skips the probe entirely.
+        val sync: ZaiFileSync.Merged = if (test) {
+            ZaiFileSync.merge(ZaiFileSync.emptyPayload(), parsed.files)
+        } else {
+            val payload = runFileSyncProbe(view)
+            ZaiFileSync.merge(payload, parsed.files)
+        }
+        val savedDir = if (sync.files.isNotEmpty() && !test) saveFiles(sync.files) else null
         update {
             it.copy(
                 runPhase = ZaiRunPhase.DONE,
                 runMessage = when {
                     test -> "Connection test finished."
-                    parsed.files.isEmpty() -> "Z.ai replied."
-                    else -> "Z.ai replied with ${parsed.files.size} file${if (parsed.files.size == 1) "" else "s"}."
+                    sync.files.isEmpty() -> "Z.ai replied."
+                    else -> "Z.ai replied with ${sync.files.size} file${if (sync.files.size == 1) "" else "s"}."
                 },
                 lastReply = extraction.text.ifBlank { "(empty reply)" },
-                lastFiles = parsed.files,
+                lastFiles = sync.files,
                 lastFilesDir = savedDir,
+                lastSync = sync.report.takeIf { !test },
                 lastFinishedAtMillis = System.currentTimeMillis(),
                 testRunning = false,
                 signedIn = true,
             )
         }
     }
+
+    /**
+     * Runs the file-sync probe (store-and-poll) and parses the payload.
+     * Never throws: an unreadable probe degrades to an empty payload and the
+     * merge falls back to the reply-text markers alone.
+     */
+    private suspend fun runFileSyncProbe(view: WebView): ZaiFileSync.ProbePayload {
+        update { it.copy(fileSyncRunning = true) }
+        val raw = runStoreAndPoll(
+            view = view,
+            injectScript = ZaiProbeScripts.buildFileSyncProbeScript(),
+            readerScript = ZaiProbeScripts.buildFileSyncResultReaderScript(),
+            isReadable = { it != null && it != "null" && it.isNotBlank() },
+            poll = FILE_SYNC_POLL,
+        )
+        update { it.copy(fileSyncRunning = false) }
+        if (raw == null) {
+            return ZaiFileSync.ProbePayload(
+                chatFound = false, messageId = null,
+                note = "the site's file data could not be read (probe timeout)",
+                writes = emptyList(), edits = emptyList(), versionFiles = emptyList(),
+                versionContents = emptyMap(), binaryKeys = emptyList(), failedKeys = emptyList(),
+            )
+        }
+        return ZaiFileSync.parseProbe(raw)
+    }
+
+    /**
+     * Generic store-and-poll loop (the v1.0.23 contract, generalized): inject
+     * the async script, then read the synchronous reader until the stored
+     * result lands or the budget expires.
+     */
+    private suspend fun runStoreAndPoll(
+        view: WebView,
+        injectScript: String,
+        readerScript: String,
+        isReadable: (String?) -> Boolean,
+        poll: SyncPollConfig,
+    ): String? {
+        var state = SyncPollState()
+        while (state.round < poll.rounds) {
+            if (state.readInRound == 0) {
+                view.evaluateJs(injectScript)
+            }
+            val raw = view.evaluateJs(readerScript)
+            if (isReadable(raw)) return raw
+            state = if (state.readInRound + 1 >= poll.readsPerRound) {
+                SyncPollState(round = state.round + 1, readInRound = 0)
+            } else {
+                state.copy(readInRound = state.readInRound + 1)
+            }
+            delay(poll.readDelayMs)
+        }
+        return null
+    }
+
+    private data class SyncPollState(val round: Int = 0, val readInRound: Int = 0)
+
+    private data class SyncPollConfig(val rounds: Int, val readsPerRound: Int, val readDelayMs: Long)
+
+    /** ~16s worst case for the chat-detail + versions + per-file fetch chain. */
+    private val FILE_SYNC_POLL = SyncPollConfig(rounds = 4, readsPerRound = 10, readDelayMs = 400)
 
     private fun parseExtraction(raw: String?): ExtractionResult? {
         if (raw == null) return null

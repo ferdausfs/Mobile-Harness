@@ -123,6 +123,31 @@ class ZaiWebController(private val appContext: Context, private val onState: (Za
         scope.launch { onResult(engine.driveThinkControls(autoThink, effort)) }
     }
 
+    /**
+     * v1.0.33 manual file sync: reads the site's written files for the current
+     * conversation without sending anything. [onResult] carries the honesty
+     * report; the candidate files land in the published state (lastFiles).
+     */
+    fun syncFilesFromSite(onResult: (ZaiFileSync.SyncReport) -> Unit = {}) {
+        val engine = ensureEngine() ?: run {
+            onResult(
+                ZaiFileSync.SyncReport(
+                    wroteCount = 0, readablePaths = emptyList(), unreadablePaths = emptyList(),
+                    binarySkipped = emptyList(), sourceNotes = listOf("The Z.ai engine is not started yet."),
+                    probeOk = false, attempts = 0,
+                ),
+            )
+            return
+        }
+        scope.launch { onResult(engine.syncFilesFromSite()) }
+    }
+
+    /** v1.0.33: re-reads the page after a timeout (no send) and finishes normally when it can. */
+    fun reattachToReply() {
+        val engine = ensureEngine() ?: return
+        scope.launch { engine.reattachToReply() }
+    }
+
     fun cancel() {
         engine?.cancel()
     }

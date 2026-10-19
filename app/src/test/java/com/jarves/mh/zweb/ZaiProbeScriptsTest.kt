@@ -268,4 +268,104 @@ class ZaiProbeScriptsTest {
         assertTrue(js.contains("shape:'detail'"))
         assertTrue(js.contains("slice(0,160)"))
     }
+
+    // ── Phase 1: live visibility + model picker scripts ──
+
+    private val phase1Config: ZaiWebConfig = ZaiWebConfig.fromJson(
+        """
+        {"version":3,
+         "remoteUpdateUrl":"https://raw.githubusercontent.com/x/y/main/z.json",
+         "page":{"startUrl":"https://chat.z.ai/","authProbePath":"/api/v1/auths/"},
+         "selectors":{
+           "input":["#chat-input"],"sendButton":["#send-message-button"],
+           "stopIndicator":["div[aria-label='Stop']"],"assistantMessage":[".chat-assistant"],
+           "codeBlock":["pre code"],"loginMarker":["url-contains:/auth"],
+           "loginFormMarker":["text:=Welcome to Z.ai"],"sidebarToggle":["#sidebar-toggle-button"],
+           "signInButton":["text-button:=sign in"],"captchaMarker":["#captcha"],
+           "newChatButton":["#new-chat-button"],
+           "thinkingBlock":[".chat-assistant details[type='reasoning']",".thinking-block"],
+           "partialAnswer":[".chat-assistant"],
+           "stepStatus":["span.shimmer",".shimmer"],
+           "modelLabel":["button.modelSelectorButton"],
+           "modelMenuButton":["button.modelSelectorButton"],
+           "modelOption":[".popoverContainer div[class*='line-clamp-1'][class*='select-none']","[data-dropdown-select-content] [role='option']"]},
+         "timing":{}}
+        """.trimIndent(),
+    )
+
+    @Test
+    fun `live status probe carries the phase 1 selector groups and stays synchronous`() {
+        val js = ZaiProbeScripts.buildLiveStatusScript(phase1Config)
+        assertTrue(js.contains(".chat-assistant details[type='reasoning']"))
+        assertTrue(js.contains("span.shimmer"))
+        assertTrue(js.contains("thinkingText"))
+        assertTrue(js.contains("thinkingActive"))
+        assertTrue(js.contains("answerText"))
+        assertTrue(js.contains("stepText"))
+        assertTrue(js.contains("stopPresent"))
+        assertFalse(js.contains("fetch("))
+        assertFalse(js.contains("Promise"))
+        assertFalse(js.contains(".then("))
+        // separate window keys: must not touch the finish detector's probe state
+        assertFalse(js.contains("__mhProbePrev"))
+    }
+
+    @Test
+    fun `live status probe works with an old config missing the new groups`() {
+        // v2 config: groups resolve to empty arrays; the script must still be
+        // syntactically complete and return a JSON object.
+        val js = ZaiProbeScripts.buildLiveStatusScript(config)
+        assertTrue(js.contains("(function(){"))
+        assertTrue(js.trimEnd().endsWith("})()"))
+        assertTrue(js.contains("answerText"))
+    }
+
+    @Test
+    fun `model label and menu scripts carry the model selector group`() {
+        val label = ZaiProbeScripts.buildModelLabelScript(phase1Config)
+        val menu = ZaiProbeScripts.buildClickModelMenuScript(phase1Config)
+        val options = ZaiProbeScripts.buildModelOptionsScript(phase1Config)
+        assertTrue(label.contains("button.modelSelectorButton"))
+        assertTrue(label.contains("model:"))
+        assertTrue(menu.contains("button.modelSelectorButton"))
+        assertTrue(options.contains("popoverContainer"))
+        assertTrue(options.contains("data-dropdown-select-content"))
+        // options script returns an array — no keys required, but must be JSON
+        assertTrue(options.contains("JSON.stringify"))
+        listOf(label, menu, options).forEach { js ->
+            assertFalse(js.contains("fetch("))
+            assertFalse(js.contains("Promise"))
+        }
+    }
+
+    @Test
+    fun `model option click quotes the requested name and matches first line only`() {
+        val js = ZaiProbeScripts.buildClickModelOptionScript(phase1Config, "GLM-5.3-Flash")
+        // JSONObject.quote escapes safely — no raw injection possible.
+        assertTrue(js.contains("GLM-5.3-Flash"))
+        assertTrue(js.contains("toLowerCase"))
+        assertFalse(js.contains("fetch("))
+        assertFalse(js.contains("Promise"))
+        // A quote-containing model name must be JSON-escaped, not raw.
+        val trickyName = "Model \"X\" and 'quotes'"
+        val tricky = ZaiProbeScripts.buildClickModelOptionScript(phase1Config, trickyName)
+        assertTrue(tricky.contains("\\\"X\\\""))
+        assertFalse(tricky.contains("Model \"X\""))
+    }
+
+    @Test
+    fun `every new phase 1 script is a synchronous IIFE returning json`() {
+        val scripts = listOf(
+            "liveStatus" to ZaiProbeScripts.buildLiveStatusScript(phase1Config),
+            "modelLabel" to ZaiProbeScripts.buildModelLabelScript(phase1Config),
+            "clickModelMenu" to ZaiProbeScripts.buildClickModelMenuScript(phase1Config),
+            "modelOptions" to ZaiProbeScripts.buildModelOptionsScript(phase1Config),
+            "clickModelOption" to ZaiProbeScripts.buildClickModelOptionScript(phase1Config, "GLM-5.3"),
+        )
+        scripts.forEach { (name, js) ->
+            assertTrue("$name must be an IIFE", js.trimStart().startsWith("(function(){"))
+            assertTrue("$name must close the IIFE", js.trimEnd().endsWith("})()"))
+            assertTrue("$name must stringify its result", js.contains("JSON.stringify"))
+        }
+    }
 }

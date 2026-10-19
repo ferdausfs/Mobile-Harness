@@ -52,6 +52,51 @@ class ZaiWebConfigTest {
     }
 
     @Test
+    fun `bundled config v3 carries the phase 1 live-visibility and model groups`() {
+        val config = parseBundled()
+        // Probed live 2026-10-19 (headless Chromium, mobile viewport): the model
+        // button is `button.modelSelectorButton` with aria-label "Select a model".
+        assertTrue(config.version >= 3)
+        assertEquals("button.modelSelectorButton", config.selectorsFor("modelLabel").first())
+        assertEquals("button.modelSelectorButton", config.selectorsFor("modelMenuButton").first())
+        assertTrue(config.selectorsFor("modelMenuButton").any { it.contains("aria-label") })
+        // Dropdown rows read from the site's own popover (live-verified) plus
+        // bits-ui role=option fallbacks (bundle-verified attribute).
+        assertTrue(config.selectorsFor("modelOption").first().contains("popoverContainer"))
+        assertTrue(config.selectorsFor("modelOption").any { it.contains("role='option'") })
+        // Thinking/partial/step groups exist with several fallbacks (bundle-verified
+        // class names; the live guest turn is captcha-gated, so these carry fallbacks).
+        assertTrue(config.selectorsFor("thinkingBlock").any { it.contains("details") })
+        assertTrue(config.selectorsFor("thinkingBlock").any { it.contains("thinking-block") })
+        assertTrue(config.selectorsFor("partialAnswer").first() == ".chat-assistant")
+        assertTrue(config.selectorsFor("stepStatus").any { it.contains("shimmer") })
+    }
+
+    @Test
+    fun `older config without the phase 1 groups still parses`() {
+        // A cached v2 remote config must keep working: the new groups are optional.
+        val v2 = """
+            {"version":2,
+             "remoteUpdateUrl":"https://raw.githubusercontent.com/x/y/main/z.json",
+             "page":{"startUrl":"https://chat.z.ai/","authProbePath":"/api/v1/auths/"},
+             "selectors":{
+               "input":["#chat-input"],"sendButton":["#send-message-button"],
+               "stopIndicator":["div[aria-label='Stop']"],"assistantMessage":[".chat-assistant"],
+               "codeBlock":["pre code"],"loginMarker":["url-contains:/auth"],
+               "loginFormMarker":["text:=Welcome to Z.ai"],"sidebarToggle":["#sidebar-toggle-button"],
+               "signInButton":["text-button:=sign in"],"captchaMarker":["#aliyunCaptcha-window-popup.window-show"]},
+             "timing":{}}
+        """.trimIndent()
+        val config = ZaiWebConfig.fromJson(v2)
+        assertEquals(2, config.version)
+        assertTrue(config.selectorsFor("thinkingBlock").isEmpty())
+        assertTrue(config.selectorsFor("modelLabel").isEmpty())
+        assertTrue(config.selectorsFor("modelOption").isEmpty())
+        assertTrue(config.selectorsFor("stepStatus").isEmpty())
+        assertTrue(config.selectorsFor("partialAnswer").isEmpty())
+    }
+
+    @Test
     fun `bundled primary selectors match the live probe from 2026-10-18`() {
         val config = parseBundled()
         assertEquals("#chat-input", config.selectorsFor("input").first())

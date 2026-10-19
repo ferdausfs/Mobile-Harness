@@ -291,6 +291,166 @@ object ZaiProbeScripts {
         """.trimIndent()
     }
 
+    // ── Phase 1: live visibility + model picker ──
+    //
+    // These snippets are polled/read while a turn is generating. They follow
+    // the same contract as every other script here: synchronous IIFE, JSON
+    // string completion value, NO Promise (the v1.0.23 store-and-poll rule).
+
+    /**
+     * Live status probe for the streaming chat card. Reads, from the CURRENT
+     * page: the thinking/reasoning block text (latest details element wins),
+     * whether it is still open, the partial answer text of the newest
+     * assistant message, and the latest tool/step status line. Never touches
+     * cookies or storage — visible DOM text only. Uses separate window keys
+     * from [buildStateProbe] so the finish detector's change tracking is
+     * untouched.
+     */
+    fun buildLiveStatusScript(config: ZaiWebConfig): String {
+        val sel = selJson(config, "thinkingBlock", "partialAnswer", "stepStatus", "stopIndicator")
+        return """
+            (function(){
+              $HELPERS_JS
+              var S=$sel;
+              function pickAll(list){
+                for(var i=0;i<list.length;i++){
+                  try{var els=document.querySelectorAll(list[i]);
+                    if(els&&els.length>0)return{by:list[i],els:els};}catch(e){}
+                }
+                return null;
+              }
+              var stop=__mhFirst(S.stopIndicator);
+              var thinkPick=pickAll(S.thinkingBlock);
+              var thinkingText='';
+              var thinkingActive=false;
+              if(thinkPick){
+                var last=thinkPick.els[thinkPick.els.length-1];
+                thinkingText=last.innerText||'';
+                try{thinkingActive=last.tagName.toLowerCase()==='details'?(last.hasAttribute('open')&&last.open):false;}catch(e){thinkingActive=false;}
+                if(!thinkingText&&last.querySelector){var sum=last.querySelector('summary');thinkingText=sum?(sum.innerText||''):'';}
+              }
+              var ansPick=pickAll(S.partialAnswer);
+              var answerText=ansPick?(ansPick.els[ansPick.els.length-1].innerText||''):'';
+              var stepPick=pickAll(S.stepStatus);
+              var stepText='';
+              if(stepPick){
+                for(var s=stepPick.els.length-1;s>=0;s--){
+                  var t=(stepPick.els[s].innerText||'').trim();
+                  if(t){stepText=t;break;}
+                }
+              }
+              return JSON.stringify({
+                thinkingText:thinkingText,
+                thinkingActive:thinkingActive,
+                answerText:answerText,
+                stepText:stepText,
+                stopPresent:!!stop,
+                url:location.href
+              });
+            })()
+        """.trimIndent()
+    }
+
+    /** Reads the current model name from the site's own label button. */
+    fun buildModelLabelScript(config: ZaiWebConfig): String {
+        val sel = selJson(config, "modelLabel")
+        return """
+            (function(){
+              $HELPERS_JS
+              var S=$sel;
+              var el=__mhFirst(S.modelLabel);
+              if(!el||!el.el)return JSON.stringify({ok:false});
+              var t=(el.el.innerText||'').trim();
+              if(!t)return JSON.stringify({ok:false});
+              return JSON.stringify({ok:true,model:t.split('\n')[0].trim()});
+            })()
+        """.trimIndent()
+    }
+
+    /** Clicks the site's model dropdown trigger so its options render. Best effort. */
+    fun buildClickModelMenuScript(config: ZaiWebConfig): String {
+        val sel = selJson(config, "modelMenuButton")
+        return """
+            (function(){
+              $HELPERS_JS
+              var S=$sel;
+              var el=__mhFirst(S.modelMenuButton);
+              if(!el||!el.el)return JSON.stringify({ok:false,why:'no-button'});
+              try{el.el.click();}catch(e){return JSON.stringify({ok:false,why:'click-failed'});}
+              return JSON.stringify({ok:true});
+            })()
+        """.trimIndent()
+    }
+
+    /**
+     * Reads the open model dropdown's option rows. Only meaningful right after
+     * [buildClickModelMenuScript] succeeded; the caller retries/closes on failure.
+     */
+    fun buildModelOptionsScript(config: ZaiWebConfig): String {
+        val sel = selJson(config, "modelOption")
+        return """
+            (function(){
+              $HELPERS_JS
+              var S=$sel;
+              var pick=null;
+              for(var i=0;i<S.modelOption.length;i++){
+                try{var els=document.querySelectorAll(S.modelOption[i]);
+                  if(els&&els.length>0){pick={by:S.modelOption[i],els:els};break;}}catch(e){}
+              }
+              if(!pick)return JSON.stringify([]);
+              var seen={};var out=[];
+              for(var k=0;k<pick.els.length&&out.length<40;k++){
+                var row=pick.els[k];
+                var text=(row.innerText||'').trim();
+                if(!text)continue;
+                var name=text.split('\n')[0].trim();
+                if(!name||seen[name.toLowerCase()])continue;
+                seen[name.toLowerCase()]=1;
+                var desc='';
+                for(var d=1;d<text.split('\n').length;d++){
+                  var line=text.split('\n')[d].trim();
+                  if(line&&line!=='NEW'&&line.toLowerCase().indexOf('new')!==0){desc=line;break;}
+                }
+                out.push({name:name,description:desc,by:pick.by});
+              }
+              return JSON.stringify(out);
+            })()
+        """.trimIndent()
+    }
+
+    /**
+     * Clicks the dropdown row whose FIRST line equals [name] (case-insensitive,
+     * visible rows only). Returns which selector fired so a mismatch is visible.
+     */
+    fun buildClickModelOptionScript(config: ZaiWebConfig, name: String): String {
+        val sel = selJson(config, "modelOption")
+        val nameJson = JSONObject.quote(name)
+        return """
+            (function(){
+              $HELPERS_JS
+              var S=$sel;
+              var want=$nameJson.toLowerCase();
+              for(var i=0;i<S.modelOption.length;i++){
+                var rows=null;
+                try{rows=document.querySelectorAll(S.modelOption[i]);}catch(e){continue;}
+                if(!rows||rows.length===0)continue;
+                for(var k=0;k<rows.length;k++){
+                  var row=rows[k];
+                  if(row.getClientRects&&row.getClientRects().length===0)continue;
+                  var text=(row.innerText||'').trim();
+                  if(!text)continue;
+                  var first=text.split('\n')[0].trim().toLowerCase();
+                  if(first===want){
+                    try{row.click();return JSON.stringify({ok:true,by:S.modelOption[i]});}
+                    catch(e){return JSON.stringify({ok:false,why:'click-failed'});}
+                  }
+                }
+              }
+              return JSON.stringify({ok:false,why:'no-match'});
+            })()
+        """.trimIndent()
+    }
+
     // ── Sign-in sheet automation (visible WebView) ──
     //
     // The sheet drives the chat.z.ai login UI. Every lookup goes through the

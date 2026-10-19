@@ -1,5 +1,5 @@
 {
-  "version": 2,
+  "version": 3,
   "remoteUpdateUrl": "https://raw.githubusercontent.com/ferdausfs/Mobile-Harness/main/app/src/main/assets/zweb/selectors.json",
   "page": {
     "startUrl": "https://chat.z.ai/",
@@ -73,6 +73,42 @@
       "#new-chat-button",
       "[aria-label='New Chat']",
       "a[aria-label='New Chat']"
+    ],
+    "thinkingBlock": [
+      ".chat-assistant details[type='reasoning']",
+      ".chat-assistant details",
+      "details[type='reasoning']",
+      ".thinking-block",
+      "[class*='thinking-block']"
+    ],
+    "partialAnswer": [
+      ".chat-assistant",
+      ".markdown-prose.chat-assistant",
+      "[class*='chat-assistant']"
+    ],
+    "stepStatus": [
+      ".chat-assistant .shimmer",
+      "span.shimmer",
+      ".shimmer",
+      ".chat-assistant [class*='text-text-tertiary']",
+      ".chat-assistant div[class*='gap-2'][class*='items-center'] span.text-sm"
+    ],
+    "modelLabel": [
+      "button.modelSelectorButton",
+      "button[aria-label='Select a model']",
+      "[id^='model-selector-'][id$='-button']"
+    ],
+    "modelMenuButton": [
+      "button.modelSelectorButton",
+      "button[aria-label='Select a model']",
+      "[id^='model-selector-'][id$='-button']"
+    ],
+    "modelOption": [
+      ".popoverContainer div[class*='line-clamp-1'][class*='select-none']",
+      ".popoverContainer [class*='select-none'][class*='p-2']",
+      "[data-dropdown-select-content] [role='option']",
+      "[data-bits-select-content] [role='option']",
+      "[class*='selectContent'] [role='option']"
     ]
   },
   "timing": {

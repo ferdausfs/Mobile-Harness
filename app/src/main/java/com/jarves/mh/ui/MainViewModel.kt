@@ -449,7 +449,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // best effort, pattern-only redaction covers vault-less early crashes.
         CrashGuard.egressRedactor = ::redactEgress
         watchTaskTokenRotation()
-        setupZaiEngineForeground()
+        // v1.0.31: the queue reconcile (file read + JSON + possible save) moved
+        // off the main thread — first-launch-after-update work must never sit
+        // on the startup path (ANR on a slow device reads as "app never opens").
+        viewModelScope.launch(backgroundGuard + Dispatchers.IO) { setupZaiEngineForeground() }
         // GitHub's official CLI owns its OAuth credential. Remove credentials from
         // the retired custom OAuth implementation and discover the real CLI status.
         vault.remove(LEGACY_GITHUB_TOKEN_KEY)
@@ -508,28 +511,42 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _state.update { it.copy(provider = testProvider) }
         }
 
-        val loadedProjects = preferences.loadProjects()
+        // v1.0.31: the QUICK_PROJECT cleanup walks ENTIRE workspace trees
+        // (node_modules included) and reads chat files — all file I/O that used
+        // to sit on the main thread inside ViewModel construction. On a slow
+        // device after an update that is an ANR at launch, which some OEM
+        // skins surface as "the app never opens". The work is identical, just
+        // off the startup path; the state update stays ordered by the scope.
+        viewModelScope.launch(backgroundGuard + Dispatchers.IO) { cleanupEmptyQuickProjects() }
+    }
+
+    /** Removes QUICK_PROJECTs that have neither user messages nor files. Thread: IO. */
+    private suspend fun cleanupEmptyQuickProjects() {
+        val application = getApplication<Application>()
+        val loadedProjects = withContext(Dispatchers.IO) { preferences.loadProjects() }
         val cleanedProjects = loadedProjects.filter { project ->
             if (project.kind == ProjectKind.QUICK_PROJECT) {
-                val chats = preferences.loadProjectChats(project.id)
-                val userMessages = chats.sumOf { preferences.loadMessages(project.id, it.id).count { m -> m.fromUser } }
-                val workspaceDir = File(application.filesDir, "workspaces/${project.id}")
-                val userFiles = if (workspaceDir.isDirectory) {
-                    workspaceDir.walkTopDown().filter { file ->
-                        file.isFile && !file.name.startsWith(".claude") && file.name != ".pocket-dev-stacks.json"
-                    }.count()
-                } else 0
-                val keep = userMessages > 0 || userFiles > 0
-                if (!keep) {
-                    workspaceDir.deleteRecursively()
-                    terminalHistoryFile(project.id).delete()
-                    preferences.deleteProjectChats(project.id)
+                withContext(Dispatchers.IO) {
+                    val chats = preferences.loadProjectChats(project.id)
+                    val userMessages = chats.sumOf { preferences.loadMessages(project.id, it.id).count { m -> m.fromUser } }
+                    val workspaceDir = File(application.filesDir, "workspaces/${project.id}")
+                    val userFiles = if (workspaceDir.isDirectory) {
+                        workspaceDir.walkTopDown().filter { file ->
+                            file.isFile && !file.name.startsWith(".claude") && file.name != ".pocket-dev-stacks.json"
+                        }.count()
+                    } else 0
+                    val keep = userMessages > 0 || userFiles > 0
+                    if (!keep) {
+                        workspaceDir.deleteRecursively()
+                        terminalHistoryFile(project.id).delete()
+                        preferences.deleteProjectChats(project.id)
+                    }
+                    keep
                 }
-                keep
             } else true
         }
         if (cleanedProjects.size != loadedProjects.size) {
-            preferences.saveProjects(cleanedProjects)
+            withContext(Dispatchers.IO) { preferences.saveProjects(cleanedProjects) }
             _state.update { it.copy(projects = cleanedProjects) }
         }
     }
@@ -1124,12 +1141,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     init {
-        viewModelScope.launch { RuntimeSetupController.snapshot.collect(::onSetupSnapshot) }
+        // v1.0.31: both collectors + bootstrap are guarded — bootstrap touches
+        // the installer's files (legacy migration, stack markers) and an unguarded
+        // throw there killed the whole process at launch (the v1.0.30
+        // "app never opens" report). A failure now degrades to a visible
+        // startup error instead of a crash loop.
+        viewModelScope.launch(backgroundGuard) { RuntimeSetupController.snapshot.collect(::onSetupSnapshot) }
         viewModelScope.launch(backgroundGuard) { claudeRuntime.events.collect(::onRuntimeEvent) }
-        viewModelScope.launch { bootstrap() }
+        viewModelScope.launch(backgroundGuard) { bootstrap() }
     }
 
     private suspend fun bootstrap() {
+        try {
+            bootstrapInner()
+        } catch (cancellation: kotlinx.coroutines.CancellationException) {
+            // ViewModel cleared mid-boot — propagate, never convert to an error state.
+            throw cancellation
+        } catch (throwable: Throwable) {
+            Log.e("MainViewModel", "Startup bootstrap failed", throwable)
+            showStartupError(throwable)
+        }
+    }
+
+    private suspend fun bootstrapInner() {
         if (!supportsArm64Runtime(android.os.Build.SUPPORTED_ABIS, System.getProperty("os.arch"))) {
             _state.update {
                 it.copy(
@@ -4536,6 +4570,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val zaiTaskQueueStore by lazy {
         ZaiTaskQueueStore(java.io.File(getApplication<Application>().filesDir, "zweb/task-queue.json"))
     }
+    @Volatile
     private var zaiQueueEntries: List<ZaiTaskQueue.Entry> = emptyList()
     private var zaiActiveQueueId: String? = null
     private var zaiForegroundRunning = false

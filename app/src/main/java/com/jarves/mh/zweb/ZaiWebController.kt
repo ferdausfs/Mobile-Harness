@@ -17,7 +17,20 @@ import kotlinx.coroutines.launch
  */
 class ZaiWebController(private val appContext: Context, private val onState: (ZaiWebUiState) -> Unit) {
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    /**
+     * v1.0.31: every launch into this scope is guarded. Without a handler,
+     * any throwable inside an engine coroutine (Main.immediate) hits the
+     * default uncaught handler and kills the process — the engine's own
+     * runCatching blocks cover its internals, but this makes the boundary
+     * itself unable to take the app down (the 2026-10-19 startup-crash
+     * report showed how expensive an unguarded boundary is to diagnose).
+     */
+    private val scope = CoroutineScope(
+        SupervisorJob() + Dispatchers.Main.immediate +
+            kotlinx.coroutines.CoroutineExceptionHandler { _, throwable ->
+                Log.e(TAG, "Z.ai engine coroutine failed", throwable)
+            },
+    )
     private val configLoader = ZaiConfigLoader(appContext)
 
     @Volatile

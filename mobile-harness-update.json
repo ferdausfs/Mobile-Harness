@@ -1,12 +1,12 @@
 {
-  "versionCode": 32,
-  "versionName": "1.0.31",
-  "notes": "HOTFIX for the v1.0.30 startup crash ('installs fine but never opens again'). v1.0.31 is crash-safe and self-diagnosing: crashes are captured from the first process step, and when a crash report is newer than the last successful open the app shows a 'Startup problem detected' screen BEFORE the main UI with Copy report / Reset app data / Continue anyway (a crash loop escalates to a full-screen gate). Startup hardened: engine coroutines and boot can no longer kill the process on a throw, the task-queue reconcile and project cleanup moved off the main thread, one malformed saved project no longer erases the whole project list, vault decrypt failures stay non-fatal. Regression tests load real v1.0.27-30-era payloads into the current loaders. Plus subtle Z.ai card motion polish (respects remove-animations). If v1.0.30 crashed for you: install over it and use Copy report on the screen that appears.",
+  "versionCode": 33,
+  "versionName": "1.0.32",
+  "notes": "Phase 4: the Z.ai chat engine is now a fully autonomous agent. New Autonomy control on the Z.ai tab (Off / Ask each / Safe auto / Full auto - Full auto is the default): RUN: commands from the model execute in your project's private Linux workspace and the results flow back into the same conversation until DONE. Live in the chat: a collapsible Commands-run activity log, an approval card when commands wait for you (Ask each / Safe auto), and a final report card (rounds, commands, refusals, stop reason, summary). Safety: hard rails refuse destructive commands without asking (rm -rf outside the workspace, force pushes, history rewrites, remote deletions, system commands, fork bombs, curl|sh, env/token printing) with bypass hardening; token values travel only as environment variables (git uses a process-scoped credential helper - never .git/config or remote URLs); command output is redacted and tail-bounded before returning to chat.z.ai; an untrusted-data rule is taught to the model; budgets cap the loop (40 rounds, 120s per command, total-output cap, no-progress detection). The loop never touches startup and is fully crash-safe.",
   "artifacts": {
     "online": {
-      "url": "https://github.com/ferdausfs/Mobile-Harness/releases/download/v1.0.31/mobile-harness-online-v1.0.31.apk",
-      "sha256": "1ec456c447acee6b2792657faea405d48e77edd2d700ccc2d5d02d9e6c3ee3a9",
-      "sizeBytes": 88685687
+      "url": "https://github.com/ferdausfs/Mobile-Harness/releases/download/v1.0.32/mobile-harness-online-v1.0.32.apk",
+      "sha256": "175e11247de3887b1c006ec39c28a5857130d61638d395ff55263f22e5844cb7",
+      "sizeBytes": 88780019
     }
   }
 }

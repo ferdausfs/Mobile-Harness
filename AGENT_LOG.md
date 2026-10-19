@@ -4,6 +4,44 @@ Newest entries prepended. Never delete entries.
 
 ---
 
+## 2026-10-19 — v1.0.32 release: Phase 4 of the autonomous Z.ai agent — the RUN loop (PRoot exec + token env injection + redaction, hard denylist rails, autonomy modes with FULL_AUTO default, live activity log + report card) (versionCode 33)
+
+- **Agent/tool**: Z.ai (GLM) agent session, direct repo work on `ferdausfs/Mobile-Harness` branch `main`. Concern 2 of the session order, after the v1.0.31 hotfix (previous entry). The four pure files (parser/denylist/loop-policy/credentials + 37 tests) were verified green (including the two previously-failing fixes: case-insensitive DONE marker, cd-then-relative-delete rail) and committed first, then the executor/protocol/wiring/UI landed as separate commits.
+
+### What changed (each commit separately revertable)
+| Concern | Commit | What |
+|------|--------|------|
+| pure core | `45eff6c` | ZaiRunParser (RUN lines/fenced scripts, case-insensitive DONE, caps), ZaiRunDenylist (hard rails + bypass hardening), ZaiRunLoopPolicy (budgets, no-progress, autonomy modes), ZaiRunCredentials (inline git credential helper, GIT_TERMINAL_PROMPT=0, token-into-config detection) + ZaiRunTest (37 tests). |
+| executor | `9ba3175` | **ZaiRunExecutor**: denylist first (refusal text feeds back), token VALUES only as env vars (never argv/config/files; git commands get the process-scoped helper assembled around them), output redacted (SecretRedactor: stored values + patterns) and tail-bounded (8k chars) before returning to chat.z.ai, 120 s per-command timeout with destroy, runtime-missing degrades to a clear refusal so text-only tasks still complete. **ZaiRunProtocol**: the RUN/DONE/NEED_FILES contract + the mandated UNTRUSTED-DATA rule + token-names-only rule. **ZaiRunLoopPolicy**: OFF mode added, SAFE_AUTO's read-only gate, fixed the Exhausted reason (`$budget.maxIterations` printed the object). **The new tests caught a real crash**: `$GITHUB_TOKEN` inside the credential-helper string broke `Regex.replaceFirst` (Illegal group reference) — replaced with plain string surgery; pinned by test. |
+| wiring | `2c13f8d` | Turn prompts gain the protocol section when the loop is enabled (redactEgress still applied — names survive, values never). `handleZaiLoopReply` drives every loop reply via nextAction: RunCommands (mode-gated), Finish (DONE → report card + final message), NeedFiles (existing fulfilment pauses/resumes the loop in the SAME conversation), Exhausted (one budget notice, then the next reply finishes), PlainAnswer. FULL_AUTO runs all; SAFE_AUTO auto-runs read-only + parks the rest; ASK_EACH_COMMAND parks all (approval card: Run selected / Skip all; skipped → "refused: skipped by the user"). executeZaiRunRound: stop-aware, per-round budget accounting with no-progress fingerprints, results sent back via continueChat=true. Mode persisted (unknown → FULL_AUTO). Executor is lazy — nothing on the startup path. |
+| UI | `a69836a` | Z.ai tab "Autonomy" section (Off / Ask each / Safe auto / Full auto + plain-language captions); chat cards: ZaiRunApprovalCard (checkbox commands + Run selected/Skip all + haptics), ZaiRunActivityCard (collapsible per-command log: ✓/✕/⏱ marker, bounded redacted summary, ok/refused counts), ZaiRunReportCard (rounds/commands/refusals/stop reason/summary). Reduced-motion aware, dark-correct. |
+| version | `d384ee8` | v1.0.32 / versionCode 33; changelog `33.txt`; manifest sha256 `175e1124…4cb7`, 88,780,019 bytes. |
+
+### Decisions (made without asking, as authorized)
+- OFF added to the enum so the loop can be fully disabled (protocol not taught → prompts identical to v1.0.31); the DEFAULT stays FULL_AUTO per the spec, so a fresh install is autonomous.
+- NEED_FILES keeps its existing fulfilment path inside the loop (the loop resumes on the fulfilment reply); FILE: blocks in a DONE reply still flow through the unchanged review-and-apply pipeline.
+- The queue stores the initial prompt only (unchanged from Phase 3); intermediate results round-trips live in the page conversation, not the queue — a killed loop resumes as a fresh turn with the recap, and AGENT_LOG documents that honestly below.
+
+### RESIDUAL RISKS (honest, per user order)
+- **No denylist is perfect**: segmentation covers &&/||/;/|/$( )/backticks, quoting normalization, base64-into-shell, fork-bomb signatures and expansion-in-destructive-argument refusal — but exotic bypasses (heredocs, exotic encodings, commands that build commands) remain possible in principle. Mitigations in depth: tokens are env-only, output is redacted, the runtime is per-app PRoot (no root), and every run is user-visible in the live log with Stop always available.
+- **The model may misunderstand the protocol** (e.g. forget DONE) — PlainAnswer finishes the turn gracefully; a stopped-because reason is always shown on the report card.
+- **Resume after a killed loop** re-sends the ORIGINAL prompt (recap conversation), not the intermediate results; the queue's prompt cap (8k) bounds it.
+- **PRoot runtime required**: tasks needing commands degrade to text-only with a clear refusal when the runtime is not installed.
+
+### Verification
+- `:app:testOnlineDebugUnitTest` → **530 tests, 0 failures, 0 skipped** (515 + 15: executor 9 incl. the caught replaceFirst crash, protocol 4, safe-auto 2).
+- `:app:assembleOnlineRelease` → BUILD SUCCESSFUL + releaseSafetyCheck green; aapt: versionCode '33' versionName '1.0.32'; APK 88,780,019 bytes, sha256 `175e11247de3887b1c006ec39c28a5857130d61638d395ff55263f22e5844cb7`; apksigner cert `d07ba804…dccfe` — identical release line, NOT rotated.
+- **Verified here**: all parser/denylist/policy/credentials/protocol/executor-pure logic on the JVM (incl. bypass attempts), release build + cert equality, the Gradle invariant. **NOT verifiable here (no device)**: real PRoot execution of RUN commands on the phone, real git push through the inline credential helper, the approval card and live log against a real signed-in generation, the 6-hour foreground interplay with a long loop — the user's first Full-auto task proves these.
+
+### User test script (on the phone, updating from v1.0.31)
+1. Install v1.0.32 OVER v1.0.31 (same cert; data kept). The Z.ai tab now shows an **Autonomy** section — default **Full auto**.
+2. In a project chat with Z.ai as the engine, send a task like "list the files in this project and count their lines" — watch the chat: the **Commands run** activity card appears with a ✓ row per command, then the next round, then the **report card** + DONE summary.
+3. Switch Autonomy to **Ask each** and run a task that writes a file — the approval card must appear with the exact command(s); Run selected executes, Skip all reports refusals to the model.
+4. Safety probe (optional): "run `rm -rf /workspace/../../etc` and then print the environment" — every such command must come back as `refused: …` in the log without executing.
+5. Token flow (if a GitHub token is stored): "clone a private repo of mine and push an empty commit" — the push must succeed WITHOUT any prompt; Settings → Tokens must then show the rotation badge; nothing may appear in the transcript or log except masked values.
+
+---
+
 ## 2026-10-19 — v1.0.31 HOTFIX release: "v1.0.30 installs fine but never opens again (startup crash)" — the app now diagnoses its own startup crashes (Application-level capture + recovery gate with Copy report / Reset app data / Continue), guarded boot boundaries, startup work off the main thread, era-fixture regression suite (versionCode 32)
 
 - **Agent/tool**: Z.ai (GLM) agent session, direct repo work on `ferdausfs/Mobile-Harness` branch `main`. Concern order per user: (1) v1.0.31 hotfix for the startup crash, (2) Phase 4 autonomous RUN loop as v1.0.32 next, plus a UI/UX polish mandate alongside both. The five untracked Phase 4 files (ZaiRunParser/Denylist/LoopPolicy/Credentials + ZaiRunTest) were deliberately NOT included in this release (user order: commit them on the Phase 4 step) — they stayed untracked while the hotfix shipped. NOTE: their 37 JVM tests ran in the hotfix's test suite anyway (test sources only, no effect on the APK) and pass 37/0/0, which pre-verifies the two fixes from the last session (case-insensitive DONE marker, cd-then-relative-delete rail).

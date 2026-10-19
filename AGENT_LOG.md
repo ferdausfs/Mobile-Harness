@@ -4,6 +4,43 @@ Newest entries prepended. Never delete entries.
 
 ---
 
+## 2026-10-19 — v1.0.26 release: "in-app update crashes during download" — the lone-'%' String.format crash fixed, format-pattern source guard added (versionCode 27)
+
+- **Agent/tool**: Z.ai (GLM) agent session, direct repo work on `ferdausfs/Mobile-Harness` branch `main`. One concern only, per user order: fix the in-app-update download crash. The install-failure track and the Z.ai chat-engine track were NOT touched.
+
+### The crash (user-supplied report from v1.0.24, still present on main v1.0.25)
+`java.util.UnknownFormatConversionException: Conversion = 'End of String'` at `AppUpdateCard$lambda$1` (SettingsScreenModern.kt:1051 on device / 1061 on main). The download-progress line was itself built as a format pattern by interpolation — `"Downloading %.1f / %.1f MB · ${(progress * 100).toInt()}%".format(...)` — so the trailing literal '%' was parsed as a conversion specifier that never arrived. It threw the moment the total size became known, killing EVERY in-app update from Settings > App update on the main thread. Manual APK install was never affected (verified: the home-screen update dialog builds the same progress text with plain interpolation and no `String.format`, which is why it never crashed).
+
+### What changed (each commit separately revertable)
+| Concern | Commit | What |
+|------|--------|------|
+| the fix | `82d8fd9` | New `AppUpdateProgressText` (`com.jarves.mh.update`): builds "Downloading X / Y MB · N%" with numbers formatted against compile-time-constant patterns (`Locale.US`) and labels joined by plain Kotlin interpolation — no user-visible string is ever a `String.format` pattern. Percent clamped 0..100 (a misreported size can no longer render "137%"). `AppUpdateCard` now calls `AppUpdateProgressText.build(downloaded, total)`. |
+| guard + tests | `3160dda` | `FormatPatternGuardTest` scans every `.kt` under `app/src/main/java` (comment/raw-string aware) for a string literal directly before `.format(` and FAILS when the pattern carries an invalid '%' sequence (dangling/trailing '%') or Kotlin interpolation (interpolated text can inject '%' at runtime). The scanner proves itself on the planted v1.0.24 pattern and stays green on the legit call sites (`"%02x".format`, `"%d:%02d"`, `SimpleDateFormat`, `"".format()`, `"100%"` labels). `AppUpdateProgressTextTest` pins 0 bytes / unknown total (-1 and 0) / 100% / overshoot / no stray specifier. `CrashGuard.clear` now delegates to JVM-testable `clearFile(File)` (+2 tests) — "Last crash" card clearing is test-covered. |
+| release | `355646e` | versionCode 27 / versionName 1.0.26, changelog `27.txt`, `mobile-harness-update.json` (sha256 fb183c05…53b5, 88,222,939 bytes). |
+
+- **Whole-codebase audit of the bug class** (all `.format(` / `String.format` / `MessageFormat` / `Formatter` / `printf` / `stringResource`-with-args in `app/src/main/java`): 40+ call sites checked; all except the crash line use compile-time-constant patterns with valid specifiers or `SimpleDateFormat` — no other real instance. No `stringResource`/`getString` format-arg call sites exist at all. Variable-held / concatenated patterns do not exist in main sources (guard's documented blind spot, needs review if introduced).
+
+### Verification split (honest)
+- **Verified here**: 371/0/0 JVM tests (`:app:testOnlineDebugUnitTest`, 13 new); full release chain — `:app:assembleOnlineRelease` green, aapt versionCode 27 / 1.0.26, apksigner cert `d07ba804…dccfe` UNCHANGED (never rotated), APK sha256 fb183c05039b8b07965781b89ae6d16eb40f98be325e4fdd346d080ad13053b5 / 88,222,939 B, release 416882240 published with round-trip sha256 MATCH, `releases/latest` → v1.0.26, served manifest versionCode 27 with matching sha+size, no stray assets.
+- **Verified by reading code, not on a device**: the crash path is gone (the only interpolated format pattern in main sources was the crash line — the guard test now enforces this on every build); download resume (`DownloadResumePolicy`, pre-existing tests), SHA-256 check and `verifyApk` (package name + versionCode + signing-cert match) are unchanged from v1.0.22–25 behavior; `Last crash` card Clear button → `CrashGuard.clear` → file delete (JVM-tested at the file level; the Compose button itself is not).
+- **NOT verifiable in this environment (user must test on the phone)**: a real in-app update from v1.0.25 → v1.0.26 — tap Check now, then Update, watch the progress text (should read "Downloading X.X / 84.1 MB · N%" and never crash), then the installer hand-off. Also: reopen Settings after the update and confirm the "Last crash" card still clears.
+
+### On-device test recipe (v1.0.25 phone)
+1. Settings → App update → Check now → should offer v1.0.26 (versionCode 27).
+2. Tap "Download and install" → progress line appears with a NUMBER and '%' — the exact place v1.0.24/v1.0.25 crashed. Let it finish (resume keeps partial bytes if the network drops; SHA-256 is checked before install).
+3. Android installer opens → install → app returns at v1.0.26.
+4. Settings → Last crash → Copy report / Clear → card disappears.
+
+### Environment gotchas for the next agent (fresh sandbox)
+- Android SDK/NDK/AGY-bundle/JDK all vanish on reset: re-download cmdline-tools 11076708, NDK r26b (639 MB), Adoptium JDK 21 (**system java is a JRE — no javac**, `apt` needs sudo password → use /home/z/jdk), AGY bundle from runtime-2026.09.4 (sha a659ab91…d78, 41,870,025 B).
+- **`git submodule update --init --recursive` is REQUIRED** — `third_party/proot` and `third_party/libandroid-shmem` are submodules; without them CMake fails with "Cannot find source file … shmem.c / loader.c".
+- Background (`setsid`/`nohup`) downloads still die between tool calls — use foreground `curl -C - --http1.1`.
+- GH token: reuse via `/home/z/my-project/scripts/.ghtok` (raw token, chmod 600). Gotcha hit this session: a `KEY=value` line in that file makes `cat`-based reads produce "Bad credentials" — keep the file to the bare token. Git push works as `https://x-access-token:<TOKEN>@github.com/…`.
+- GitHub Releases API: `target_commitish` rejects a SHORT sha ("tag_name is not a valid tag" cascade) — pass the full commit sha.
+
+---
+
+
 
 ## 2026-10-19 — v1.0.25 release: "Z.ai Web as a chat engine inside the project workspace chat" — engine picker, context prompts with a hard budget, NEED_FILES auto-fulfilment, review-and-apply with checkpoint/undo (versionCode 26)
 

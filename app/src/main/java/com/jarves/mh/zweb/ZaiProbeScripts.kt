@@ -737,6 +737,20 @@ object ZaiProbeScripts {
      *     after the LAST user message are this turn's rounds. Structured
      *     `tool_calls` blocks (and a legacy top-level `tool_calls`) carry every
      *     Write (file_path + full content) and Edit/MultiEdit (file_path only).
+     *
+     * v1.0.34 TURN MATCHING (the "no assistant message found for this turn"
+     * fix, from the site's own bundle, prod-fe-1.1.107 live scan):
+     *  - the message store is a parent-linked TREE: `history.messages` maps
+     *    id → message, `history.currentId` is the newest leaf, and every
+     *    message carries `parentId` (the site walks exactly this chain to find
+     *    "the current message" — bundle-verified `for(;Re&&w().messages[Re];)
+     *    Re=…messages[Re].parentId`). The primary path now walks the chain
+     *    from currentId back to the nearest `role==='user'` message.
+     *  - the response may be wrapped (`{data:{…}}` / `{chat:{…}}`) — unwrapped.
+     *  - timestamps may be numbers OR numeric strings OR ISO strings (the site
+     *    itself multiplies by 1e3, seconds scale) — parsed tolerantly, and the
+     *    chain walk replaces timestamp matching whenever it works.
+     *  - last fallback: trailing assistant messages in map order.
      *  3. `GET /api/v1/storage/versions/{lastAssistantId}/files?prefix=download&max_keys=50`
      *     → `{success,data:{files:[{key,last_modified}]}}`; each key downloads
      *     from `.../file?path={key}` — text-ish content types captured as text
@@ -818,21 +832,76 @@ object ZaiProbeScripts {
                   }
                 }catch(e){}
               }
+              function tsNum(v){
+                if(typeof v==='number'&&isFinite(v))return v;
+                if(typeof v==='string'){
+                  if(/^\d+(\.\d+)?$/.test(v))return parseFloat(v);
+                  var p=Date.parse(v);
+                  if(!isNaN(p))return p/1000;
+                }
+                return null;
+              }
               fetch('/api/v1/chats/'+chatId,{credentials:'include',headers:hdrs()})
                 .then(function(r){return r.ok?r.json():Promise.reject('chat '+r.status);})
                 .then(function(chat){
-                  var hist=(chat&&chat.history&&chat.history.messages)||{};
+                  var c=chat;
+                  if(c&&c.data&&typeof c.data==='object'&&c.data.history)c=c.data;
+                  if(c&&c.chat&&typeof c.chat==='object'&&c.chat.history)c=c.chat;
+                  var hist=(c&&c.history&&c.history.messages)||{};
+                  var currentId=(c&&c.history&&c.history.currentId)||null;
                   var msgs=[];
-                  for(var k in hist){if(Object.prototype.hasOwnProperty.call(hist,k))msgs.push(hist[k]);}
-                  var lastUserTs=-1;
-                  msgs.forEach(function(msg){if(msg&&msg.role==='user'&&typeof msg.timestamp==='number'){if(msg.timestamp>lastUserTs)lastUserTs=msg.timestamp;}});
-                  var turnMsgs=msgs.filter(function(msg){
-                    return msg&&msg.role==='assistant'&&typeof msg.timestamp==='number'&&msg.timestamp>=lastUserTs;
-                  }).sort(function(a,b){return a.timestamp-b.timestamp;});
+                  if(hist&&typeof hist.forEach==='function'){
+                    hist.forEach(function(msg){msgs.push(msg);});
+                  }else{
+                    for(var k in hist){if(Object.prototype.hasOwnProperty.call(hist,k))msgs.push(hist[k]);}
+                  }
+                  // Primary: the site's own parent-chain walk (bundle-verified).
+                  var turnMsgs=[];
+                  if(currentId&&hist[currentId]){
+                    var chain=[],seen={},cursor=currentId;
+                    while(cursor&&hist[cursor]&&!seen[cursor]&&chain.length<80){
+                      seen[cursor]=1;chain.push(hist[cursor]);
+                      cursor=hist[cursor].parentId;
+                    }
+                    chain.reverse();
+                    var lastUserIdx=-1;
+                    for(var i=chain.length-1;i>=0;i--){
+                      if(chain[i]&&chain[i].role==='user'){lastUserIdx=i;break;}
+                    }
+                    for(var j=Math.max(lastUserIdx,0)+1;j<chain.length;j++){
+                      if(chain[j]&&chain[j].role==='assistant')turnMsgs.push(chain[j]);
+                    }
+                  }
+                  // Fallback 1: tolerant timestamp matching over the whole map
+                  // (numbers, numeric strings, ISO strings — the site's own
+                  // timestamps are on the seconds scale, and comparisons stay
+                  // self-consistent because both sides go through tsNum).
+                  if(!turnMsgs.length){
+                    var lastUserTs=-1;
+                    msgs.forEach(function(msg){
+                      if(msg&&msg.role==='user'){var t=tsNum(msg.timestamp);if(t!==null&&t>lastUserTs)lastUserTs=t;}
+                    });
+                    var timed=[];
+                    msgs.forEach(function(msg){
+                      if(msg&&msg.role==='assistant'){
+                        var t=tsNum(msg.timestamp);
+                        if(t!==null&&(lastUserTs<0||t>=lastUserTs))timed.push({t:t,msg:msg});
+                      }
+                    });
+                    timed.sort(function(a,b){return a.t-b.t;});
+                    turnMsgs=timed.map(function(e){return e.msg;});
+                  }
+                  // Fallback 2: trailing assistant messages in store order.
+                  if(!turnMsgs.length){
+                    var trailing=[];
+                    msgs.forEach(function(msg){if(msg&&msg.role==='assistant')trailing.push(msg);});
+                    turnMsgs=trailing.slice(-5);
+                  }
                   var lastMsg=turnMsgs.length?turnMsgs[turnMsgs.length-1]:null;
                   var writes=[],edits=[];
                   turnMsgs.slice(-10).forEach(function(msg){collectToolCalls(msg,writes,edits);});
-                  var payload={chatFound:true,messageId:lastMsg?lastMsg.id:null,writes:writes,edits:edits};
+                  var payload={chatFound:true,messageId:lastMsg?lastMsg.id:null,writes:writes,edits:edits,
+                    turnSource:currentId&&hist[currentId]?'chain':'fallback'};
                   if(!lastMsg){
                     payload.note='no assistant message found for this turn';
                     window.__mhFileSync=JSON.stringify(payload);

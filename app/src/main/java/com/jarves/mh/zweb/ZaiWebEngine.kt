@@ -998,8 +998,9 @@ class ZaiWebEngine(
      * Manual "Sync files from Z.ai": reads the files the site wrote for the
      * CURRENT conversation (tool calls + versions store) without sending
      * anything, merges them with FILE: markers from the last reply the app
-     * saw, and publishes them into the state ([ZaiWebUiState.lastFiles] +
-     * [ZaiWebUiState.lastSync]) so the chat engine's apply pipeline can review
+     * ALREADY captured (the same text as the chat bubble — never a fresh DOM
+     * lookup; v1.0.34), and publishes them into the state ([ZaiWebUiState.lastFiles]
+     * + [ZaiWebUiState.lastSync]) so the chat engine's apply pipeline can review
      * them. Runs even when a turn timed out earlier and the site has since
      * finished. Returns the honesty report.
      */
@@ -1007,7 +1008,10 @@ class ZaiWebEngine(
         val config = configLoader.load()
         if (config == null) return syncFailure("Selector config unavailable — cannot reach chat.z.ai.")
         val view = ensureWebView() ?: return syncFailure("The hidden browser is not available yet — try again.")
-        val markers = ZaiFileExtractor.parse(currentState().lastReply.orEmpty()).files
+        // The captured reply carries no fence lines (rendered DOM), so the
+        // parser's plain-content tier resolves markers here; the DOM probe only
+        // backs up the site-side files.
+        val markers = ZaiFileExtractor.parseCaptured(currentState().lastReply.orEmpty(), emptyList()).files
         val payload = runFileSyncProbe(view)
         val merged = ZaiFileSync.merge(payload, markers)
         update {
@@ -1094,7 +1098,7 @@ class ZaiWebEngine(
             }
             return
         }
-        val parsed = ZaiFileExtractor.parse(extraction.text)
+        val parsed = ZaiFileExtractor.parseCaptured(extraction.text, extraction.codeBlocks)
         // v1.0.33: files Z.ai wrote in its OWN sandbox (tool calls + the site's
         // versions store) are read through the file-sync probe and MERGED with
         // the text markers. A connection test skips the probe entirely.
@@ -1143,6 +1147,7 @@ class ZaiWebEngine(
             return ZaiFileSync.ProbePayload(
                 chatFound = false, messageId = null,
                 note = "the site's file data could not be read (probe timeout)",
+                turnSource = null,
                 writes = emptyList(), edits = emptyList(), versionFiles = emptyList(),
                 versionContents = emptyMap(), binaryKeys = emptyList(), failedKeys = emptyList(),
             )
@@ -1192,19 +1197,27 @@ class ZaiWebEngine(
             val json = JSONObject(raw.unquoteEvalResult())
             if (!json.optBoolean("ok")) return null
             val blocks = json.optJSONArray("blocks") ?: JSONArray()
-            val blockTexts = ArrayList<String>(blocks.length())
+            val codeBlocks = ArrayList<ZaiFileExtractor.CodeBlock>(blocks.length())
             for (i in 0 until blocks.length()) {
                 val b = blocks.optJSONObject(i) ?: continue
-                blockTexts.add(b.optString("text"))
+                codeBlocks.add(
+                    ZaiFileExtractor.CodeBlock(
+                        language = b.optString("lang"),
+                        text = b.optString("text"),
+                    ),
+                )
             }
-            ExtractionResult(text = json.optString("text"), codeBlocks = blockTexts)
+            ExtractionResult(text = json.optString("text"), codeBlocks = codeBlocks)
         } catch (e: Exception) {
             Log.w(TAG, "Extraction parse failed: ${e.message}")
             null
         }
     }
 
-    private data class ExtractionResult(val text: String, val codeBlocks: List<String>)
+    private data class ExtractionResult(
+        val text: String,
+        val codeBlocks: List<ZaiFileExtractor.CodeBlock>,
+    )
 
     private suspend fun saveFiles(files: List<ZaiFileExtractor.ZaiExtractedFile>): String? =
         withContext(Dispatchers.IO) {

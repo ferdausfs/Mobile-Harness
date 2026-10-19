@@ -28,6 +28,15 @@ object CrashGuard {
     /** Upper bound for a copied report; keeps a runaway stack from flooding the clipboard/UI. */
     internal const val MAX_REPORT_CHARS = 24_000
 
+    /**
+     * Phase 2 egress hook: the stored token vault redacts its values (and
+     * token-shaped strings) out of every crash report before it lands on
+     * disk. Set by MainViewModel at startup; until then reports pass through
+     * unchanged (no vault exists yet to leak from).
+     */
+    @Volatile
+    var egressRedactor: (String) -> String = { it }
+
     fun install(context: Context) {
         val appContext = context.applicationContext
         val (versionName, versionCode) = runCatching { readVersion(appContext) }.getOrDefault("?" to 0)
@@ -36,12 +45,14 @@ object CrashGuard {
             runCatching {
                 crashFile(appContext).parentFile?.mkdirs()
                 crashFile(appContext).writeText(
-                    formatCrash(
-                        versionName = versionName,
-                        versionCode = versionCode,
-                        atMillis = System.currentTimeMillis(),
-                        threadName = thread.name,
-                        stack = stackTraceOf(throwable),
+                    egressRedactor(
+                        formatCrash(
+                            versionName = versionName,
+                            versionCode = versionCode,
+                            atMillis = System.currentTimeMillis(),
+                            threadName = thread.name,
+                            stack = stackTraceOf(throwable),
+                        ),
                     ),
                 )
             }
@@ -57,7 +68,9 @@ object CrashGuard {
         val file = crashFile(context)
         if (!file.isFile) return null
         val text = runCatching { file.readText() }.getOrNull() ?: return null
-        return bound(text)
+        // Belt and braces: the file was already redacted at write time; the
+        // copy path redacts again so a pre-hook report cannot leak either.
+        return bound(egressRedactor(text))
     }
 
     /** One-line summary for the Settings row: exception class + time. Null when none. */

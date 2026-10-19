@@ -77,3 +77,19 @@ object TokenRotation {
         return "Task finished. Rotate these tokens now: $names"
     }
 }
+
+/**
+ * Data behind the post-task rotation reminder card (and notification):
+ * the human message plus one tappable row per flagged provider.
+ */
+data class TokenRotationNotice(
+    val message: String,
+    val items: List<Item>,
+) {
+    data class Item(
+        val tokenId: String,
+        val title: String,
+        /** Provider page where the user rotates the token; null = no page. */
+        val managementUrl: String?,
+    )
+}

@@ -71,6 +71,13 @@ import com.jarves.mh.zweb.ZaiChatTurnPolicy
 import com.jarves.mh.zweb.ZaiChatTurnPresenter
 import com.jarves.mh.zweb.ZaiNeedFilesParser
 import com.jarves.mh.zweb.ZaiModelCatalog
+import com.jarves.mh.tokens.SecretRedactor
+import com.jarves.mh.tokens.StoredToken
+import com.jarves.mh.tokens.TokenPresets
+import com.jarves.mh.tokens.TokenRotation
+import com.jarves.mh.tokens.TokenRotationNotice
+import com.jarves.mh.tokens.TokenVault
+import com.jarves.mh.CrashGuard
 import com.jarves.mh.zweb.ZaiPendingApply
 import com.jarves.mh.zweb.ZaiPromptBudget
 import com.jarves.mh.zweb.ZaiRunPhase
@@ -92,6 +99,8 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -292,6 +301,17 @@ data class AppUiState(
     val zaiPreferredModel: String? = null,
     /** Persisted cache of chat.z.ai's own dropdown (used when the engine has none this session). */
     val zaiCachedModels: List<ZaiModelCatalog.ModelOption> = emptyList(),
+    // ── Phase 2 tokens vault ──
+    /** Stored tokens (metadata only — values never leave the vault unredacted). */
+    val tokens: List<StoredToken> = emptyList(),
+    /** Token id currently being tested (Test token button spinner). */
+    val tokenTestRunningId: String? = null,
+    /** Per-token human test outcome lines. */
+    val tokenTestResults: Map<String, String> = emptyMap(),
+    /** Per-token test validity (drives the green/red styling). */
+    val tokenTestValid: Map<String, Boolean> = emptyMap(),
+    /** Post-task rotation reminder card data; null = hidden. */
+    val rotationNotice: TokenRotationNotice? = null,
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -309,6 +329,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val vault = ApiKeyVault(application)
     private val preferences = AppPreferences(application)
+
+    /**
+     * Encrypted token storage (Phase 2). Values decrypt only through the
+     * vault; every egress path redacts them via [redactEgress].
+     */
+    private val tokenVault = TokenVault(application)
     private val usageTracker = ProviderUsageTracker(preferences)
     private val claudeRuntime = ClaudeRuntimeBridge(
         application,
@@ -387,6 +413,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             zaiAutoApply = preferences.zaiAutoApply,
             zaiPreferredModel = preferences.zaiPreferredModel.takeIf(String::isNotBlank),
             zaiCachedModels = ZaiModelCatalog.fromJson(preferences.zaiCachedModelsJson),
+            tokens = tokenVault.list(),
             provider = preferences.loadProvider(vault, initialAgentKind),
             activeApiKeyName = vault.list(preferences.loadProvider(vault, initialAgentKind).kind.name)
                 .firstOrNull(ApiKeyInfo::isActive)?.name,
@@ -412,6 +439,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     init {
         usageTracker.onChange = { publishProviderUsage() }
         publishProviderUsage()
+        // Phase 2 egress redaction: crash reports are written by the uncaught
+        // handler, so the hook is static; stored token values are redacted on
+        // best effort, pattern-only redaction covers vault-less early crashes.
+        CrashGuard.egressRedactor = ::redactEgress
+        watchTaskTokenRotation()
         // GitHub's official CLI owns its OAuth credential. Remove credentials from
         // the retired custom OAuth implementation and discover the real CLI status.
         vault.remove(LEGACY_GITHUB_TOKEN_KEY)
@@ -4033,7 +4065,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 workedMillis = (System.currentTimeMillis() - startedAt).coerceAtLeast(0L),
             )
         }
-        transcriptWrites.trySend(TranscriptWrite(project.id, chatId, messages))
+        // Phase 2: the transcript is an egress surface — stored token values are
+        // masked before the JSON lands on disk (and therefore before any later
+        // export of the file can leak them).
+        transcriptWrites.trySend(
+            TranscriptWrite(
+                project.id,
+                chatId,
+                messages.map { message ->
+                    message.copy(
+                        text = redactEgress(message.text),
+                        workItems = message.workItems.map { item ->
+                            item.copy(title = redactEgress(item.title), detail = redactEgress(item.detail))
+                        },
+                    )
+                },
+            ),
+        )
     }
 
     private fun updateActiveChatTitle(prompt: String) {
@@ -4206,6 +4254,252 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         preferences.zaiCachedModelsJson = json
     }
 
+    // ── Phase 2: tokens vault ──
+
+    /** Redacts stored token values (+ token-shaped strings) out of anything leaving the app. */
+    fun redactEgress(text: String): String {
+        if (text.isEmpty()) return text
+        val literals = runCatching { tokenVault.allValues() }.getOrDefault(emptyList())
+        return runCatching { SecretRedactor.redact(text, literals) }
+            .getOrElse { SecretRedactor.redactPatterns(text) }
+    }
+
+    private fun refreshTokensState() {
+        _state.update { it.copy(tokens = tokenVault.list()) }
+    }
+
+    fun addToken(presetId: String, name: String, envVar: String, value: String) {
+        val stored = tokenVault.add(presetId, name, envVar, value)
+        if (stored == null) {
+            _state.update {
+                it.copy(
+                    toastMessage = "Could not store the token. Check the value is not empty and the env var " +
+                        "name uses A-Z, digits and underscores (e.g. GITHUB_TOKEN).",
+                )
+            }
+            return
+        }
+        refreshTokensState()
+        _state.update { it.copy(toastMessage = "${stored.name} stored encrypted. The value never leaves this device unredacted.") }
+    }
+
+    fun updateTokenValue(id: String, value: String) {
+        val ok = tokenVault.updateValue(id, value)
+        refreshTokensState()
+        _state.update {
+            it.copy(
+                toastMessage = if (ok) "Token replaced — rotation badge cleared." else "Could not replace the token value.",
+            )
+        }
+    }
+
+    fun removeToken(id: String) {
+        tokenVault.remove(id)
+        refreshTokensState()
+    }
+
+    fun setTokenEnabled(id: String, enabled: Boolean) {
+        tokenVault.setEnabled(id, enabled)
+        refreshTokensState()
+    }
+
+    fun setTokenAutoDisable(id: String, on: Boolean) {
+        tokenVault.setAutoDisable(id, on)
+        refreshTokensState()
+    }
+
+    fun setTokenAllowedProjects(id: String, projects: Set<String>) {
+        tokenVault.setAllowedProjects(id, projects)
+        refreshTokensState()
+    }
+
+    fun markTokenRotated(id: String) {
+        tokenVault.markRotated(id)
+        refreshTokensState()
+        rebuildRotationNoticeFromFlagged()
+    }
+
+    fun dismissRotationNotice() {
+        _state.update { it.copy(rotationNotice = null) }
+    }
+
+    /** Runs the preset's read-only verification call and publishes a human outcome. */
+    fun testToken(id: String) {
+        val token = _state.value.tokens.firstOrNull { it.id == id } ?: return
+        val preset = TokenPresets.byId(token.presetId)
+        val spec = preset.test
+        if (spec == null) {
+            _state.update {
+                it.copy(
+                    tokenTestResults = it.tokenTestResults + (id to "No read-only test exists for custom tokens — the value is stored and will be injected as ${token.envVar}."),
+                    tokenTestValid = it.tokenTestValid + (id to true),
+                )
+            }
+            return
+        }
+        _state.update { it.copy(tokenTestRunningId = id) }
+        viewModelScope.launch(backgroundGuard + Dispatchers.IO) {
+            val value = tokenVault.value(id)
+            val outcome = if (value == null) {
+                com.jarves.mh.tokens.TokenTestClassifier.Outcome(false, "Could not decrypt the token — re-add it.")
+            } else {
+                fetchTokenTest(spec, value)
+            }
+            withContext(Dispatchers.Main) {
+                _state.update {
+                    it.copy(
+                        tokenTestRunningId = null,
+                        tokenTestResults = it.tokenTestResults + (id to outcome.human),
+                        tokenTestValid = it.tokenTestValid + (id to outcome.valid),
+                    )
+                }
+            }
+        }
+    }
+
+    /** Thin HTTPS GET for the test call; the token only ever goes into the auth header. */
+    private fun fetchTokenTest(
+        spec: com.jarves.mh.tokens.TokenTestSpec,
+        value: String,
+    ): com.jarves.mh.tokens.TokenTestClassifier.Outcome {
+        return runCatching {
+            val connection = java.net.URL(spec.url).openConnection() as java.net.HttpURLConnection
+            connection.connectTimeout = 10_000
+            connection.readTimeout = 10_000
+            connection.instanceFollowRedirects = false
+            val headerName = when (spec.auth) {
+                com.jarves.mh.tokens.AuthStyle.BEARER -> "Authorization"
+                com.jarves.mh.tokens.AuthStyle.TOKEN -> "Authorization"
+            }
+            val headerValue = when (spec.auth) {
+                com.jarves.mh.tokens.AuthStyle.BEARER -> "Bearer $value"
+                com.jarves.mh.tokens.AuthStyle.TOKEN -> "token $value"
+            }
+            connection.setRequestProperty(headerName, headerValue)
+            connection.setRequestProperty("Accept", "application/json")
+            connection.setRequestProperty("User-Agent", "Mobile-Harness (token test)")
+            val status = connection.responseCode
+            val body = runCatching {
+                (if (status in 200..299) connection.inputStream else connection.errorStream)
+                    ?.bufferedReader()?.use { it.readText() }
+            }.getOrNull()
+            connection.disconnect()
+            com.jarves.mh.tokens.TokenTestClassifier.classify(
+                TokenPresets.ALL.firstOrNull { it.test?.url == spec.url } ?: TokenPresets.CUSTOM,
+                status,
+                body,
+                null,
+            )
+        }.getOrElse {
+            com.jarves.mh.tokens.TokenTestClassifier.classify(TokenPresets.CUSTOM, null, null, it.message ?: "network error")
+        }
+    }
+
+    // ── Phase 2: task→token rotation bookkeeping ──
+
+    private var activeTaskTokenIds: Set<String> = emptySet()
+    private var activeTaskTitle: String = ""
+
+    /**
+     * Watches task run state: when a task starts on a project, the tokens
+     * available to that project are recorded; when it finishes (done,
+     * stopped or failed) they are flagged for rotation, the reminder card +
+     * notification fire, and auto-disable tokens are switched off. Nothing
+     * is ever auto-deleted.
+     */
+    private fun watchTaskTokenRotation() {
+        viewModelScope.launch(backgroundGuard) {
+            _state
+                .map { Triple(it.isRunning, it.activeProject?.id, it.currentTaskRequest) }
+                .distinctUntilChanged()
+                .collect { (running, projectId, request) ->
+                    when {
+                        running && projectId != null && activeTaskTokenIds.isEmpty() -> {
+                            activeTaskTokenIds = TokenRotation
+                                .availableForProject(tokenVault.list(), projectId)
+                                .map { it.id }
+                                .toSet()
+                            activeTaskTitle = request?.take(80).orEmpty().ifBlank { "Task" }
+                        }
+                        !running && activeTaskTokenIds.isNotEmpty() -> {
+                            val used = tokenVault.list().filter { it.id in activeTaskTokenIds }
+                            tokenVault.applyTaskEnd(used, activeTaskTitle, System.currentTimeMillis())
+                            activeTaskTokenIds = emptySet()
+                            refreshTokensState()
+                            if (used.isNotEmpty()) showRotationReminder()
+                        }
+                    }
+                }
+        }
+    }
+
+    private fun showRotationReminder() {
+        val flagged = tokenVault.flagged()
+        if (flagged.isEmpty()) return
+        val notice = TokenRotationNotice(
+            message = com.jarves.mh.tokens.TokenRotation.reminderMessage(flagged),
+            items = flagged.map { token ->
+                TokenRotationNotice.Item(
+                    tokenId = token.id,
+                    title = TokenPresets.byId(token.presetId).title,
+                    managementUrl = TokenPresets.byId(token.presetId).managementUrl,
+                )
+            },
+        )
+        _state.update { it.copy(rotationNotice = notice) }
+        postRotationNotification(notice)
+    }
+
+    /** Rebuilds (or hides) the card after a Rotated tap without a new task. */
+    private fun rebuildRotationNoticeFromFlagged() {
+        if (_state.value.rotationNotice == null) return
+        val flagged = tokenVault.flagged()
+        if (flagged.isEmpty()) {
+            _state.update { it.copy(rotationNotice = null) }
+        } else {
+            showRotationReminder()
+        }
+    }
+
+    private fun postRotationNotification(notice: TokenRotationNotice) {
+        val context = getApplication<Application>()
+        runCatching {
+            com.jarves.mh.runtime.RuntimeExecutionService.ensureNotificationChannels(context)
+            val manager = context.getSystemService(android.app.NotificationManager::class.java)
+            val openApp = android.app.PendingIntent.getActivity(
+                context,
+                1,
+                Intent(context, com.jarves.mh.MainActivity::class.java).apply {
+                    flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                },
+                android.app.PendingIntent.FLAG_IMMUTABLE or android.app.PendingIntent.FLAG_UPDATE_CURRENT,
+            )
+            val builder = androidx.core.app.NotificationCompat.Builder(context, "task-results")
+                .setSmallIcon(com.jarves.mh.R.drawable.ic_notification)
+                .setContentTitle("Rotate your tokens")
+                .setContentText(notice.message)
+                .setStyle(androidx.core.app.NotificationCompat.BigTextStyle().bigText(notice.message))
+                .setContentIntent(openApp)
+                .setAutoCancel(true)
+                .setCategory(androidx.core.app.NotificationCompat.CATEGORY_REMINDER)
+            notice.items.take(3).forEachIndexed { index, item ->
+                item.managementUrl?.let { url ->
+                    builder.addAction(
+                        0,
+                        "Rotate ${item.title}",
+                        android.app.PendingIntent.getActivity(
+                            context,
+                            200 + index,
+                            Intent(Intent.ACTION_VIEW, Uri.parse(url)),
+                            android.app.PendingIntent.FLAG_IMMUTABLE,
+                        ),
+                    )
+                }
+            }
+            manager.notify(47, builder.build())
+        }
+    }
+
     /**
      * Chat-engine picker from the workspace chat header. `"zai-web"` selects
      * Z.ai; anything else is treated as an AgentKind stable id and keeps the
@@ -4299,6 +4593,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 )
                 ZaiChatPromptBuilder.buildTurnPrompt(requestText, context)
             }
+            // HARD RULE (Phase 2): token values never reach chat.z.ai. If a
+            // workspace file or the user's message contains one, it is masked
+            // here — the model only ever sees variable NAMES, never values.
+            val safePrompt = redactEgress(built.prompt)
             withContext(Dispatchers.Main) {
                 zaiTurnContext = ZaiActiveTurn(project = project, chatId = chatId, needFilesRounds = 0)
                 zaiTurnActive = true
@@ -4307,7 +4605,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     it.copy(liveProcess = listOf(ActivityItem("Connecting to Z.ai", "Opening chat.z.ai…", false)))
                 }
             }
-            zaiWebController.runChatTurn(built.prompt, continueChat = !decision.freshConversation)
+            zaiWebController.runChatTurn(safePrompt, continueChat = !decision.freshConversation)
         }
     }
 
@@ -4478,6 +4776,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     needFilesNote = note,
                 ),
             )
+            val safePrompt = redactEgress(built.prompt)
             withContext(Dispatchers.Main) {
                 _state.update {
                     it.copy(
@@ -4490,7 +4789,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 persistMessages()
                 reportZaiBudget(built.report)
-                zaiWebController.runChatTurn(built.prompt, continueChat = true)
+                zaiWebController.runChatTurn(safePrompt, continueChat = true)
             }
         }
     }

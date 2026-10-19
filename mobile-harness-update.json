@@ -1,12 +1,12 @@
 {
-  "versionCode": 27,
-  "versionName": "1.0.26",
-  "notes": "Fix: the in-app updater no longer crashes the moment a download starts. On 1.0.24/1.0.25 every in-app update from Settings > App update died with UnknownFormatConversionException as soon as the download size became known - the progress text fed a pattern ending in a lone '%' to String.format. Progress lines are now built without ever using visible text as a format pattern, and a new source-scan test guards against that whole bug class. Download resume, the SHA-256 check and the installer hand-off are unchanged, and the Last crash card in Settings still lets you copy and clear a crash report. Same signing key - installs over 1.0.25 with one tap.",
+  "versionCode": 28,
+  "versionName": "1.0.27",
+  "notes": "New: watch Z.ai think and answer LIVE in your project chat - a collapsible Thinking section, the partial answer as it streams, the latest tool/step line, phase and elapsed time, refreshed about once a second. The current model (read from chat.z.ai's own label) shows in the chat header and engine picker, and the new model picker lists the options from chat.z.ai's own dropdown: picking one drives the hidden page and is verified by reading the label back, with a clear message and the read-only label if automation ever fails. Your pick is remembered. Sign-in, NEED_FILES, review-and-apply and the prompt budget are unchanged; the three CLI agents are untouched. Same signing key - installs over 1.0.26 with one tap.",
   "artifacts": {
     "online": {
-      "url": "https://github.com/ferdausfs/Mobile-Harness/releases/download/v1.0.26/mobile-harness-online-v1.0.26.apk",
-      "sha256": "fb183c05039b8b07965781b89ae6d16eb40f98be325e4fdd346d080ad13053b5",
-      "sizeBytes": 88222939
+      "url": "https://github.com/ferdausfs/Mobile-Harness/releases/download/v1.0.27/mobile-harness-online-v1.0.27.apk",
+      "sha256": "a77c30a86f11ba6792a3a6d555a1373ee156b96f4130f88815ddb0c507d6e3ec",
+      "sizeBytes": 88310891
     }
   }
 }

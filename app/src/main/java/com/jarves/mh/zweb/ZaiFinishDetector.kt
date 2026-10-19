@@ -13,7 +13,18 @@ package com.jarves.mh.zweb
  *     then disappeared;
  *  4. the assistant text stayed character-stable for [ZaiTimingConfig.stableWindowMs]
  *     (normalised: whitespace removed so blinking cursors cannot keep resetting it);
- *  5. none of the above exceeded [ZaiTimingConfig.generationTimeoutMs].
+ *  5. none of the above exceeded the timing budgets (see below).
+ *
+ * v1.0.33 TIMEOUT SEMANTICS (real-phone evidence: v1.0.30 showed "Z.ai timed
+ * out (300s)" while the site was still working — the old detector applied a
+ * hard TOTAL cap): the page is judged on PROGRESS, not on elapsed time.
+ *  - Any sign of life — the stop indicator up, the live status changing
+ *    ([ZaiObservation.liveProgress]), the assistant text or count changing —
+ *    keeps the turn alive.
+ *  - Only [ZaiTimingConfig.noProgressTimeoutMs] of NO change at all (default
+ *    300s) ends the wait.
+ *  - [ZaiTimingConfig.maxOverallMs] (default 30 min) stays the absolute cap so
+ *    a wedged page can never hang the app forever.
  */
 object ZaiFinishDetector {
 
@@ -27,6 +38,12 @@ object ZaiFinishDetector {
         val normalizedText: String?,
         val loginMarkerMatched: Boolean,
         val captchaMarkerMatched: Boolean,
+        /**
+         * v1.0.33: the live-status probe saw movement this tick (thinking /
+         * partial answer / tool step text changed). Counts as progress so long
+         * silent tool phases on the site never read as a stall.
+         */
+        val liveProgress: Boolean = false,
     )
 
     /** Mutable detector state between polls. Engine keeps exactly one per run. */
@@ -35,6 +52,8 @@ object ZaiFinishDetector {
         val stopSeen: Boolean = false,
         val stableSinceMs: Long? = null,
         val lastNormalizedText: String? = null,
+        /** v1.0.33: last [evaluate] timestamp that showed ANY page progress. */
+        val lastProgressAtMs: Long? = null,
     )
 
     data class ZaiEvaluation(
@@ -68,10 +87,18 @@ object ZaiFinishDetector {
             stableSince = nowMs
         }
 
+        // v1.0.33 progress: ANY sign of life resets the no-progress timer.
+        val progressed = observation.stopPresent ||
+            observation.liveProgress ||
+            observation.assistantCount != state.baselineAssistantCount ||
+            (newText != null && newText != state.lastNormalizedText)
+        val lastProgressAt = if (progressed) nowMs else state.lastProgressAtMs ?: nowMs
+
         val nextState = state.copy(
             stopSeen = stopSeen,
             stableSinceMs = stableSince,
             lastNormalizedText = lastText,
+            lastProgressAtMs = lastProgressAt,
         )
 
         // Finish requires: no stop indicator + a new assistant message (or a stop
@@ -83,7 +110,13 @@ object ZaiFinishDetector {
             if (stableEnough) return ZaiEvaluation(ZaiDecision.FINISHED, nextState)
         }
 
-        if (nowMs - startedMs >= timing.generationTimeoutMs) {
+        // v1.0.33: timeout = no page progress for [noProgressTimeoutMs], or the
+        // absolute [maxOverallMs] cap. [startedMs] is kept for compatibility;
+        // the overall cap is measured on [nowMs] which the engine feeds as the
+        // elapsed poll time since the send.
+        val stalled = nowMs - lastProgressAt >= timing.noProgressTimeoutMs
+        val overCap = nowMs - startedMs >= timing.maxOverallMs
+        if (stalled || overCap) {
             return ZaiEvaluation(ZaiDecision.TIMEOUT, nextState)
         }
 

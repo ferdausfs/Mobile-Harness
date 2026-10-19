@@ -125,6 +125,48 @@ class ZaiWebConfigTest {
         assertTrue(config.timing.stableWindowMs >= ZaiWebConfig.MIN_STABLE_WINDOW_MS)
         assertTrue(config.timing.generationTimeoutMs in ZaiWebConfig.MIN_GENERATION_TIMEOUT_MS..ZaiWebConfig.MAX_GENERATION_TIMEOUT_MS)
         assertTrue(config.timing.pageLoadTimeoutMs >= ZaiWebConfig.MIN_PAGE_LOAD_TIMEOUT_MS)
+        // v1.0.33: progress-aware budgets exist and are sane.
+        assertTrue(config.timing.noProgressTimeoutMs in ZaiWebConfig.MIN_NO_PROGRESS_TIMEOUT_MS..ZaiWebConfig.MAX_NO_PROGRESS_TIMEOUT_MS)
+        assertTrue(config.timing.maxOverallMs in ZaiWebConfig.MIN_MAX_OVERALL_MS..ZaiWebConfig.MAX_MAX_OVERALL_MS)
+    }
+
+    @Test
+    fun `v1_0_33 old configs without the new timing fields keep working`() {
+        val config = ZaiWebConfig.fromJson(
+            """
+            {"version":4,"remoteUpdateUrl":"https://x/y.json",
+             "page":{"startUrl":"https://chat.z.ai/"},
+             "selectors":{"input":["#i"],"sendButton":["#s"],"stopIndicator":["#st"],
+               "assistantMessage":[".a"],"codeBlock":["pre"],"loginMarker":["url-contains:/auth"],
+               "loginFormMarker":["text:=x"],"sidebarToggle":["#sb"],"signInButton":["text-button:=in"],
+               "captchaMarker":["#c"]},
+             "timing":{"generationTimeoutMs":450000}}
+            """.trimIndent(),
+        )
+        // The no-progress budget is seeded from the legacy generation timeout...
+        assertEquals(450_000L, config.timing.noProgressTimeoutMs)
+        // ...and the absolute cap defaults to 30 minutes.
+        assertEquals(ZaiWebConfig.DEFAULT_MAX_OVERALL_MS, config.timing.maxOverallMs)
+    }
+
+    @Test
+    fun `v1_0_33 new timing fields round-trip through toJsonString`() {
+        val config = ZaiWebConfig.fromJson(
+            """
+            {"version":5,"remoteUpdateUrl":"https://x/y.json",
+             "page":{"startUrl":"https://chat.z.ai/"},
+             "selectors":{"input":["#i"],"sendButton":["#s"],"stopIndicator":["#st"],
+               "assistantMessage":[".a"],"codeBlock":["pre"],"loginMarker":["url-contains:/auth"],
+               "loginFormMarker":["text:=x"],"sidebarToggle":["#sb"],"signInButton":["text-button:=in"],
+               "captchaMarker":["#c"]},
+             "timing":{"noProgressTimeoutMs":240000,"maxOverallMs":1800000}}
+            """.trimIndent(),
+        )
+        assertEquals(240_000L, config.timing.noProgressTimeoutMs)
+        assertEquals(1_800_000L, config.timing.maxOverallMs)
+        val roundTrip = ZaiWebConfig.fromJson(config.toJsonString())
+        assertEquals(240_000L, roundTrip.timing.noProgressTimeoutMs)
+        assertEquals(1_800_000L, roundTrip.timing.maxOverallMs)
     }
 
     @Test

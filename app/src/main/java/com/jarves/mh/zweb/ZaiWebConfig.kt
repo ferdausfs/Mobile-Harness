@@ -47,6 +47,8 @@ data class ZaiWebConfig(
         timingJson.put(JSON_POLL_INTERVAL, timing.pollIntervalMs)
         timingJson.put(JSON_STABLE_WINDOW, timing.stableWindowMs)
         timingJson.put(JSON_GENERATION_TIMEOUT, timing.generationTimeoutMs)
+        timingJson.put(JSON_NO_PROGRESS_TIMEOUT, timing.noProgressTimeoutMs)
+        timingJson.put(JSON_MAX_OVERALL, timing.maxOverallMs)
         root.put(JSON_TIMING, timingJson)
         return root.toString(2)
     }
@@ -65,6 +67,8 @@ data class ZaiWebConfig(
         const val JSON_POLL_INTERVAL = "pollIntervalMs"
         const val JSON_STABLE_WINDOW = "stableWindowMs"
         const val JSON_GENERATION_TIMEOUT = "generationTimeoutMs"
+        const val JSON_NO_PROGRESS_TIMEOUT = "noProgressTimeoutMs"
+        const val JSON_MAX_OVERALL = "maxOverallMs"
 
         /**
          * Selector groups the engine requires to be present and non-empty.
@@ -94,6 +98,13 @@ data class ZaiWebConfig(
         const val MAX_STABLE_WINDOW_MS = 30_000L
         const val MIN_GENERATION_TIMEOUT_MS = 15_000L
         const val MAX_GENERATION_TIMEOUT_MS = 30 * 60_000L
+        /** v1.0.33 no-progress budget: how long the page may stay COMPLETELY quiet. */
+        const val MIN_NO_PROGRESS_TIMEOUT_MS = 15_000L
+        const val MAX_NO_PROGRESS_TIMEOUT_MS = 30 * 60_000L
+        /** v1.0.33 absolute cap for one generation, regardless of progress. */
+        const val MIN_MAX_OVERALL_MS = 60_000L
+        const val MAX_MAX_OVERALL_MS = 60 * 60_000L
+        const val DEFAULT_MAX_OVERALL_MS = 30 * 60_000L
         const val MIN_PAGE_LOAD_TIMEOUT_MS = 5_000L
         const val MAX_PAGE_LOAD_TIMEOUT_MS = 120_000L
 
@@ -150,6 +161,21 @@ data class ZaiWebConfig(
                         timingObj.optLong(JSON_GENERATION_TIMEOUT, 300_000L),
                         MIN_GENERATION_TIMEOUT_MS, MAX_GENERATION_TIMEOUT_MS,
                     ),
+                    // v1.0.33: progress-aware timeout. Old configs that only
+                    // carry generationTimeoutMs keep working — the no-progress
+                    // budget defaults to it (300s of TOTAL silence ends the
+                    // wait), and the absolute cap defaults to 30 minutes.
+                    noProgressTimeoutMs = clamp(
+                        timingObj.optLong(
+                            JSON_NO_PROGRESS_TIMEOUT,
+                            timingObj.optLong(JSON_GENERATION_TIMEOUT, 300_000L),
+                        ),
+                        MIN_NO_PROGRESS_TIMEOUT_MS, MAX_NO_PROGRESS_TIMEOUT_MS,
+                    ),
+                    maxOverallMs = clamp(
+                        timingObj.optLong(JSON_MAX_OVERALL, DEFAULT_MAX_OVERALL_MS),
+                        MIN_MAX_OVERALL_MS, MAX_MAX_OVERALL_MS,
+                    ),
                 ),
             )
         }
@@ -164,7 +190,16 @@ data class ZaiTimingConfig(
     val sendSettleMs: Long,
     val pollIntervalMs: Long,
     val stableWindowMs: Long,
+    /**
+     * Kept for config compatibility (it seeds [noProgressTimeoutMs] when the
+     * config does not carry the newer field); no longer a TOTAL cap — see
+     * [noProgressTimeoutMs] / [maxOverallMs] (v1.0.33).
+     */
     val generationTimeoutMs: Long,
+    /** v1.0.33: end the wait only after this much time with NO page progress. */
+    val noProgressTimeoutMs: Long = 300_000L,
+    /** v1.0.33: absolute cap for one generation regardless of progress. */
+    val maxOverallMs: Long = 30 * 60_000L,
 )
 
 /** Raised when a selector config cannot be parsed or fails validation. */

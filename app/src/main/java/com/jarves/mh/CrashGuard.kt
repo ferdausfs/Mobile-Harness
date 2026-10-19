@@ -42,21 +42,27 @@ object CrashGuard {
         val (versionName, versionCode) = runCatching { readVersion(appContext) }.getOrDefault("?" to 0)
         val previous = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
-            runCatching {
-                crashFile(appContext).parentFile?.mkdirs()
-                crashFile(appContext).writeText(
-                    egressRedactor(
-                        formatCrash(
-                            versionName = versionName,
-                            versionCode = versionCode,
-                            atMillis = System.currentTimeMillis(),
-                            threadName = thread.name,
-                            stack = stackTraceOf(throwable),
-                        ),
-                    ),
+            // v1.0.31 hardening: the redactor runs in ITS OWN runCatching so a
+            // throwing egress hook can never stop the report from being written.
+            val formatted = runCatching {
+                formatCrash(
+                    versionName = versionName,
+                    versionCode = versionCode,
+                    atMillis = System.currentTimeMillis(),
+                    threadName = thread.name,
+                    stack = stackTraceOf(throwable),
                 )
+            }.getOrNull()
+            val report = formatted?.let { body ->
+                runCatching { egressRedactor(body) }.getOrDefault(body)
             }
-            previous?.uncaughtException(thread, throwable)
+            if (report != null) {
+                runCatching {
+                    crashFile(appContext).parentFile?.mkdirs()
+                    crashFile(appContext).writeText(report)
+                }
+            }
+            runCatching { previous?.uncaughtException(thread, throwable) }
         }
     }
 
@@ -77,6 +83,19 @@ object CrashGuard {
     fun summary(context: Context): String? {
         val report = report(context) ?: return null
         return summarize(report)
+    }
+
+    /**
+     * When the newest captured crash happened (epoch millis), parsed from the
+     * report's "At:" line. Null when no report exists or the line is gone —
+     * the caller then treats it as "no recent crash". Pure helper, JVM-tested.
+     */
+    fun lastCrashAtMillis(reportText: String?): Long? {
+        val at = reportText?.lines()?.firstOrNull { it.startsWith("At: ") } ?: return null
+        return runCatching {
+            val value = at.removePrefix("At: ")
+            REPORT_TIME_FORMAT.parse(value)?.time
+        }.getOrNull()
     }
 
     fun clear(context: Context) {
@@ -122,7 +141,7 @@ object CrashGuard {
         threadName: String,
         stack: String,
     ): String {
-        val whenText = SimpleDateFormat("yyyy-MM-dd HH:mm:ss z", Locale.US).format(Date(atMillis))
+        val whenText = REPORT_TIME_FORMAT.format(Date(atMillis))
         return buildString {
             appendLine("Mobile Harness crash report")
             appendLine("Version: $versionName (code $versionCode)")
@@ -132,6 +151,9 @@ object CrashGuard {
             append(stack)
         }
     }
+
+    /** One shared parser/writer format so [lastCrashAtMillis] round-trips. */
+    internal val REPORT_TIME_FORMAT: SimpleDateFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss z", Locale.US)
 
     /**
      * "java.lang.IllegalStateException: Update download failed (HTTP 403)" plus the At line —

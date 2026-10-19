@@ -67,7 +67,12 @@ object CrashGuard {
     }
 
     fun clear(context: Context) {
-        runCatching { crashFile(context).delete() }
+        runCatching { clearFile(crashFile(context)) }
+    }
+
+    /** File-level variant the Settings card path uses; JVM-testable without a Context. */
+    internal fun clearFile(file: File) {
+        file.delete()
     }
 
     // --- pure helpers (JVM-tested) ---

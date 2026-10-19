@@ -79,4 +79,22 @@ class CrashGuardTest {
         assertTrue(trace.contains("java.lang.IllegalStateException: outer"))
         assertTrue(trace.contains("Caused by: java.io.IOException: inner"))
     }
+
+    @Test
+    fun `clearFile deletes the crash file so the Last crash card clears`() {
+        val file = java.io.File.createTempFile("last-crash", ".txt")
+        file.writeText(stack)
+        assertTrue(file.exists())
+        CrashGuard.clearFile(file)
+        assertFalse(file.exists())
+    }
+
+    @Test
+    fun `clearFile tolerates a file that is already gone`() {
+        val file = java.io.File.createTempFile("last-crash-gone", ".txt")
+        file.delete()
+        // Must not throw — the Settings card taps clear() directly.
+        CrashGuard.clearFile(file)
+        assertFalse(file.exists())
+    }
 }

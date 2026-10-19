@@ -69,6 +69,16 @@ class AppPreferences(private val context: Context) : AppPreferencesBridge {
         get() = preferences.getBoolean("zai_auto_apply", false)
         set(value) { preferences.edit().putBoolean("zai_auto_apply", value).apply() }
 
+    /** The model the user picked in the Z.ai model picker (Phase 1). Blank = no pick yet. */
+    var zaiPreferredModel: String
+        get() = preferences.getString("zai_preferred_model", "") ?: ""
+        set(value) { preferences.edit().putString("zai_preferred_model", value).apply() }
+
+    /** JSON cache of chat.z.ai's own model dropdown (ZaiModelCatalog.toJson). */
+    var zaiCachedModelsJson: String
+        get() = preferences.getString("zai_cached_models_json", "") ?: ""
+        set(value) { preferences.edit().putString("zai_cached_models_json", value).apply() }
+
     var githubLogin: String
         get() = preferences.getString("github_login", "") ?: ""
         set(value) { preferences.edit().putString("github_login", value).apply() }

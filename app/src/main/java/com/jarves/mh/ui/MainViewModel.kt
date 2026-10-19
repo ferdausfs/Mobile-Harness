@@ -70,6 +70,7 @@ import com.jarves.mh.zweb.ZaiChatPromptBuilder
 import com.jarves.mh.zweb.ZaiChatTurnPolicy
 import com.jarves.mh.zweb.ZaiChatTurnPresenter
 import com.jarves.mh.zweb.ZaiNeedFilesParser
+import com.jarves.mh.zweb.ZaiModelCatalog
 import com.jarves.mh.zweb.ZaiPendingApply
 import com.jarves.mh.zweb.ZaiPromptBudget
 import com.jarves.mh.zweb.ZaiRunPhase
@@ -282,6 +283,15 @@ data class AppUiState(
     val zaiPendingApply: ZaiPendingApply? = null,
     /** Terminal chat-engine notice in the chat (sign-in / captcha / timeout / error / stopped). */
     val zaiChatNotice: com.jarves.mh.zweb.ZaiChatTurnPresenter.TurnNotice? = null,
+    // ── Phase 1 model picker ──
+    /** True while the Z.ai model picker sheet is open. */
+    val zaiModelPickerOpen: Boolean = false,
+    /** In-place failure message inside the model picker (fallback explanations). */
+    val zaiModelPickError: String? = null,
+    /** The model the user last picked (persisted). Null = no pick yet. */
+    val zaiPreferredModel: String? = null,
+    /** Persisted cache of chat.z.ai's own dropdown (used when the engine has none this session). */
+    val zaiCachedModels: List<ZaiModelCatalog.ModelOption> = emptyList(),
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -375,6 +385,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             primaryAgentKind = initialPrimaryAgentKind,
             zaiChatEngineActive = preferences.zaiChatEngineActive,
             zaiAutoApply = preferences.zaiAutoApply,
+            zaiPreferredModel = preferences.zaiPreferredModel.takeIf(String::isNotBlank),
+            zaiCachedModels = ZaiModelCatalog.fromJson(preferences.zaiCachedModelsJson),
             provider = preferences.loadProvider(vault, initialAgentKind),
             activeApiKeyName = vault.list(preferences.loadProvider(vault, initialAgentKind).kind.name)
                 .firstOrNull(ApiKeyInfo::isActive)?.name,
@@ -4133,6 +4145,65 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun setZaiAutoApply(enabled: Boolean) {
         preferences.zaiAutoApply = enabled
         _state.update { it.copy(zaiAutoApply = enabled) }
+    }
+
+    // ── Phase 1 model picker ──
+
+    /** Last catalog JSON persisted (dedupe: only write prefs when it actually changed). */
+    private var lastPersistedCatalogJson: String? = null
+
+    /** Opens the model picker and refreshes the site's own dropdown cache. */
+    fun zaiOpenModelPicker() {
+        _state.update { it.copy(zaiModelPickerOpen = true, zaiModelPickError = null) }
+        zaiWebController.refreshModelCatalog { models ->
+            if (models.isNotEmpty()) {
+                persistZaiCatalog(models)
+            } else if (_state.value.zaiWeb.cachedModels.isEmpty() && _state.value.zaiCachedModels.isEmpty()) {
+                _state.update {
+                    it.copy(
+                        zaiModelPickError = "chat.z.ai's model list could not be read. " +
+                            "The current model is shown read-only from the site's label.",
+                    )
+                }
+            }
+        }
+    }
+
+    fun zaiDismissModelPicker() {
+        _state.update { it.copy(zaiModelPickerOpen = false, zaiModelPickError = null) }
+    }
+
+    /**
+     * Drives the hidden WebView's dropdown to [modelName] and verifies by
+     * reading the site's label back. On success the choice is persisted and
+     * the picker closes; on failure the message is shown in place and the
+     * app keeps the read-only label.
+     */
+    fun zaiPickModel(modelName: String) {
+        _state.update { it.copy(zaiModelPickError = null) }
+        zaiWebController.pickModel(modelName) { outcome ->
+            if (outcome.success) {
+                val verified = outcome.model ?: modelName
+                preferences.zaiPreferredModel = verified
+                _state.update {
+                    it.copy(
+                        zaiModelPickerOpen = false,
+                        zaiModelPickError = null,
+                        zaiPreferredModel = verified,
+                        toastMessage = "Model switched to $verified — verified on chat.z.ai.",
+                    )
+                }
+            } else {
+                _state.update { it.copy(zaiModelPickError = outcome.message ?: "Could not switch the model.") }
+            }
+        }
+    }
+
+    private fun persistZaiCatalog(models: List<ZaiModelCatalog.ModelOption>) {
+        val json = ZaiModelCatalog.toJson(models)
+        if (json == lastPersistedCatalogJson) return
+        lastPersistedCatalogJson = json
+        preferences.zaiCachedModelsJson = json
     }
 
     /**

@@ -103,4 +103,21 @@ class ZaiModelCatalogTest {
         // "GLM-5.3-F" prefixes exactly one option.
         assertEquals("GLM-5.3-Flash", ZaiModelCatalog.resolve(models, "GLM-5.3-F")!!.name)
     }
+
+    @Test
+    fun `catalog round-trips through the prefs json`() {
+        val models = ZaiModelCatalog.parse(optionsJson)
+        val json = ZaiModelCatalog.toJson(models)
+        val restored = ZaiModelCatalog.fromJson(json)
+        assertEquals(models, restored)
+    }
+
+    @Test
+    fun `prefs json helpers tolerate garbage and empty input`() {
+        assertEquals(emptyList<ZaiModelCatalog.ModelOption>(), ZaiModelCatalog.fromJson(null))
+        assertEquals(emptyList<ZaiModelCatalog.ModelOption>(), ZaiModelCatalog.fromJson(""))
+        assertEquals(emptyList<ZaiModelCatalog.ModelOption>(), ZaiModelCatalog.fromJson("not json"))
+        assertEquals(emptyList<ZaiModelCatalog.ModelOption>(), ZaiModelCatalog.fromJson("[1,2,3]"))
+        assertEquals(emptyList<ZaiModelCatalog.ModelOption>(), ZaiModelCatalog.toJson(emptyList()).let(ZaiModelCatalog::fromJson))
+    }
 }

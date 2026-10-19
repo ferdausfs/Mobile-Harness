@@ -360,6 +360,9 @@ fun PocketDevApp(viewModel: MainViewModel = viewModel()) {
             onBuildAndRunAndroid = viewModel::buildAndRunAndroidApp,
             onPickChatEngine = viewModel::selectChatEngine,
             onZaiSignIn = viewModel::zaiOpenSignIn,
+            onOpenZaiModelPicker = viewModel::zaiOpenModelPicker,
+            onZaiPickModel = viewModel::zaiPickModel,
+            onZaiDismissModelPicker = viewModel::zaiDismissModelPicker,
             onZaiApplyFile = viewModel::zaiApplyFile,
             onZaiApplyAll = viewModel::zaiApplyAllFiles,
             onZaiRejectPlan = viewModel::zaiRejectPlan,
@@ -3892,6 +3895,9 @@ private fun WorkspaceScreen(
     onBuildAndRunAndroid: () -> Unit,
     onPickChatEngine: (String) -> Unit,
     onZaiSignIn: () -> Unit,
+    onOpenZaiModelPicker: () -> Unit,
+    onZaiPickModel: (String) -> Unit,
+    onZaiDismissModelPicker: () -> Unit,
     onZaiApplyFile: (String) -> Unit,
     onZaiApplyAll: () -> Unit,
     onZaiRejectPlan: () -> Unit,
@@ -3965,7 +3971,8 @@ private fun WorkspaceScreen(
     var showChats by rememberSaveable { mutableStateOf(false) }
     val activeChat = state.projectChats.firstOrNull { it.id == state.activeChatId }
     val engineTitle = if (state.zaiChatEngineActive) {
-        ZaiChatPromptBuilder.ZAI_ENGINE_TITLE
+        state.zaiWeb.currentModel?.let { "${ZaiChatPromptBuilder.ZAI_ENGINE_TITLE} · $it" }
+            ?: ZaiChatPromptBuilder.ZAI_ENGINE_TITLE
     } else if (state.agentKind == AgentKind.ANTIGRAVITY) {
         state.agentKind.title
     } else {
@@ -3978,9 +3985,26 @@ private fun WorkspaceScreen(
             zaiSignedIn = state.zaiWeb.signedIn,
             zaiCheckingConnection = state.zaiWeb.checkingConnection,
             zaiBusy = state.zaiWeb.busy,
+            zaiCurrentModel = state.zaiWeb.currentModel,
             onPickEngine = onPickChatEngine,
             onSignIn = onZaiSignIn,
+            onOpenModelPicker = {
+                showEnginePicker = false
+                onOpenZaiModelPicker()
+            },
             onDismiss = { showEnginePicker = false },
+        )
+    }
+    if (state.zaiModelPickerOpen) {
+        ZaiModelPickerSheet(
+            currentModel = state.zaiWeb.currentModel,
+            persistedModels = state.zaiWeb.cachedModels.ifEmpty { state.zaiCachedModels },
+            pickRunning = state.zaiWeb.modelPickRunning,
+            errorMessage = state.zaiModelPickError,
+            preferredModel = state.zaiPreferredModel,
+            onPick = onZaiPickModel,
+            onRefresh = onOpenZaiModelPicker,
+            onDismiss = onZaiDismissModelPicker,
         )
     }
 
@@ -4149,6 +4173,11 @@ private fun WorkspaceScreen(
                     zaiPendingApply = state.zaiPendingApply,
                     zaiChatNotice = state.zaiChatNotice,
                     zaiAutoApply = state.zaiAutoApply,
+                    zaiLiveActive = state.zaiChatEngineActive && state.isRunning,
+                    zaiLivePhaseLabel = state.zaiWeb.livePhaseLabel,
+                    zaiLiveThinking = state.zaiWeb.liveThinking,
+                    zaiLiveAnswer = state.zaiWeb.liveAnswer,
+                    zaiLiveStepStatus = state.zaiWeb.liveStepStatus,
                     onZaiApplyFile = onZaiApplyFile,
                     onZaiApplyAll = onZaiApplyAll,
                     onZaiRejectPlan = onZaiRejectPlan,
@@ -4534,6 +4563,11 @@ private fun ChatTab(
     zaiPendingApply: ZaiPendingApply? = null,
     zaiChatNotice: ZaiChatTurnPresenter.TurnNotice? = null,
     zaiAutoApply: Boolean = false,
+    zaiLiveActive: Boolean = false,
+    zaiLivePhaseLabel: String? = null,
+    zaiLiveThinking: String? = null,
+    zaiLiveAnswer: String? = null,
+    zaiLiveStepStatus: String? = null,
     onZaiApplyFile: (String) -> Unit = {},
     onZaiApplyAll: () -> Unit = {},
     onZaiRejectPlan: () -> Unit = {},
@@ -4585,13 +4619,25 @@ private fun ChatTab(
                 }
                 if (liveProcess.isNotEmpty() || thinkingActive) {
                     item(key = "live-claude-process") {
-                        LiveClaudeProcess(
-                            processItems = liveProcess,
-                            isRunning = isRunning,
-                            startedAtMillis = taskStartedAtMillis,
-                            finishedAtMillis = taskFinishedAtMillis,
-                            thinkingActive = thinkingActive,
-                        )
+                        if (zaiLiveActive) {
+                            // Z.ai chat-engine turn: the live card streams the page's
+                            // thinking + partial answer + tool status (~1s refresh).
+                            ZaiLiveProcessCard(
+                                phaseLabel = zaiLivePhaseLabel,
+                                thinking = zaiLiveThinking,
+                                answer = zaiLiveAnswer,
+                                stepStatus = zaiLiveStepStatus,
+                                startedAtMillis = taskStartedAtMillis,
+                            )
+                        } else {
+                            LiveClaudeProcess(
+                                processItems = liveProcess,
+                                isRunning = isRunning,
+                                startedAtMillis = taskStartedAtMillis,
+                                finishedAtMillis = taskFinishedAtMillis,
+                                thinkingActive = thinkingActive,
+                            )
+                        }
                     }
                 }
                 approval?.let { request -> item { ApprovalCard(request, onApproval) } }

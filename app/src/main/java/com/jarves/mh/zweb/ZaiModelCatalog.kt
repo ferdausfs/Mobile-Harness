@@ -95,6 +95,33 @@ object ZaiModelCatalog {
         return label.trim().equals(requested.trim(), ignoreCase = true)
     }
 
+    // ── Persistence helpers (app preferences cache of the site's dropdown) ──
+
+    /** Serializes a cached catalog for [com.jarves.mh.data.AppPreferences]. */
+    fun toJson(models: List<ModelOption>): String {
+        val array = JSONArray()
+        models.forEach { model ->
+            array.put(JSONObject().put("name", model.name).put("description", model.description))
+        }
+        return array.toString()
+    }
+
+    /** Reads a catalog persisted by [toJson]; unreadable input returns emptyList. */
+    fun fromJson(json: String?): List<ModelOption> {
+        if (json.isNullOrBlank()) return emptyList()
+        val array = runCatching { JSONArray(json) }.getOrNull() ?: return emptyList()
+        val rebuilt = JSONArray()
+        for (i in 0 until array.length()) {
+            val obj = array.optJSONObject(i) ?: continue
+            rebuilt.put(
+                JSONObject()
+                    .put("name", obj.optString("name", ""))
+                    .put("description", obj.optString("description", "")),
+            )
+        }
+        return parse(rebuilt.toString())
+    }
+
     /**
      * Picks the option to click for a requested model name: exact match first
      * (case-insensitive), then unique prefix match ("5.3-F" → "GLM-5.3-Flash"),

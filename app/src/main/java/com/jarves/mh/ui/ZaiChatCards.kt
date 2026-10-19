@@ -10,9 +10,11 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.wrapContentSize
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -20,10 +22,12 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -50,6 +54,7 @@ import com.jarves.mh.model.DiffLine
 import com.jarves.mh.model.DiffLineType
 import com.jarves.mh.zweb.ZaiChatPromptBuilder
 import com.jarves.mh.zweb.ZaiChatTurnPresenter
+import com.jarves.mh.zweb.ZaiModelCatalog
 import com.jarves.mh.zweb.ZaiPendingApply
 import com.jarves.mh.zweb.ZaiWorkspaceApply
 import com.jarves.mh.ui.theme.PocketGreen
@@ -337,6 +342,226 @@ fun ZaiFileReviewCard(
     }
 }
 
+/**
+ * Phase 1 live card for Z.ai chat-engine turns: the page's thinking text in a
+ * collapsible section, the partial answer as it streams, the latest tool/step
+ * line, phase label and elapsed time. The engine refreshes the snapshot about
+ * once a second; every text is already bounded by [com.jarves.mh.zweb.ZaiLiveStatus].
+ */
+@Composable
+fun ZaiLiveProcessCard(
+    phaseLabel: String?,
+    thinking: String?,
+    answer: String?,
+    stepStatus: String?,
+    startedAtMillis: Long?,
+) {
+    var thinkingExpanded by rememberSaveable("zai-live-thinking") { mutableStateOf(false) }
+    val hasThinking = !thinking.isNullOrBlank()
+    Column(Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 6.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                "Z",
+                color = PocketOrange,
+                fontWeight = FontWeight.Bold,
+                fontSize = 12.sp,
+                modifier = Modifier
+                    .size(22.dp)
+                    .background(PocketOrange.copy(alpha = 0.14f), RoundedCornerShape(7.dp))
+                    .wrapContentSize(Alignment.Center),
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(
+                phaseLabel?.takeIf { it.isNotBlank() } ?: "Z.ai is working",
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 13.sp,
+            )
+            if (startedAtMillis != null) {
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    "· ${formatZaiLiveElapsed(System.currentTimeMillis() - startedAtMillis)}",
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        if (!stepStatus.isNullOrBlank()) {
+            Spacer(Modifier.width(0.dp))
+            Text(
+                stepStatus.take(200),
+                fontSize = 11.sp,
+                color = PocketOrange,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(start = 30.dp, top = 3.dp),
+            )
+        }
+        if (hasThinking) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { thinkingExpanded = !thinkingExpanded }
+                    .padding(start = 30.dp, top = 4.dp, bottom = 2.dp),
+            ) {
+                Text(
+                    "Thinking",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Icon(
+                    if (thinkingExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                    contentDescription = if (thinkingExpanded) "Hide thinking" else "Show thinking",
+                    modifier = Modifier.size(16.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            AnimatedVisibility(visible = thinkingExpanded) {
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 30.dp),
+                ) {
+                    Text(
+                        thinking,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .verticalScroll(rememberScrollState())
+                            .heightIn(max = 180.dp)
+                            .padding(8.dp),
+                        fontSize = 11.sp,
+                        lineHeight = 15.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+        if (!answer.isNullOrBlank()) {
+            Text(
+                answer.takeLast(1_200),
+                modifier = Modifier.padding(start = 30.dp, top = 4.dp),
+                fontSize = 12.sp,
+                lineHeight = 17.sp,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 14,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
+private fun formatZaiLiveElapsed(millis: Long): String {
+    val totalSeconds = (millis / 1000).coerceAtLeast(0)
+    val minutes = totalSeconds / 60
+    val seconds = totalSeconds % 60
+    return if (minutes > 0) "${minutes}m ${seconds}s" else "${seconds}s"
+}
+
+/** Model picker for the Z.ai chat engine, fed from the site's own dropdown cache. */
+@Composable
+fun ZaiModelPickerSheet(
+    currentModel: String?,
+    persistedModels: List<ZaiModelCatalog.ModelOption>,
+    pickRunning: Boolean,
+    errorMessage: String?,
+    preferredModel: String?,
+    onPick: (String) -> Unit,
+    onRefresh: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Z.ai model") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    buildString {
+                        append("Current on chat.z.ai: ")
+                        append(currentModel ?: "unknown yet")
+                        preferredModel?.takeIf { it.isNotBlank() && it != currentModel }?.let {
+                            append(" · your pick: ")
+                            append(it)
+                        }
+                    },
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                if (errorMessage != null) {
+                    Text(errorMessage, fontSize = 12.sp, color = MaterialTheme.colorScheme.error)
+                }
+                when {
+                    pickRunning -> {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                            Spacer(Modifier.width(8.dp))
+                            Text("Reading the site's model dropdown…", fontSize = 12.sp)
+                        }
+                    }
+                    persistedModels.isEmpty() -> {
+                        Text(
+                            "The site's model list could not be read. The model above is read-only from its label; " +
+                                "use Refresh after checking the Z.ai connection.",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    else -> {
+                        persistedModels.forEach { model ->
+                            val selected = currentModel != null &&
+                                model.name.equals(currentModel, ignoreCase = true)
+                            Surface(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable(enabled = !pickRunning) { onPick(model.name) },
+                                shape = RoundedCornerShape(10.dp),
+                                color = if (selected) {
+                                    MaterialTheme.colorScheme.primaryContainer
+                                } else {
+                                    MaterialTheme.colorScheme.surfaceVariant
+                                },
+                            ) {
+                                Row(Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                                    Column(Modifier.weight(1f)) {
+                                        Text(model.name, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                                        if (model.description.isNotBlank()) {
+                                            Text(
+                                                model.description,
+                                                fontSize = 10.sp,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                            )
+                                        }
+                                    }
+                                    if (selected) {
+                                        Icon(Icons.Default.Check, "Current", tint = PocketGreen, modifier = Modifier.size(16.dp))
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Text(
+                    "Options come from chat.z.ai's own dropdown; picking one drives the hidden page and is verified by reading its label back.",
+                    fontSize = 10.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onRefresh, enabled = !pickRunning) {
+                Icon(Icons.Default.Refresh, null, Modifier.size(14.dp))
+                Spacer(Modifier.width(4.dp))
+                Text("Refresh")
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Close") } },
+    )
+}
+
 /** Engine picker for the workspace chat header: Z.ai Web or one of the CLI agents. */
 @Composable
 fun ZaiEnginePickerSheet(
@@ -345,8 +570,10 @@ fun ZaiEnginePickerSheet(
     zaiSignedIn: Boolean?,
     zaiCheckingConnection: Boolean,
     zaiBusy: Boolean,
+    zaiCurrentModel: String?,
     onPickEngine: (String) -> Unit,
     onSignIn: () -> Unit,
+    onOpenModelPicker: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     AlertDialog(
@@ -358,7 +585,10 @@ fun ZaiEnginePickerSheet(
                     title = ZaiChatPromptBuilder.ZAI_ENGINE_TITLE,
                     subtitle = when {
                         zaiCheckingConnection -> "Checking chat.z.ai…"
-                        zaiSignedIn == true -> "Connected with chat.z.ai · web chat engine"
+                        zaiSignedIn == true -> buildString {
+                            append("Connected · web chat engine")
+                            zaiCurrentModel?.let { append(" · ") ; append(it) }
+                        }
                         zaiSignedIn == false -> "Not signed in — tap to sign in"
                         else -> "Sign-in state unknown — tap to check"
                     },
@@ -377,6 +607,39 @@ fun ZaiEnginePickerSheet(
                         }
                     },
                 )
+                if (zaiActive || zaiSignedIn == true) {
+                    Surface(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable(enabled = !zaiBusy) {
+                                onOpenModelPicker()
+                            },
+                        shape = RoundedCornerShape(10.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+                    ) {
+                        Row(Modifier.padding(horizontal = 12.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                "Model",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Medium,
+                                modifier = Modifier.weight(1f),
+                            )
+                            Text(
+                                zaiCurrentModel ?: "tap to read from the site",
+                                fontSize = 11.sp,
+                                color = if (zaiCurrentModel != null) {
+                                    PocketGreen
+                                } else {
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                },
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(2f),
+                            )
+                            Icon(Icons.Default.ExpandMore, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                }
                 if (zaiSignedIn != true) {
                     Text(
                         "Sign in to Z.ai once — then send messages from this chat.",

@@ -111,6 +111,7 @@ object ZaiTaskQueue {
                         toResume.add(entry)
                         entry
                     }
+                    ResumeDecision.KEEP_PENDING -> entry
                     ResumeDecision.REPORT_FAILED -> {
                         val marked = entry.copy(
                             status = Status.FAILED,
@@ -127,21 +128,21 @@ object ZaiTaskQueue {
         return ReconcileResult(entries = next, reported = reported, toResume = toResume)
     }
 
-    enum class ResumeDecision { RESUME, REPORT_FAILED }
+    enum class ResumeDecision { RESUME, REPORT_FAILED, KEEP_PENDING }
 
     /**
      * A PENDING task is resumed only when the crash was recent AND the
-     * engine is signed in (the turn can actually be re-sent). Anything else
-     * is reported, never silently retried.
+     * engine is known signed-in. Fresh-crash entries whose sign-in state is
+     * not known yet are KEPT PENDING (the decision replays once the engine
+     * reports a session); anything stale is reported, never silently retried.
      */
     const val RESUME_WINDOW_MILLIS = 10 * 60_000L
 
-    fun resumeDecision(entry: Entry, nowMillis: Long, signedIn: Boolean): ResumeDecision =
-        if (signedIn && nowMillis - entry.enqueuedAtMillis <= RESUME_WINDOW_MILLIS) {
-            ResumeDecision.RESUME
-        } else {
-            ResumeDecision.REPORT_FAILED
-        }
+    fun resumeDecision(entry: Entry, nowMillis: Long, signedIn: Boolean): ResumeDecision = when {
+        nowMillis - entry.enqueuedAtMillis > RESUME_WINDOW_MILLIS -> ResumeDecision.REPORT_FAILED
+        signedIn -> ResumeDecision.RESUME
+        else -> ResumeDecision.KEEP_PENDING
+    }
 
     /** Entries worth keeping on disk: recent + unfinished, or finished within the last day. */
     fun prune(entries: List<Entry>, nowMillis: Long): List<Entry> {

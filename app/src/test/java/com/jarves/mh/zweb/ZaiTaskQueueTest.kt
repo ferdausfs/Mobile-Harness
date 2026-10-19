@@ -82,7 +82,19 @@ class ZaiTaskQueueTest {
     }
 
     @Test
-    fun `reconcile reports a stale or signed-out pending entry`() {
+    fun `reconcile keeps fresh pending entries undecided until sign-in is known`() {
+        val undecided = ZaiTaskQueue.reconcile(
+            listOf(entry(enqueuedAt = 1_000L)),
+            nowMillis = 1_000L + ZaiTaskQueue.RESUME_WINDOW_MILLIS - 1,
+            signedIn = false,
+        )
+        assertEquals(0, undecided.toResume.size)
+        assertEquals(0, undecided.reported.size)
+        assertEquals(ZaiTaskQueue.Status.PENDING, undecided.entries[0].status)
+    }
+
+    @Test
+    fun `reconcile reports a stale or signed-out-and-stale pending entry`() {
         val stale = ZaiTaskQueue.reconcile(
             listOf(entry(enqueuedAt = 1_000L)),
             nowMillis = 1_000L + ZaiTaskQueue.RESUME_WINDOW_MILLIS + 1,
@@ -92,9 +104,13 @@ class ZaiTaskQueueTest {
         assertEquals(ZaiTaskQueue.Status.FAILED, stale.entries[0].status)
         assertTrue(stale.entries[0].lastError!!.contains("restarted"))
 
-        val signedOut = ZaiTaskQueue.reconcile(listOf(entry(enqueuedAt = 1_000L)), nowMillis = 2_000L, signedIn = false)
-        assertEquals(0, signedOut.toResume.size)
-        assertEquals(ZaiTaskQueue.Status.FAILED, signedOut.entries[0].status)
+        val signedOutStale = ZaiTaskQueue.reconcile(
+            listOf(entry(enqueuedAt = 1_000L)),
+            nowMillis = 1_000L + ZaiTaskQueue.RESUME_WINDOW_MILLIS + 1,
+            signedIn = false,
+        )
+        assertEquals(0, signedOutStale.toResume.size)
+        assertEquals(ZaiTaskQueue.Status.FAILED, signedOutStale.entries[0].status)
     }
 
     @Test

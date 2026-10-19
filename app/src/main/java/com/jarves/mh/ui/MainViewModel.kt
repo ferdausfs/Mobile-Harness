@@ -78,6 +78,11 @@ import com.jarves.mh.tokens.TokenRotation
 import com.jarves.mh.tokens.TokenRotationNotice
 import com.jarves.mh.tokens.TokenVault
 import com.jarves.mh.CrashGuard
+import com.jarves.mh.zweb.ZaiEngineService
+import com.jarves.mh.zweb.ZaiEngineStopController
+import com.jarves.mh.zweb.ZaiForegroundPolicy
+import com.jarves.mh.zweb.ZaiTaskQueue
+import com.jarves.mh.zweb.ZaiTaskQueueStore
 import com.jarves.mh.zweb.ZaiPendingApply
 import com.jarves.mh.zweb.ZaiPromptBudget
 import com.jarves.mh.zweb.ZaiRunPhase
@@ -444,6 +449,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // best effort, pattern-only redaction covers vault-less early crashes.
         CrashGuard.egressRedactor = ::redactEgress
         watchTaskTokenRotation()
+        setupZaiEngineForeground()
         // GitHub's official CLI owns its OAuth credential. Remove credentials from
         // the retired custom OAuth implementation and discover the real CLI status.
         vault.remove(LEGACY_GITHUB_TOKEN_KEY)
@@ -4111,6 +4117,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         ZaiWebController(getApplication()) { zaiState ->
             val previous = _state.value.zaiWeb
             _state.update { it.copy(zaiWeb = zaiState) }
+            // Phase 3: keep the foreground notification + queue in sync.
+            updateZaiForegroundProgress(zaiState)
+            maybeResumeQueuedTask(zaiState)
             onZaiStateChanged(previous, zaiState)
         }
     }
@@ -4500,6 +4509,194 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    // ── Phase 3: foreground service + persisted task queue ──
+
+    private val zaiTaskQueueStore by lazy {
+        ZaiTaskQueueStore(java.io.File(getApplication<Application>().filesDir, "zweb/task-queue.json"))
+    }
+    private var zaiQueueEntries: List<ZaiTaskQueue.Entry> = emptyList()
+    private var zaiActiveQueueId: String? = null
+    private var zaiForegroundRunning = false
+    private var zaiLastServiceProgressAt = 0L
+    private var zaiResumeAttempted = false
+    private var zaiQueueReconciled = false
+
+    /**
+     * One-time setup: startup queue reconciliation (report killed/queued
+     * tasks), the notification's Stop action, and the dataSync checkpoint
+     * hook (persist the queue BEFORE Android's 6h window cuts the service).
+     */
+    private fun setupZaiEngineForeground() {
+        // Reconcile with signed-in UNKNOWN: RUNNING entries report cleanly,
+        // fresh PENDING entries stay pending (decision replays on sign-in).
+        val now = System.currentTimeMillis()
+        val loaded = zaiTaskQueueStore.load()
+        if (loaded.isNotEmpty()) {
+            val result = ZaiTaskQueue.reconcile(loaded, now, signedIn = false)
+            zaiQueueEntries = ZaiTaskQueue.prune(result.entries, now)
+            zaiTaskQueueStore.save(zaiQueueEntries)
+            result.reported.take(2).forEach { entry ->
+                postZaiResultNotification(
+                    title = "Z.ai task not finished",
+                    detail = "${entry.title}: ${entry.lastError ?: "interrupted by an app restart."}",
+                    failed = true,
+                )
+            }
+        }
+        ZaiEngineStopController.stopAction = {
+            if (zaiTurnActive) {
+                zaiWebController.cancel()
+            }
+        }
+        ZaiEngineService.checkpointHook = {
+            runCatching { zaiTaskQueueStore.save(zaiQueueEntries) }
+        }
+    }
+
+    private fun saveZaiQueue(nowMillis: Long = System.currentTimeMillis()) {
+        zaiTaskQueueStore.save(ZaiTaskQueue.prune(zaiQueueEntries, nowMillis))
+    }
+
+    private fun startZaiForeground(detail: String) {
+        zaiForegroundRunning = true
+        androidx.core.content.ContextCompat.startForegroundService(
+            getApplication(),
+            Intent(getApplication(), ZaiEngineService::class.java)
+                .setAction(ZaiEngineService.ACTION_START)
+                .putExtra(ZaiEngineService.EXTRA_TITLE, "Z.ai is working")
+                .putExtra(ZaiEngineService.EXTRA_DETAIL, detail),
+        )
+    }
+
+    private fun stopZaiForeground(action: String, title: String, detail: String) {
+        if (zaiForegroundRunning) {
+            zaiForegroundRunning = false
+            getApplication<Application>().startService(
+                Intent(getApplication(), ZaiEngineService::class.java)
+                    .setAction(action)
+                    .putExtra(ZaiEngineService.EXTRA_DETAIL, detail),
+            )
+        } else {
+            postZaiResultNotification(title, detail, failed = action != ZaiEngineService.ACTION_COMPLETE)
+        }
+    }
+
+    private fun postZaiResultNotification(title: String, detail: String, failed: Boolean) {
+        val context = getApplication<Application>()
+        runCatching {
+            ZaiEngineService.ensureNotificationChannels(context)
+            val manager = context.getSystemService(android.app.NotificationManager::class.java)
+            manager.notify(
+                44,
+                androidx.core.app.NotificationCompat.Builder(context, "task-results")
+                    .setSmallIcon(com.jarves.mh.R.drawable.ic_notification)
+                    .setContentTitle(title)
+                    .setContentText(detail)
+                    .setStyle(androidx.core.app.NotificationCompat.BigTextStyle().bigText(detail))
+                    .setContentIntent(
+                        android.app.PendingIntent.getActivity(
+                            context,
+                            1,
+                            Intent(context, com.jarves.mh.MainActivity::class.java).apply {
+                                flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                            },
+                            android.app.PendingIntent.FLAG_IMMUTABLE or android.app.PendingIntent.FLAG_UPDATE_CURRENT,
+                        ),
+                    )
+                    .setAutoCancel(true)
+                    .build(),
+            )
+        }
+    }
+
+    /** Mirrors the engine's live phase into the persistent notification (≤ every 5s). */
+    private fun updateZaiForegroundProgress(zaiState: ZaiWebUiState) {
+        if (!zaiForegroundRunning || !zaiTurnActive) return
+        val now = System.currentTimeMillis()
+        if (now - zaiLastServiceProgressAt < 5_000L) return
+        zaiLastServiceProgressAt = now
+        val startedAt = zaiState.runStartedAtMillis ?: now
+        val detail = ZaiForegroundPolicy.notificationDetail(
+            phase = zaiState.livePhaseLabel ?: ZaiChatTurnPresenter.progressTitle(zaiState.runPhase),
+            step = zaiState.liveStepStatus,
+            elapsedSeconds = (now - startedAt) / 1000,
+        )
+        getApplication<Application>().startService(
+            Intent(getApplication(), ZaiEngineService::class.java)
+                .setAction(ZaiEngineService.ACTION_PROGRESS)
+                .putExtra(ZaiEngineService.EXTRA_DETAIL, detail),
+        )
+    }
+
+    /**
+     * Resume decision replay: the first time the engine reports a signed-in
+     * session, a PENDING entry inside the crash window whose project chat is
+     * STILL ACTIVE is re-sent with its stored (redacted) prompt. Anything
+     * else stays queued/reported — never hijacks the user's screen.
+     */
+    private fun maybeResumeQueuedTask(zaiState: ZaiWebUiState) {
+        if (zaiResumeAttempted || zaiState.signedIn != true) return
+        zaiResumeAttempted = true
+        val current = _state.value
+        if (current.isRunning || zaiTurnActive) return
+        val project = current.activeProject ?: return
+        val chatId = current.activeChatId ?: return
+        val now = System.currentTimeMillis()
+        val candidate = zaiQueueEntries.lastOrNull { entry ->
+            entry.status == ZaiTaskQueue.Status.PENDING &&
+                entry.projectId == project.id &&
+                entry.chatId == chatId &&
+                ZaiTaskQueue.resumeDecision(entry, now, signedIn = true) == ZaiTaskQueue.ResumeDecision.RESUME
+        } ?: return
+        resumeQueuedTask(candidate)
+    }
+
+    private fun resumeQueuedTask(entry: ZaiTaskQueue.Entry) {
+        val current = _state.value
+        if (current.isRunning || zaiTurnActive) return
+        val project = current.activeProject ?: return
+        zaiTurnContext = ZaiActiveTurn(project = project, chatId = entry.chatId, needFilesRounds = 0)
+        zaiTurnActive = true
+        zaiActiveQueueId = entry.id
+        zaiQueueEntries = ZaiTaskQueue.markRunning(zaiQueueEntries, entry.id, System.currentTimeMillis())
+        saveZaiQueue()
+        _state.update {
+            it.copy(
+                isRunning = true,
+                liveProcess = listOf(ActivityItem("Resuming", "Re-sending the task queued before the restart", false)),
+                liveThinking = true,
+                taskStartedAtMillis = System.currentTimeMillis(),
+                taskFinishedAtMillis = null,
+                zaiChatNotice = null,
+            )
+        }
+        startZaiForeground("Resuming queued task: ${entry.title}")
+        zaiWebController.runChatTurn(entry.prompt, continueChat = entry.continueChat)
+    }
+
+    private fun markZaiQueueRunning(prompt: String, continueChat: Boolean, projectId: String, chatId: String, title: String) {
+        val now = System.currentTimeMillis()
+        zaiQueueEntries = ZaiTaskQueue.enqueue(zaiQueueEntries, projectId, chatId, title, prompt, continueChat, now)
+        val entry = zaiQueueEntries.last()
+        zaiActiveQueueId = entry.id
+        zaiQueueEntries = ZaiTaskQueue.markRunning(zaiQueueEntries, entry.id, now)
+        saveZaiQueue(now)
+    }
+
+    private fun markZaiQueueTerminal(phase: ZaiRunPhase) {
+        val id = zaiActiveQueueId ?: return
+        zaiActiveQueueId = null
+        val (status, error) = when (phase) {
+            ZaiRunPhase.DONE -> ZaiTaskQueue.Status.DONE to null
+            ZaiRunPhase.CANCELED -> ZaiTaskQueue.Status.CANCELLED to "Stopped by you."
+            ZaiRunPhase.NEEDS_LOGIN -> ZaiTaskQueue.Status.FAILED to "Z.ai needs you to sign in."
+            ZaiRunPhase.CAPTCHA -> ZaiTaskQueue.Status.FAILED to "chat.z.ai showed a verification puzzle."
+            else -> ZaiTaskQueue.Status.FAILED to null
+        }
+        zaiQueueEntries = ZaiTaskQueue.markTerminal(zaiQueueEntries, id, status, error, System.currentTimeMillis())
+        saveZaiQueue()
+    }
+
     /**
      * Chat-engine picker from the workspace chat header. `"zai-web"` selects
      * Z.ai; anything else is treated as an AgentKind stable id and keeps the
@@ -4597,6 +4794,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             // workspace file or the user's message contains one, it is masked
             // here — the model only ever sees variable NAMES, never values.
             val safePrompt = redactEgress(built.prompt)
+            // Phase 3: the turn enters the persisted queue BEFORE it is sent,
+            // so a killed process can report or resume cleanly.
+            markZaiQueueRunning(
+                prompt = safePrompt,
+                continueChat = !decision.freshConversation,
+                projectId = project.id,
+                chatId = chatId,
+                title = requestText.take(80),
+            )
             withContext(Dispatchers.Main) {
                 zaiTurnContext = ZaiActiveTurn(project = project, chatId = chatId, needFilesRounds = 0)
                 zaiTurnActive = true
@@ -4604,6 +4810,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _state.update {
                     it.copy(liveProcess = listOf(ActivityItem("Connecting to Z.ai", "Opening chat.z.ai…", false)))
                 }
+                startZaiForeground("Sending: ${requestText.take(60)}")
             }
             zaiWebController.runChatTurn(safePrompt, continueChat = !decision.freshConversation)
         }
@@ -4722,6 +4929,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         zaiTurnContext = null
         zaiPageConversationChatId = null
         val notice = ZaiChatTurnPresenter.terminalNotice(current.runPhase, current.runMessage)
+        // Phase 3: report to the queue and (needs-attention → distinct notification).
+        markZaiQueueTerminal(current.runPhase)
+        val (serviceAction, notifTitle) = when (current.runPhase) {
+            ZaiRunPhase.NEEDS_LOGIN, ZaiRunPhase.CAPTCHA ->
+                ZaiEngineService.ACTION_NEEDS_ATTENTION to "Z.ai needs your attention"
+            else ->
+                ZaiEngineService.ACTION_FAILED to "Z.ai task ended"
+        }
+        stopZaiForeground(serviceAction, notifTitle, notice?.message ?: current.runMessage ?: "The task could not finish.")
         _state.update {
             it.copy(
                 isRunning = false,
@@ -4799,6 +5015,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         zaiTurnActive = false
         zaiTurnContext = null
         zaiPageConversationChatId = turn.chatId
+        // Phase 3: queue entry DONE + the "answer ready" notification.
+        markZaiQueueTerminal(ZaiRunPhase.DONE)
+        stopZaiForeground(
+            ZaiEngineService.ACTION_COMPLETE,
+            "Z.ai answered",
+            "Answer ready in ${turn.project.name}.",
+        )
         val assistantMessage = ChatMessage(fromUser = false, text = reply)
         _state.update {
             it.copy(

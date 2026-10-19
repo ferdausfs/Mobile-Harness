@@ -60,7 +60,10 @@ object ZaiLiveStatus {
         val answerRaw = obj.optString("answerText", "").takeIf(String::isNotBlank)
         val stepRaw = obj.optString("stepText", "").takeIf(String::isNotBlank)
         val thinkingActive = obj.optBoolean("thinkingActive", false)
-        val thinking = thinkingRaw?.let { bound(it, MAX_THINKING_CHARS) }
+        // v1.0.35: normalize BEFORE the bound so label-only lines ("Thinking…"
+        // echoed from the site's summary element) and duplicated lines collapse
+        // into ONE live thinking body — the duplicate-"Thinking" card bug.
+        val thinking = thinkingRaw?.let { normalizeThinking(it) }?.let { bound(it, MAX_THINKING_CHARS) }?.takeIf(String::isNotBlank)
         val answer = answerRaw?.let { bound(it, MAX_ANSWER_CHARS) }
         val step = stepRaw?.let { bound(it, MAX_STEP_CHARS) }
         return Live(
@@ -76,6 +79,45 @@ object ZaiLiveStatus {
                 stepPresent = step != null,
             ),
         )
+    }
+
+    /**
+     * v1.0.35 — the duplicate-"Thinking..." fix (pure, tested).
+     *
+     * The site renders the thinking block as <details><summary>Thinking…</summary>
+     * <div>reasoning…</div></details>; `innerText` of that element INCLUDES the
+     * summary line, so the live card showed its own "Thinking" header PLUS the
+     * echoed "Thinking…" body — two duplicate lines. Additionally the page can
+     * render the label twice while re-rendering.
+     *
+     * This drops: (a) lines that are ONLY the streaming label, (b) adjacent
+     * exact-duplicate lines. Real reasoning lines never start with the bare
+     * label and are preserved verbatim.
+     */
+    fun normalizeThinking(raw: String): String {
+        val labelOnly = Regex("^thinking[\\s.!….]*$", RegexOption.IGNORE_CASE)
+        val out = ArrayList<String>()
+        for (line in raw.lines()) {
+            val t = line.trim()
+            if (t.isEmpty()) continue
+            if (labelOnly.matches(t)) continue
+            if (out.isNotEmpty() && out.last() == t) continue
+            out.add(t)
+        }
+        return out.joinToString("\n")
+    }
+
+    /**
+     * v1.0.35 — conversation-id channel of the live-status payload (pure,
+     * tested). The script reads the URL (`/c/<id>`) and, failing that, the
+     * site's own chat-detail fetches from the performance resource entries.
+     * Returns null when absent or invalid — the engine keeps the last id.
+     */
+    fun parseChatId(json: String?): String? {
+        if (json.isNullOrBlank()) return null
+        val obj = runCatching { JSONObject(cleanEvalResult(json)) }.getOrNull() ?: return null
+        val id = obj.optString("chatId", "")
+        return id.takeIf { ZaiChatId.isValid(it) }
     }
 
     /**

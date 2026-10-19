@@ -52,6 +52,10 @@ object ZaiFileSync {
         val note: String?,
         /** How the turn was matched: "chain" (the site's parent walk) or "fallback". */
         val turnSource: String?,
+        /** v1.0.35: how the conversation id was found — "stored" (per-project capture), "url", "perf", "none". */
+        val chatIdSource: String?,
+        /** v1.0.35: the conversation id the probe used (diagnostics only). */
+        val chatId: String?,
         val writes: List<SiteWrite>,
         val edits: List<SiteEdit>,
         val versionFiles: List<SiteVersionFile>,
@@ -66,6 +70,7 @@ object ZaiFileSync {
 
     fun emptyPayload(): ProbePayload = ProbePayload(
         chatFound = false, messageId = null, note = null, turnSource = null,
+        chatIdSource = null, chatId = null,
         writes = emptyList(), edits = emptyList(), versionFiles = emptyList(),
         versionContents = emptyMap(), binaryKeys = emptyList(), failedKeys = emptyList(),
     )
@@ -120,6 +125,8 @@ object ZaiFileSync {
                 messageId = root.optString("messageId").takeIf { it.isNotEmpty() },
                 note = root.optString("note").takeIf { it.isNotEmpty() },
                 turnSource = root.optString("turnSource").takeIf { it.isNotEmpty() },
+                chatIdSource = root.optString("chatIdSource").takeIf { it.isNotEmpty() },
+                chatId = root.optString("chatId").takeIf { it.isNotEmpty() },
                 writes = writes,
                 edits = edits,
                 versionFiles = versionFiles,
@@ -157,6 +164,11 @@ object ZaiFileSync {
         val sourceNotes: List<String>,
         val probeOk: Boolean,
         val attempts: Int,
+        /**
+         * v1.0.35: the EXACT reason nothing could be read (honesty card copy,
+         * redacted — never contains reply content). Null when files were read.
+         */
+        val failureReason: String? = null,
     ) {
         /** Z.ai wrote files but NONE could be read — amber, never green. */
         val wroteButNoneReadable: Boolean
@@ -169,6 +181,23 @@ object ZaiFileSync {
     )
 
     // ── v1.0.34: honesty verdict for the final report card ──
+
+    /**
+     * v1.0.35: the EXACT reason the probe contributed nothing (honesty card).
+     * A probe note ("no assistant message found for this turn") is a reason
+     * EVEN when the chat was found — the note IS the miss. Null when the
+     * probe saw the site's file activity (the files speak for themselves).
+     */
+    fun probeFailureReason(payload: ProbePayload): String? {
+        if (payload.sawSiteActivity) return null
+        if (payload.note != null) return payload.note
+        if (payload.chatFound) return null
+        return when {
+            payload.chatIdSource == "none" ->
+                "no conversation id — the page had left the chat and none was captured for this project yet"
+            else -> "the site's file data could not be read right now"
+        }
+    }
 
     /**
      * Whether the reply itself claims files: any FILE: marker the parser turned
@@ -307,6 +336,7 @@ object ZaiFileSync {
             sourceNotes = notes.take(6),
             probeOk = payload.chatFound || textMarkers.isNotEmpty(),
             attempts = payload.writes.size + payload.versionFiles.size,
+            failureReason = probeFailureReason(payload),
         )
         return Merged(
             files = files.map { (path, pair) -> ZaiExtractedFile(path, "", pair.second) },

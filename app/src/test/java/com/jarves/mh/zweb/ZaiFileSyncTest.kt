@@ -110,6 +110,7 @@ class ZaiFileSyncTest {
         chatFound: Boolean = true,
     ) = ProbePayload(
         chatFound = chatFound, messageId = "m", note = null, turnSource = "chain",
+        chatIdSource = "url", chatId = "test-chat-id",
         writes = writes, edits = edits, versionFiles = versionFiles,
         versionContents = versionContents, binaryKeys = binaryKeys, failedKeys = failedKeys,
     )

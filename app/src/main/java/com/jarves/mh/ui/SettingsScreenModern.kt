@@ -112,6 +112,7 @@ import com.jarves.mh.network.ConnectionValidation
 import com.jarves.mh.network.DiscoveredModel
 import com.jarves.mh.network.ModelDiscoveryResult
 import com.jarves.mh.runtime.AntigravityAuthStatus
+import com.jarves.mh.update.AppUpdateProgressText
 import com.jarves.mh.update.InstallDiagnostics
 import com.jarves.mh.update.InstallDiagnosticsProvider
 import com.jarves.mh.update.InstallResultStore
@@ -1056,15 +1057,11 @@ private fun AppUpdateCard(
                     progress = { progress.coerceIn(0f, 1f) },
                     modifier = Modifier.fillMaxWidth(),
                 )
+                // Progress text is built by AppUpdateProgressText: the v1.0.24
+                // crash came from running visible text (with a trailing literal
+                // '%') through String.format as the pattern itself.
                 Text(
-                    if (total > 0) {
-                        "Downloading %.1f / %.1f MB · ${(progress * 100).toInt()}%".format(
-                            state.appUpdateDownloadedBytes / 1_048_576.0,
-                            total / 1_048_576.0,
-                        )
-                    } else {
-                        "Downloading %.1f MB".format(state.appUpdateDownloadedBytes / 1_048_576.0)
-                    },
+                    AppUpdateProgressText.build(state.appUpdateDownloadedBytes, total),
                     fontSize = 12.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

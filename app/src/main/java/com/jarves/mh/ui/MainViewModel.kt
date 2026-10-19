@@ -86,6 +86,11 @@ import com.jarves.mh.zweb.ZaiTaskQueueStore
 import com.jarves.mh.zweb.ZaiPendingApply
 import com.jarves.mh.zweb.ZaiPromptBudget
 import com.jarves.mh.zweb.ZaiRunPhase
+import com.jarves.mh.zweb.ZaiRunExecutor
+import com.jarves.mh.zweb.ZaiRunLoopPolicy
+import com.jarves.mh.zweb.ZaiRunLogEntry
+import com.jarves.mh.zweb.ZaiRunParser
+import com.jarves.mh.zweb.ZaiRunProtocol
 import com.jarves.mh.zweb.ZaiWorkspaceApply
 import com.jarves.mh.zweb.ZaiWorkspaceApply.PlannedFile
 import java.io.File
@@ -306,6 +311,16 @@ data class AppUiState(
     val zaiPreferredModel: String? = null,
     /** Persisted cache of chat.z.ai's own dropdown (used when the engine has none this session). */
     val zaiCachedModels: List<ZaiModelCatalog.ModelOption> = emptyList(),
+    // ── Phase 4: autonomous RUN loop ──
+    /** Autonomy mode for the RUN loop (persisted; FULL_AUTO is the default per the product spec). */
+    val zaiRunMode: com.jarves.mh.zweb.ZaiRunLoopPolicy.AutonomyMode =
+        com.jarves.mh.zweb.ZaiRunLoopPolicy.AutonomyMode.FULL_AUTO,
+    /** Live command/activity log for the running (or just-finished) loop; empty when idle. */
+    val zaiRunLoopLog: List<com.jarves.mh.zweb.ZaiRunLogEntry> = emptyList(),
+    /** Commands waiting for the user's approval (ASK_EACH_COMMAND / SAFE_AUTO). */
+    val zaiRunPendingCommands: List<com.jarves.mh.zweb.ZaiRunParser.RunCommand> = emptyList(),
+    /** Structured final report card; null = no completed loop to show. */
+    val zaiRunReport: com.jarves.mh.zweb.ZaiRunProtocol.LoopReport? = null,
     // ── Phase 2 tokens vault ──
     /** Stored tokens (metadata only — values never leave the vault unredacted). */
     val tokens: List<StoredToken> = emptyList(),
@@ -418,6 +433,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             zaiAutoApply = preferences.zaiAutoApply,
             zaiPreferredModel = preferences.zaiPreferredModel.takeIf(String::isNotBlank),
             zaiCachedModels = ZaiModelCatalog.fromJson(preferences.zaiCachedModelsJson),
+            zaiRunMode = runCatching {
+                com.jarves.mh.zweb.ZaiRunLoopPolicy.AutonomyMode.valueOf(preferences.zaiRunMode)
+            }.getOrDefault(com.jarves.mh.zweb.ZaiRunLoopPolicy.AutonomyMode.FULL_AUTO),
             tokens = tokenVault.list(),
             provider = preferences.loadProvider(vault, initialAgentKind),
             activeApiKeyName = vault.list(preferences.loadProvider(vault, initialAgentKind).kind.name)
@@ -4172,7 +4190,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val project: Project,
         val chatId: String,
         val needFilesRounds: Int,
-    )
+        // ── Phase 4 RUN loop (null-ish defaults keep plain turns identical) ──
+        val runMode: com.jarves.mh.zweb.ZaiRunLoopPolicy.AutonomyMode =
+            com.jarves.mh.zweb.ZaiRunLoopPolicy.AutonomyMode.OFF,
+        val budget: com.jarves.mh.zweb.ZaiRunLoopPolicy.Budget =
+            com.jarves.mh.zweb.ZaiRunLoopPolicy.Budget(),
+        val commandsRun: Int = 0,
+        val refusals: Int = 0,
+        val taskId: String = "zr-${System.currentTimeMillis()}",
+        val startedAtMillis: Long = System.currentTimeMillis(),
+        /** True once the budget-exhausted notice was sent; the next reply must finish. */
+        val exhaustedNotified: Boolean = false,
+    ) {
+        val runLoopActive: Boolean
+            get() = runMode != com.jarves.mh.zweb.ZaiRunLoopPolicy.AutonomyMode.OFF
+    }
 
     private var zaiTurnContext: ZaiActiveTurn? = null
 
@@ -4813,6 +4845,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             zaiOpenSignIn()
             return
         }
+        val runMode = _state.value.zaiRunMode
         val requestText = prompt.trim().ifBlank { "Please review the attached files." }
         updateActiveChatTitle(requestText)
         _state.update {
@@ -4850,7 +4883,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             // HARD RULE (Phase 2): token values never reach chat.z.ai. If a
             // workspace file or the user's message contains one, it is masked
             // here — the model only ever sees variable NAMES, never values.
-            val safePrompt = redactEgress(built.prompt)
+            // Phase 4: when the RUN loop is enabled the prompt also teaches the
+            // RUN/DONE contract + the untrusted-data rule (names only survive
+            // redaction — values never do).
+            val protocolSection = if (runMode != com.jarves.mh.zweb.ZaiRunLoopPolicy.AutonomyMode.OFF) {
+                ZaiRunProtocol.runLoopSection(
+                    maxIterations = com.jarves.mh.zweb.ZaiRunLoopPolicy.DEFAULT_MAX_ITERATIONS,
+                    perCommandTimeoutSeconds = com.jarves.mh.zweb.ZaiRunLoopPolicy.DEFAULT_PER_COMMAND_TIMEOUT_MILLIS / 1000,
+                )
+            } else ""
+            val safePrompt = redactEgress(built.prompt + protocolSection)
             // Phase 3: the turn enters the persisted queue BEFORE it is sent,
             // so a killed process can report or resume cleanly.
             markZaiQueueRunning(
@@ -4861,11 +4903,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 title = requestText.take(80),
             )
             withContext(Dispatchers.Main) {
-                zaiTurnContext = ZaiActiveTurn(project = project, chatId = chatId, needFilesRounds = 0)
+                zaiTurnContext = ZaiActiveTurn(
+                    project = project,
+                    chatId = chatId,
+                    needFilesRounds = 0,
+                    runMode = runMode,
+                )
                 zaiTurnActive = true
                 reportZaiBudget(built.report)
                 _state.update {
-                    it.copy(liveProcess = listOf(ActivityItem("Connecting to Z.ai", "Opening chat.z.ai…", false)))
+                    it.copy(
+                        liveProcess = listOf(ActivityItem("Connecting to Z.ai", "Opening chat.z.ai…", false)),
+                        zaiRunLoopLog = emptyList(),
+                        zaiRunPendingCommands = emptyList(),
+                        zaiRunReport = null,
+                    )
                 }
                 startZaiForeground("Sending: ${requestText.take(60)}")
             }
@@ -5002,6 +5054,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 liveThinking = false,
                 taskFinishedAtMillis = System.currentTimeMillis(),
                 zaiChatNotice = notice,
+                // Phase 4: a failed turn also drops any parked approval round.
+                zaiRunPendingCommands = emptyList(),
             )
         }
         persistMessages(includeLiveProcess = false)
@@ -5016,11 +5070,275 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
         val reply = current.lastReply.orEmpty().ifBlank { "(empty reply)" }
+        // ── Phase 4: the autonomous RUN loop owns replies while active ──
+        if (turn.runLoopActive) {
+            handleZaiLoopReply(turn, reply, current)
+            return
+        }
         if (ZaiNeedFilesParser.isAutoFulfillable(reply) && ZaiChatTurnPolicy.canFulfilMore(turn.needFilesRounds)) {
             fulfilNeedFiles(turn, reply)
             return
         }
         finishZaiTurn(turn, reply, current)
+    }
+
+    // ── Phase 4: the autonomous RUN loop ──
+
+    /** Executor for the loop; built lazily, never at startup (crash-safety rule). */
+    private val zaiRunExecutor by lazy {
+        ZaiRunExecutor(getApplication(), installer, tokenVault)
+    }
+
+    /** Mode control from the Z.ai tab (persisted; the default is FULL_AUTO). */
+    fun setZaiRunMode(mode: com.jarves.mh.zweb.ZaiRunLoopPolicy.AutonomyMode) {
+        preferences.zaiRunMode = mode.name
+        _state.update { it.copy(zaiRunMode = mode) }
+    }
+
+    /** Clears the finished report card. */
+    fun zaiDismissRunReport() {
+        _state.update { it.copy(zaiRunReport = null) }
+    }
+
+    /**
+     * The loop's reply handler. Runs on every DONE the engine reports while a
+     * loop turn is active. Everything is guarded — a loop failure must never
+     * kill the process (v1.0.31 rule); it degrades to finishing the turn with
+     * what the model last said.
+     */
+    private fun handleZaiLoopReply(turn: ZaiActiveTurn, reply: String, current: ZaiWebUiState) {
+        val action = runCatching {
+            ZaiRunLoopPolicy.nextAction(reply, turn.budget)
+        }.getOrElse { finishZaiLoop(turn, reply, current, stoppedBecause = "internal loop error"); return }
+
+        // After the exhaustion notice was sent, the next reply MUST finish —
+        // whatever it is becomes the final answer (no more command rounds).
+        val forcedFinish = turn.exhaustedNotified
+
+        when (action) {
+            is ZaiRunLoopPolicy.Decision.Finish -> finishZaiLoop(turn, action.summary, current, stoppedBecause = "the model reported DONE")
+            is ZaiRunLoopPolicy.Decision.NeedFiles -> {
+                // The loop pauses; the existing NEED_FILES fulfilment continues
+                // the SAME conversation and the loop resumes on its reply.
+                if (ZaiNeedFilesParser.isAutoFulfillable(reply) && ZaiChatTurnPolicy.canFulfilMore(turn.needFilesRounds)) {
+                    fulfilNeedFiles(turn, reply)
+                } else {
+                    finishZaiLoop(turn, reply, current, stoppedBecause = "the model asked for files that could not be provided")
+                }
+            }
+            is ZaiRunLoopPolicy.Decision.RunCommands -> {
+                if (forcedFinish) {
+                    finishZaiLoop(turn, reply.ifBlank { action.commands.joinToString { it.command } }, current, stoppedBecause = "budget exhausted")
+                    return
+                }
+                when (turn.runMode) {
+                    com.jarves.mh.zweb.ZaiRunLoopPolicy.AutonomyMode.FULL_AUTO ->
+                        executeZaiRunRound(turn, action.commands)
+                    com.jarves.mh.zweb.ZaiRunLoopPolicy.AutonomyMode.SAFE_AUTO -> {
+                        val (auto, ask) = action.commands.partition { ZaiRunLoopPolicy.isReadOnlyCommand(it.command) }
+                        if (ask.isEmpty()) {
+                            executeZaiRunRound(turn, action.commands)
+                        } else {
+                            // Read-only commands run now; the rest wait for approval.
+                            pauseForApproval(turn, auto, ask)
+                        }
+                    }
+                    else -> pauseForApproval(turn, emptyList(), action.commands)
+                }
+            }
+            is ZaiRunLoopPolicy.Decision.Exhausted -> {
+                if (turn.exhaustedNotified) {
+                    finishZaiLoop(turn, reply, current, stoppedBecause = "budget exhausted")
+                } else {
+                    zaiTurnContext = turn.copy(exhaustedNotified = true)
+                    sendLoopControlMessage(
+                        turn,
+                        ZaiRunProtocol.budgetExhaustedMessage(action.reason),
+                        logLine = "Budget reached — asking the model to finish.",
+                    )
+                }
+            }
+            ZaiRunLoopPolicy.Decision.PlainAnswer -> {
+                // The model forgot DONE and has no commands: its reply IS the answer.
+                finishZaiLoop(turn, reply, current, stoppedBecause = "the model replied without further commands")
+            }
+        }
+    }
+
+    /** ASK_EACH_COMMAND / SAFE_AUTO: park the commands and wait for the user. */
+    private fun pauseForApproval(
+        turn: ZaiActiveTurn,
+        autoNow: List<ZaiRunParser.RunCommand>,
+        needsApproval: List<ZaiRunParser.RunCommand>,
+    ) {
+        _state.update { it.copy(zaiRunPendingCommands = needsApproval) }
+        if (autoNow.isNotEmpty()) {
+            executeZaiRunRound(turn, autoNow, awaitingApproval = needsApproval)
+        } else {
+            _state.update {
+                it.copy(
+                    liveProcess = listOf(
+                        ActivityItem(
+                            "Waiting for your approval",
+                            "${needsApproval.size} command(s) need review — approve them to continue.",
+                            false,
+                        ),
+                    ),
+                )
+            }
+            persistMessages()
+        }
+    }
+
+    /** Approval card: run the approved commands (skipped ones report a refusal). */
+    fun zaiApproveRunCommands(approvedIndexes: Set<Int>) {
+        val pending = _state.value.zaiRunPendingCommands
+        val turn = zaiTurnContext ?: run {
+            _state.update { it.copy(zaiRunPendingCommands = emptyList()) }
+            return
+        }
+        _state.update { it.copy(zaiRunPendingCommands = emptyList()) }
+        val approved = pending.filterIndexed { index, _ -> index in approvedIndexes }
+        val skipped = pending.filterIndexed { index, _ -> index !in approvedIndexes }
+        if (approved.isEmpty() && skipped.isEmpty()) return
+        executeZaiRunRound(turn, approved, skippedCommands = skipped)
+    }
+
+    /** Approval card: skip everything that is waiting. */
+    fun zaiSkipPendingRunCommands() {
+        val pending = _state.value.zaiRunPendingCommands
+        val turn = zaiTurnContext ?: run {
+            _state.update { it.copy(zaiRunPendingCommands = emptyList()) }
+            return
+        }
+        _state.update { it.copy(zaiRunPendingCommands = emptyList()) }
+        if (pending.isEmpty()) return
+        executeZaiRunRound(turn, emptyList(), skippedCommands = pending)
+    }
+
+    /**
+     * Runs one round of commands (skipped ones report a refusal), appends the
+     * live log, then sends the redacted results back into the SAME
+     * conversation. Budget accounting happens once per round.
+     */
+    private fun executeZaiRunRound(
+        turn: ZaiActiveTurn,
+        commands: List<ZaiRunParser.RunCommand>,
+        skippedCommands: List<ZaiRunParser.RunCommand> = emptyList(),
+        awaitingApproval: List<ZaiRunParser.RunCommand> = emptyList(),
+    ) {
+        val iteration = turn.budget.iterationsUsed + 1
+        _state.update {
+            it.copy(
+                liveProcess = listOf(
+                    ActivityItem(
+                        "Running commands (round $iteration)",
+                        commands.joinToString(limit = 3) { it.command }.ifBlank { "none" },
+                        false,
+                    ),
+                ),
+            )
+        }
+        viewModelScope.launch(backgroundGuard) {
+            val workspace = projectWorkspaceRoot(turn.project)
+            val outcomes = ArrayList<ZaiRunExecutor.RunOutcome>()
+            for (run in commands) {
+                if (!zaiTurnActive) return@launch // user pressed Stop mid-round
+                val outcome = runCatching {
+                    zaiRunExecutor.run(
+                        command = run.command,
+                        hostWorkspace = workspace,
+                        guestWorkspacePath = "/workspace",
+                        projectId = turn.project.id,
+                    )
+                }.getOrElse {
+                    ZaiRunExecutor.RunOutcome(
+                        command = run.command,
+                        exitCode = null,
+                        output = "refused: the command could not be executed (${it.message ?: "runtime error"}).",
+                        refused = true,
+                        timedOut = false,
+                        durationMillis = 0L,
+                    )
+                }
+                outcomes.add(outcome)
+                appendRunLog(turn, iteration, outcome)
+            }
+            val blocks = outcomes.map { it.asReportBlock() } + skippedCommands.map { ZaiRunProtocol.skippedByUserMessage() }
+            val fingerprint = ZaiRunLoopPolicy.fingerprint(
+                outcomes.joinToString("\u0000") { it.command },
+                outcomes.joinToString("\u0000") { it.output },
+            )
+            val budget = turn.budget.withIteration(
+                outputChars = outcomes.sumOf { it.output.length },
+                fingerprint = fingerprint,
+            )
+            val refusals = turn.refusals + outcomes.count { it.refused } + skippedCommands.size
+            val updatedTurn = turn.copy(
+                budget = budget,
+                commandsRun = turn.commandsRun + outcomes.count { !it.refused },
+                refusals = refusals,
+            )
+            zaiTurnContext = updatedTurn
+            if (!zaiTurnActive) return@launch
+            val waitingNote = awaitingApproval.takeIf { it.isNotEmpty() }
+                ?.joinToString(prefix = "\n\n(Also waiting for the user's approval: ", separator = "; ", postfix = ")") { it.command }
+                .orEmpty()
+            val results = ZaiRunProtocol.resultsMessage(
+                blocks = blocks,
+                iterationsUsed = iteration,
+                maxIterations = budget.maxIterations,
+            ) + waitingNote
+            sendLoopControlMessage(updatedTurn, results, logLine = "Round $iteration done — sending results to Z.ai.")
+        }
+    }
+
+    /** One turn of the conversation that is NOT a user message (results / control). */
+    private fun sendLoopControlMessage(turn: ZaiActiveTurn, message: String, logLine: String) {
+        val safeMessage = redactEgress(message)
+        _state.update {
+            it.copy(liveProcess = listOf(ActivityItem("Z.ai is working", logLine, false)))
+        }
+        zaiWebController.runChatTurn(safeMessage, continueChat = true)
+    }
+
+    /** Appends one redacted outcome row to the live activity log. */
+    private fun appendRunLog(turn: ZaiActiveTurn, iteration: Int, outcome: ZaiRunExecutor.RunOutcome) {
+        val entry = ZaiRunLogEntry(
+            iteration = iteration,
+            command = outcome.command.take(160),
+            exitCode = outcome.exitCode,
+            refused = outcome.refused,
+            timedOut = outcome.timedOut,
+            summary = ZaiRunLoopPolicy.boundOutput(outcome.output, maxChars = 220).replace('\n', ' ').trim(),
+            atMillis = System.currentTimeMillis(),
+        )
+        _state.update { it.copy(zaiRunLoopLog = it.zaiRunLoopLog + entry) }
+    }
+
+    /**
+     * Terminal path of a loop task: the report card + the DONE summary as the
+     * assistant message (FILE blocks the reply carried are still applied by
+     * [finishZaiTurn] — the loop's file pipeline is unchanged).
+     */
+    private fun finishZaiLoop(
+        turn: ZaiActiveTurn,
+        summary: String,
+        current: ZaiWebUiState,
+        stoppedBecause: String,
+    ) {
+        val report = ZaiRunProtocol.LoopReport(
+            taskId = turn.taskId,
+            mode = turn.runMode.name,
+            iterationsUsed = turn.budget.iterationsUsed,
+            commandsRun = turn.commandsRun,
+            refusals = turn.refusals,
+            durationMillis = System.currentTimeMillis() - turn.startedAtMillis,
+            stoppedBecause = stoppedBecause,
+            summary = summary.take(400),
+        )
+        _state.update { it.copy(zaiRunReport = report) }
+        finishZaiTurn(turn, summary, current)
     }
 
     /** Reads the files the model asked for and re-sends them in the SAME conversation. */

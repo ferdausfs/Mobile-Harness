@@ -78,6 +78,15 @@ class AppPreferences(private val context: Context) : AppPreferencesBridge {
         get() = preferences.getString("zai_cached_models_json", "") ?: ""
         set(value) { preferences.edit().putString("zai_cached_models_json", value).apply() }
 
+    /**
+     * Autonomous RUN-loop autonomy mode (Phase 4). Stored as the enum name;
+     * an unknown name falls back to FULL_AUTO (the product default) — never
+     * a throw (v1.0.31's persisted-state rule).
+     */
+    var zaiRunMode: String
+        get() = preferences.getString("zai_run_mode", "") ?: ""
+        set(value) { preferences.edit().putString("zai_run_mode", value).apply() }
+
     var githubLogin: String
         get() = preferences.getString("github_login", "") ?: ""
         set(value) { preferences.edit().putString("github_login", value).apply() }

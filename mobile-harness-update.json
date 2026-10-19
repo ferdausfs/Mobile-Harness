@@ -1,12 +1,12 @@
 {
-  "versionCode": 30,
-  "versionName": "1.0.29",
-  "notes": "New: Z.ai tasks keep running with the screen off. A dataSync foreground service holds the engine open during generation: persistent notification with the live phase/tool step/elapsed and a working Stop button, plus result notifications (answered / needs attention / ended). Android's 6-hour dataSync limit is handled gracefully with a checkpoint + notify before it hits. The chat-engine task queue is now persisted: tasks killed mid-run are reported on the next start, and a task queued within 10 minutes is re-sent automatically once you are signed in again. CLI agents unchanged. Same key, one-tap update.",
+  "versionCode": 31,
+  "versionName": "1.0.30",
+  "notes": "New: the Z.ai tab now looks and works like the Antigravity tab - 'Z.ai Web \u00b7 <current model>' header, account card with email/name and a Disconnect text button, 'Active Intelligence Model' with Sync (reads chat.z.ai's own model dropdown, drives + verifies picks, read-only fallback), a Thinking section rendered only when the site actually offers its Deep Think controls (verified by re-reading the site's menu - hidden otherwise), full-width Test connection, and the live Thinking/answer/elapsed card in the task area with Stop. Engine picker lists the site's models. Nothing else changed; same key, one-tap update.",
   "artifacts": {
     "online": {
-      "url": "https://github.com/ferdausfs/Mobile-Harness/releases/download/v1.0.29/mobile-harness-online-v1.0.29.apk",
-      "sha256": "c638c6b18873a760d5e4833287a8b91b22ca6f288d35ad2d51a69dfe88d79eda",
-      "sizeBytes": 88525963
+      "url": "https://github.com/ferdausfs/Mobile-Harness/releases/download/v1.0.30/mobile-harness-online-v1.0.30.apk",
+      "sha256": "6e28937267958efe67aeb9a336461e405dbbd8bae49c2c0219aa6ec0afa69622",
+      "sizeBytes": 88590711
     }
   }
 }

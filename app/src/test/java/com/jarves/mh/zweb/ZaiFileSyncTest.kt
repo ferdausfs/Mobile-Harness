@@ -109,7 +109,7 @@ class ZaiFileSyncTest {
         failedKeys: List<String> = emptyList(),
         chatFound: Boolean = true,
     ) = ProbePayload(
-        chatFound = chatFound, messageId = "m", note = null,
+        chatFound = chatFound, messageId = "m", note = null, turnSource = "chain",
         writes = writes, edits = edits, versionFiles = versionFiles,
         versionContents = versionContents, binaryKeys = binaryKeys, failedKeys = failedKeys,
     )
@@ -313,5 +313,87 @@ class ZaiFileSyncTest {
         val script = ZaiProbeScripts.buildFileSyncProbeScript()
         assertTrue(script.contains("no chat id in URL"))
         assertNotNull(script)
+    }
+
+    // ── v1.0.34: tolerant turn matching + honesty verdicts + verified results ──
+
+    @Test
+    fun `probe payload carries the turn source for diagnostics`() {
+        val json = """{"chatFound":true,"messageId":"m-2","turnSource":"chain","writes":[],"edits":[]}"""
+        assertEquals("chain", ZaiFileSync.parseProbe(json).turnSource)
+        assertNull(ZaiFileSync.parseProbe("""{"chatFound":true}""").turnSource)
+        assertNull(ZaiFileSync.emptyPayload().turnSource)
+    }
+
+    @Test
+    fun `file sync probe walks the site's parent chain and unwraps wrapped responses`() {
+        val script = ZaiProbeScripts.buildFileSyncProbeScript()
+        // The site's own model (bundle-verified): history.currentId leaf +
+        // parentId chains — the primary turn matcher now walks the same chain.
+        assertTrue(script.contains("history.currentId"))
+        assertTrue(script.contains("parentId"))
+        // Wrapped API responses ({data:{…}} / {chat:{…}}) are unwrapped.
+        assertTrue(script.contains("c.data"))
+        assertTrue(script.contains("c.chat"))
+        // Timestamps may be numbers, numeric strings, or ISO strings.
+        assertTrue(script.contains("function tsNum"))
+        assertTrue(script.contains("Date.parse"))
+        // A final fallback keeps trailing assistant messages in store order.
+        assertTrue(script.contains("trailing"))
+    }
+
+    @Test
+    fun `reply claims files from markers even when content was unreadable`() {
+        // Unmatched markers (named but no content) still count as claims.
+        val unmatchedOnly = ZaiFileExtractor.parseCaptured("FILE: missing.txt\n", emptyList())
+        assertTrue(ZaiFileSync.replyClaimsFiles(unmatchedOnly, null))
+        // Invalid paths count too (the model named them).
+        val invalid = ZaiFileExtractor.parseCaptured("FILE: ../bad\ncontent", emptyList())
+        assertTrue(ZaiFileSync.replyClaimsFiles(invalid, null))
+        // A probe that saw site activity is a claim on its own.
+        val plain = ZaiFileExtractor.parseCaptured("Just chatting.", emptyList())
+        val report = ZaiFileSync.SyncReport(
+            wroteCount = 2, readablePaths = emptyList(), unreadablePaths = listOf("a", "b"),
+            binarySkipped = emptyList(), sourceNotes = emptyList(), probeOk = true, attempts = 2,
+        )
+        assertTrue(ZaiFileSync.replyClaimsFiles(plain, report))
+        // No markers + no probe activity = no claim.
+        assertFalse(ZaiFileSync.replyClaimsFiles(plain, null))
+    }
+
+    @Test
+    fun `amber files-not-synced rule fires only when files were claimed and nothing arrived`() {
+        // Claimed + nothing applied + nothing pending → amber (the v1.0.33 bug).
+        assertTrue(ZaiFileSync.filesNotSyncedWarning(claimsFiles = true, appliedCount = 0, pendingReviewCount = 0))
+        // Files waiting in the review card are one tap away — not a failure.
+        assertFalse(ZaiFileSync.filesNotSyncedWarning(claimsFiles = true, appliedCount = 0, pendingReviewCount = 3))
+        // Applied files mean the claim was fulfilled.
+        assertFalse(ZaiFileSync.filesNotSyncedWarning(claimsFiles = true, appliedCount = 2, pendingReviewCount = 0))
+        // No claim → never amber, green stays honest.
+        assertFalse(ZaiFileSync.filesNotSyncedWarning(claimsFiles = false, appliedCount = 0, pendingReviewCount = 0))
+    }
+
+    @Test
+    fun `verified results read back path and byte count from disk`() {
+        val details = ZaiFileSync.verifyOnDisk(listOf("a.txt", "gone.txt")) { path ->
+            when (path) {
+                "a.txt" -> 15L
+                else -> null
+            }
+        }
+        assertEquals(2, details.size)
+        assertEquals("a.txt", details[0].path)
+        assertEquals(15L, details[0].bytes)
+        assertTrue(details[0].verified)
+        assertEquals(0L, details[1].bytes)
+        assertFalse(details[1].verified)
+    }
+
+    @Test
+    fun `byte sizes render for humans`() {
+        assertEquals("15 B", ZaiFileSync.formatBytes(15))
+        assertEquals("1.0 KB", ZaiFileSync.formatBytes(1024))
+        assertEquals("1.2 MB", ZaiFileSync.formatBytes((1.2 * 1024 * 1024).toLong()))
+        assertEquals("?", ZaiFileSync.formatBytes(-1))
     }
 }

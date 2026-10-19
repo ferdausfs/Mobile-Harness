@@ -50,6 +50,8 @@ object ZaiFileSync {
         /** The last assistant message id the versions listing was keyed on (null = none). */
         val messageId: String?,
         val note: String?,
+        /** How the turn was matched: "chain" (the site's parent walk) or "fallback". */
+        val turnSource: String?,
         val writes: List<SiteWrite>,
         val edits: List<SiteEdit>,
         val versionFiles: List<SiteVersionFile>,
@@ -63,7 +65,7 @@ object ZaiFileSync {
     }
 
     fun emptyPayload(): ProbePayload = ProbePayload(
-        chatFound = false, messageId = null, note = null,
+        chatFound = false, messageId = null, note = null, turnSource = null,
         writes = emptyList(), edits = emptyList(), versionFiles = emptyList(),
         versionContents = emptyMap(), binaryKeys = emptyList(), failedKeys = emptyList(),
     )
@@ -117,6 +119,7 @@ object ZaiFileSync {
                 chatFound = root.optBoolean("chatFound"),
                 messageId = root.optString("messageId").takeIf { it.isNotEmpty() },
                 note = root.optString("note").takeIf { it.isNotEmpty() },
+                turnSource = root.optString("turnSource").takeIf { it.isNotEmpty() },
                 writes = writes,
                 edits = edits,
                 versionFiles = versionFiles,
@@ -164,6 +167,66 @@ object ZaiFileSync {
         val files: List<ZaiExtractedFile>,
         val report: SyncReport,
     )
+
+    // ── v1.0.34: honesty verdict for the final report card ──
+
+    /**
+     * Whether the reply itself claims files: any FILE: marker the parser turned
+     * into a file, OR named without content (unmatched), OR rejected as unsafe.
+     * Also true when the site probe saw sandbox writes/edits/version files —
+     * positive evidence Z.ai produced files somewhere.
+     */
+    fun replyClaimsFiles(
+        parse: ZaiFileExtractor.ZaiParseResult,
+        report: SyncReport?,
+    ): Boolean {
+        val markerClaims = parse.files.isNotEmpty() ||
+            parse.unmatchedMarkers.isNotEmpty() ||
+            parse.invalidPaths.isNotEmpty()
+        val probeClaims = report != null && report.wroteCount > 0
+        return markerClaims || probeClaims
+    }
+
+    /**
+     * The amber rule for the final report card (DO: "never green Task finished
+     * when the reply claims files were created but 0 were synced").
+     *
+     * True only when Z.ai (or the reply) claimed files AND nothing is on its way
+     * into the project: nothing applied, nothing waiting in the review card.
+     * A pending review card is NOT a failure — the files are one tap away — so
+     * the card stays green while that choice is open.
+     */
+    fun filesNotSyncedWarning(
+        claimsFiles: Boolean,
+        appliedCount: Int,
+        pendingReviewCount: Int,
+    ): Boolean = claimsFiles && appliedCount <= 0 && pendingReviewCount <= 0
+
+    // ── v1.0.34: verified per-file results (read back from disk) ──
+
+    /** One successfully synced file, verified by reading the bytes back. */
+    data class SyncedFileDetail(val path: String, val bytes: Long, val verified: Boolean)
+
+    /**
+     * Reads every applied path back from the workspace and reports its byte
+     * size (the DO: "verify by reading back from disk (path + byte count)").
+     * A missing/unreadable file is [SyncedFileDetail.verified] = false — never
+     * silently presented as synced. Pure over the [readBytes] lambda so the JVM
+     * can test the verdicts without a filesystem.
+     */
+    fun verifyOnDisk(paths: List<String>, readBytes: (String) -> Long?): List<SyncedFileDetail> =
+        paths.map { path ->
+            val size = readBytes(path)
+            SyncedFileDetail(path = path, bytes = size ?: 0L, verified = size != null)
+        }
+
+    /** "12 B", "4.0 KB", "1.2 MB" — for the per-file result rows. */
+    fun formatBytes(bytes: Long): String = when {
+        bytes < 0 -> "?"
+        bytes < 1024 -> "$bytes B"
+        bytes < 1024 * 1024 -> String.format(java.util.Locale.US, "%.1f KB", bytes / 1024.0)
+        else -> String.format(java.util.Locale.US, "%.1f MB", bytes / (1024.0 * 1024.0))
+    }
 
     fun merge(payload: ProbePayload, textMarkers: List<ZaiExtractedFile>): Merged {
         // path -> (source, content); insertion order = discovery order.

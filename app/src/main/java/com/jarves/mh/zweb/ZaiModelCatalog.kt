@@ -4,6 +4,19 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
+ * Result of driving the site's dropdown to a model. [success] means the
+ * label was read back and matches; otherwise [message] explains what the
+ * user sees instead (the read-only label fallback).
+ */
+data class ZaiModelPickOutcome(
+    val success: Boolean,
+    /** The label the page showed after the attempt (may be non-null even on failure). */
+    val model: String?,
+    /** Human-readable failure reason; null on success. */
+    val message: String?,
+)
+
+/**
  * Pure logic behind the Phase 1 model picker: parse the model list read from
  * chat.z.ai's own dropdown, decide which entry matches the current label,
  * and verify a selection by reading the label back after the click.

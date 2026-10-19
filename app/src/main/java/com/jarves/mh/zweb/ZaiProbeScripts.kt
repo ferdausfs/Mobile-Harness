@@ -451,6 +451,21 @@ object ZaiProbeScripts {
         """.trimIndent()
     }
 
+    /**
+     * Closes the model dropdown without picking: an outside `pointerdown`
+     * (the site's own bits-ui close path) plus an Escape keydown as backup.
+     * Harmless when nothing is open.
+     */
+    fun buildDismissModelMenuScript(): String = """
+        (function(){
+          var body=document.body||document.documentElement;
+          try{body.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,cancelable:true}));}catch(e){}
+          try{body.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',code:'Escape',keyCode:27,which:27,bubbles:true}));}catch(e){}
+          try{body.dispatchEvent(new KeyboardEvent('keyup',{key:'Escape',code:'Escape',keyCode:27,which:27,bubbles:true}));}catch(e){}
+          return JSON.stringify({ok:true});
+        })()
+    """.trimIndent()
+
     // ── Sign-in sheet automation (visible WebView) ──
     //
     // The sheet drives the chat.z.ai login UI. Every lookup goes through the

@@ -165,6 +165,9 @@ class ZaiWebEngine(
         try {
             loadChatPage(view, config)
             val ready = waitForComposer(view, config)
+            if (ready.composerReady && ready.blocked == PageBlock.NONE) {
+                publishModelLabel(view, config)
+            }
             if (ready.blocked == PageBlock.LOGIN) {
                 recordCheck(ZaiAuthProbeClassifier.ZaiCheckOutcome.LOGIN_PAGE, false) {
                     it.copy(
@@ -281,6 +284,11 @@ class ZaiWebEngine(
                 lastFiles = emptyList(),
                 lastFilesDir = null,
                 lastFinishedAtMillis = null,
+                liveThinking = null,
+                liveAnswer = null,
+                liveStepStatus = null,
+                livePhaseLabel = null,
+                liveUpdatedAtMillis = null,
             )
         }
         val view = ensureWebView() ?: return
@@ -385,6 +393,7 @@ class ZaiWebEngine(
 
                 // 3. Baseline probe, then inject + send.
                 val baseline = runStateProbe(view, config)?.optInt("assistantCount") ?: 0
+                publishModelLabel(view, config)
                 update { it.copy(runPhase = ZaiRunPhase.SENDING, runMessage = "Sending task to Z.ai…") }
                 val injectedRaw = view.evaluateJs(ZaiProbeScripts.buildInjectScript(config, prompt))
                 val injectedOk = runCatching {
@@ -427,6 +436,11 @@ class ZaiWebEngine(
                         timing = config.timing,
                     )
                     detectorState = newState
+                    // Phase 1 live visibility: read the page's thinking / partial
+                    // answer / tool status about once a second (the poll interval)
+                    // and stream it into the state. Purely additive — the finish
+                    // detector above is untouched.
+                    streamLiveStatus(view, config)
                     when (decision) {
                         ZaiFinishDetector.ZaiDecision.WAIT -> update { s ->
                             s.copy(
@@ -698,8 +712,162 @@ class ZaiWebEngine(
             captchaMarkerMatched = probe.optBoolean("captchaMatched"),
         )
 
+    /**
+     * Phase 1 live visibility: evaluates the live-status probe and publishes
+     * the bounded snapshot into the state. Never throws; a failed probe just
+     * leaves the previous snapshot in place (the card keeps its last view).
+     */
+    private suspend fun streamLiveStatus(view: WebView, config: ZaiWebConfig) {
+        val raw = view.evaluateJs(ZaiProbeScripts.buildLiveStatusScript(config)) ?: return
+        val live = ZaiLiveStatus.parse(raw) ?: return
+        update { current ->
+            current.copy(
+                liveThinking = live.thinking,
+                liveAnswer = live.answer,
+                liveStepStatus = live.stepStatus,
+                livePhaseLabel = live.phase.label.ifBlank { current.livePhaseLabel },
+                liveUpdatedAtMillis = System.currentTimeMillis(),
+            )
+        }
+    }
+
+    /** Drops the live snapshot (turn start / finish) so no stale text lingers. */
+    private fun clearLiveStatus() {
+        update {
+            it.copy(
+                liveThinking = null,
+                liveAnswer = null,
+                liveStepStatus = null,
+                livePhaseLabel = null,
+                liveUpdatedAtMillis = null,
+            )
+        }
+    }
+
+    /**
+     * Reads the site's own model label (best effort) and publishes it. The
+     * label NEVER changes anything in the page — read-only.
+     */
+    private suspend fun publishModelLabel(view: WebView, config: ZaiWebConfig) {
+        val raw = view.evaluateJs(ZaiProbeScripts.buildModelLabelScript(config)) ?: return
+        val model = ZaiModelCatalog.parseLabel(raw) ?: return
+        update { it.copy(currentModel = model) }
+    }
+
+    /**
+     * Opens the site's model dropdown in the hidden WebView, reads its option
+     * rows, caches them into the state and closes the dropdown again.
+     *
+     * Returns the cached list. An unreadable list returns emptyList() — the
+     * picker then falls back to the read-only label with a clear message.
+     * Never throws.
+     */
+    suspend fun refreshModelCatalog(): List<ZaiModelCatalog.ModelOption> {
+        val config = configLoader.load() ?: return emptyList()
+        val view = ensureWebView() ?: return emptyList()
+        update { it.copy(modelPickRunning = true) }
+        val result = runCatching { readModelCatalog(view, config) }.getOrDefault(emptyList())
+        // Always close whatever the automation opened so it can never cover
+        // the composer for the next turn.
+        view.evaluateJs(ZaiProbeScripts.buildDismissModelMenuScript())
+        update { s ->
+            s.copy(
+                modelPickRunning = false,
+                cachedModels = result.ifEmpty { s.cachedModels },
+            )
+        }
+        return result
+    }
+
+    private suspend fun readModelCatalog(view: WebView, config: ZaiWebConfig): List<ZaiModelCatalog.ModelOption> {
+        // The dropdown only renders on a live chat.z.ai page: make sure the
+        // composer is there before clicking the trigger.
+        val live = runStateProbe(view, config)
+        if (live == null || !live.optBoolean("inputFound")) {
+            loadChatPage(view, config)
+            val ready = waitForComposer(view, config)
+            if (!ready.composerReady || ready.blocked != PageBlock.NONE) return emptyList()
+        }
+        view.evaluateJs(ZaiProbeScripts.buildClickModelMenuScript(config))
+        delay(700)
+        val raw = view.evaluateJs(ZaiProbeScripts.buildModelOptionsScript(config))
+        val models = ZaiModelCatalog.parse(raw)
+        if (models.isNotEmpty()) publishModelLabel(view, config)
+        return models
+    }
+
+    /**
+     * Drives the site's own dropdown to [modelName] and verifies the pick by
+     * reading the label back. Never asks the user anything: on automation
+     * failure the outcome explains what happened and the app falls back to
+     * the read-only label.
+     */
+    suspend fun pickModel(modelName: String): ZaiModelPickOutcome {
+        val config = configLoader.load() ?: return ZaiModelPickOutcome(
+            success = false, model = null, message = "Selector config unavailable — cannot reach chat.z.ai.",
+        )
+        val view = ensureWebView() ?: return ZaiModelPickOutcome(
+            success = false, model = null, message = "The hidden browser is not available yet — try again.",
+        )
+        update { it.copy(modelPickRunning = true) }
+        val outcome = runCatching { driveModelPick(view, config, modelName) }
+            .getOrElse { ZaiModelPickOutcome(success = false, model = null, message = "Model switch failed: ${it.message}") }
+        view.evaluateJs(ZaiProbeScripts.buildDismissModelMenuScript())
+        update { it.copy(modelPickRunning = false) }
+        return outcome
+    }
+
+    private suspend fun driveModelPick(view: WebView, config: ZaiWebConfig, modelName: String): ZaiModelPickOutcome {
+        // 1. Read the catalog (also verifies the page is alive).
+        val models = readModelCatalog(view, config)
+        update { s -> s.copy(cachedModels = models.ifEmpty { s.cachedModels }) }
+        if (models.isEmpty()) {
+            return ZaiModelPickOutcome(
+                success = false,
+                model = null,
+                message = "chat.z.ai's model list could not be read. Showing the current model read-only.",
+            )
+        }
+        // 2. Resolve the request against the SITE's own options — never click blind.
+        val target = ZaiModelCatalog.resolve(models, modelName)
+        if (target == null) {
+            return ZaiModelPickOutcome(
+                success = false,
+                model = null,
+                message = "The site does not offer \"$modelName\". Available: ${models.joinToString { it.name }}.",
+            )
+        }
+        // 3. Click the row, then verify by reading the label back.
+        val clickedRaw = view.evaluateJs(ZaiProbeScripts.buildClickModelOptionScript(config, target.name))
+        val clickedOk = runCatching {
+            JSONObject((clickedRaw ?: "{}").unquoteEvalResult()).optBoolean("ok")
+        }.getOrDefault(false)
+        if (!clickedOk) {
+            return ZaiModelPickOutcome(
+                success = false,
+                model = null,
+                message = "Could not tap the \"${target.name}\" entry in the site's dropdown.",
+            )
+        }
+        delay(600)
+        val labelRaw = view.evaluateJs(ZaiProbeScripts.buildModelLabelScript(config))
+        val label = ZaiModelCatalog.parseLabel(labelRaw)
+        return if (ZaiModelCatalog.labelMatches(label, target.name)) {
+            update { it.copy(currentModel = label) }
+            ZaiModelPickOutcome(success = true, model = label, message = null)
+        } else {
+            ZaiModelPickOutcome(
+                success = false,
+                model = label,
+                message = "Switched the dropdown but the page still shows \"${label ?: "?"}\" — keeping the read-only label.",
+            )
+        }
+    }
+
     private suspend fun finishRun(view: WebView, config: ZaiWebConfig, test: Boolean) {
         update { it.copy(runPhase = ZaiRunPhase.EXTRACTING, runMessage = "Reading Z.ai's reply…") }
+        // The live streaming card hands over to the full reply now.
+        clearLiveStatus()
         val raw = view.evaluateJs(ZaiProbeScripts.buildExtractScript(config))
         val extraction = parseExtraction(raw)
         if (extraction == null) {

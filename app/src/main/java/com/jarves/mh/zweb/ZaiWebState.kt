@@ -48,6 +48,24 @@ data class ZaiWebUiState(
     /** Outcome of the last check of the PREVIOUS app run (session-persistence hint). */
     val previousRunOutcome: String? = null,
     val previousRunSignedIn: Boolean? = null,
+    // ── Phase 1 live visibility (streamed while a turn generates) ──
+    /** Bounded tail of the page's thinking/reasoning block; null = none visible yet. */
+    val liveThinking: String? = null,
+    /** Bounded tail of the newest assistant message's partial answer text. */
+    val liveAnswer: String? = null,
+    /** Latest tool/step status line from the page (e.g. "Searching the web…"). */
+    val liveStepStatus: String? = null,
+    /** User-facing live phase label ("Thinking" / "Answering" / ...). */
+    val livePhaseLabel: String? = null,
+    /** When the live snapshot was last refreshed (drives the card's staleness). */
+    val liveUpdatedAtMillis: Long? = null,
+    // ── Phase 1 model picker ──
+    /** Current model as the SITE's own label shows it. Null = never read. */
+    val currentModel: String? = null,
+    /** Cache of the site's own dropdown options (refreshed on demand). */
+    val cachedModels: List<ZaiModelCatalog.ModelOption> = emptyList(),
+    /** True while a pick/refresh automation is driving the hidden WebView. */
+    val modelPickRunning: Boolean = false,
 ) {
     val busy: Boolean
         get() = checkingConnection || testRunning ||

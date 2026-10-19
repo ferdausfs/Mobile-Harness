@@ -69,6 +69,32 @@ class ZaiWebController(private val appContext: Context, private val onState: (Za
         scope.launch { engine.runPrompt("", test = true) }
     }
 
+    /**
+     * Phase 1 model picker: reads the site's own dropdown options through the
+     * hidden WebView and caches them. [onResult] receives the fresh list
+     * (empty when the automation could not read it — keep the old cache).
+     */
+    fun refreshModelCatalog(onResult: (List<ZaiModelCatalog.ModelOption>) -> Unit = {}) {
+        val engine = ensureEngine() ?: run {
+            onResult(emptyList())
+            return
+        }
+        scope.launch { onResult(engine.refreshModelCatalog()) }
+    }
+
+    /**
+     * Phase 1 model picker: drives the site's own dropdown to [modelName] and
+     * verifies the pick by reading the label back. The outcome carries a
+     * human message for the fallback case (read-only label).
+     */
+    fun pickModel(modelName: String, onResult: (ZaiModelPickOutcome) -> Unit = {}) {
+        val engine = ensureEngine() ?: run {
+            onResult(ZaiModelPickOutcome(success = false, model = null, message = "The Z.ai engine is not started yet."))
+            return
+        }
+        scope.launch { onResult(engine.pickModel(modelName)) }
+    }
+
     fun cancel() {
         engine?.cancel()
     }

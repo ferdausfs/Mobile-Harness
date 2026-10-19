@@ -1,4 +1,6 @@
 import java.util.Properties
+import java.security.KeyStore
+import java.security.MessageDigest
 import org.gradle.api.tasks.Sync
 
 plugins {
@@ -11,6 +13,8 @@ val testSecrets = Properties().apply {
     val secretsFile = rootProject.file("test-secrets.properties")
     if (secretsFile.isFile) secretsFile.inputStream().use(::load)
 }
+/** Set from the buildTypes block below; read by releaseSafetyCheck (script-scope hand-off). */
+var releaseMinifyEnabled = true
 val playBuild = providers.gradleProperty("playBuild").orNull?.toBoolean() == true ||
     providers.gradleProperty("playFeasibility").orNull?.toBoolean() == true
 val privacyPolicyUrl = providers.gradleProperty("privacyPolicyUrl").orNull
@@ -154,8 +158,8 @@ android {
         targetSdk = if (playBuild) 36 else 28
         // Keep literal defaults so F-Droid's static manifest parser can detect
         // the tagged release. Gradle properties may still override Play builds.
-        versionCode = 31
-        versionName = "1.0.30"
+        versionCode = 32
+        versionName = "1.0.31"
         providers.gradleProperty("appVersionCode").orNull?.toIntOrNull()?.let { versionCode = it }
         providers.gradleProperty("appVersionName").orNull?.let { versionName = it }
 
@@ -205,6 +209,7 @@ android {
         }
         release {
             isMinifyEnabled = false
+            releaseMinifyEnabled = isMinifyEnabled
             if (hasUploadSigning) {
                 signingConfig = signingConfigs.getByName("upload")
             }
@@ -249,6 +254,62 @@ tasks.matching { it.name.contains("lint", ignoreCase = true) }
 
 tasks.matching { it.name.contains("Offline") && it.name.contains("lint", ignoreCase = true) }
     .configureEach { dependsOn(prepareOfflineRuntimeAssets) }
+
+// v1.0.31 release invariants (the "startup crash after update" report):
+//   1. NO R8 minification on the release build — the whole codebase relies on
+//      reflection-free but shrink-unsafe patterns (org.json + Kotlin defaults);
+//      enabling minify without a keep-rule audit is a release-only crash class.
+//   2. The signing cert must still be the never-rotate release cert
+//      (d07ba804…dccfe) — a rotated cert silently bricks every update path.
+// Runs automatically after :app:assembleOnlineRelease.
+val expectedReleaseCertSha256 = "d07ba804cfa95dd39083002628b65487d7ae99acab12cdfa61c5f42bca7dccfe"
+
+tasks.register("releaseSafetyCheck") {
+    group = "verification"
+    description = "Fails the release build when release invariants (no minify, never-rotate cert) are violated."
+    doLast {
+        check(!releaseMinifyEnabled) {
+            "release build type has minification enabled WITHOUT a keep-rule audit. " +
+                "The v1.0.31 hotfix analysis relies on isMinifyEnabled=false; enable it only with a full " +
+                "proguard audit (org.json models, vaults, agent bridges) and AGENT_LOG documentation."
+        }
+        val storePath = providers.environmentVariable("MH_UPLOAD_STORE_FILE").orNull
+        val storePass = providers.environmentVariable("MH_UPLOAD_STORE_PASSWORD").orNull
+        if (!storePath.isNullOrBlank() && !storePass.isNullOrBlank() && file(storePath).isFile) {
+            val keystoreFile = file(storePath)
+            val loaded = runCatching {
+                val ks = run {
+                    val jks = KeyStore.getInstance("JKS")
+                    try {
+                        keystoreFile.inputStream().use { jks.load(it, storePass.toCharArray()) }
+                        jks
+                    } catch (notJks: Exception) {
+                        val pkcs12 = KeyStore.getInstance("PKCS12")
+                        keystoreFile.inputStream().use { pkcs12.load(it, storePass.toCharArray()) }
+                        pkcs12
+                    }
+                }
+                val alias = ks.aliases().nextElement()
+                ks.getCertificate(alias)
+            }.getOrNull()
+            checkNotNull(loaded) { "Could not load the release keystore at $storePath" }
+            val sha256 = MessageDigest.getInstance("SHA-256")
+                .digest(loaded.encoded)
+                .joinToString("") { byte -> "%02x".format(byte) }
+            check(sha256.equals(expectedReleaseCertSha256, ignoreCase = true)) {
+                "RELEASE CERT ROTATED: $sha256 does not match the never-rotate cert " +
+                    "$expectedReleaseCertSha256 (d07ba804…dccfe). Existing installs can never update over this."
+            }
+            println("releaseSafetyCheck: cert OK (d07ba804…dccfe), minify off")
+        } else {
+            println("releaseSafetyCheck: minify off; signing env not set — cert check skipped (unsigned/other pipeline)")
+        }
+    }
+}
+
+tasks.matching { it.name == "assembleOnlineRelease" }.configureEach {
+    finalizedBy("releaseSafetyCheck")
+}
 
 tasks.register("playReadinessCheck") {
     group = "verification"

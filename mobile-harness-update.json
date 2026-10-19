@@ -1,12 +1,12 @@
 {
-  "versionCode": 29,
-  "versionName": "1.0.28",
-  "notes": "New: Settings > Tokens - your own token vault. Add named tokens for GitHub, Cloudflare, Vercel, Firebase, Supabase, npm or a custom env var name. Values are encrypted with the Android keystore, shown only masked, and never sent to any model: prompts to chat.z.ai, transcripts, crash reports, logs and clipboard exports have token values (and common shapes like ghp_/glpat-) replaced by ***. A Test token button runs a read-only provider call with a plain-language result. After every task that had tokens enabled you get a Rotate-these-tokens card and notification with a per-provider button to the token management page; badges persist until you tap Rotated or replace the token, with an optional auto-disable after each task. Nothing is ever deleted without your tap.",
+  "versionCode": 30,
+  "versionName": "1.0.29",
+  "notes": "New: Z.ai tasks keep running with the screen off. A dataSync foreground service holds the engine open during generation: persistent notification with the live phase/tool step/elapsed and a working Stop button, plus result notifications (answered / needs attention / ended). Android's 6-hour dataSync limit is handled gracefully with a checkpoint + notify before it hits. The chat-engine task queue is now persisted: tasks killed mid-run are reported on the next start, and a task queued within 10 minutes is re-sent automatically once you are signed in again. CLI agents unchanged. Same key, one-tap update.",
   "artifacts": {
     "online": {
-      "url": "https://github.com/ferdausfs/Mobile-Harness/releases/download/v1.0.28/mobile-harness-online-v1.0.28.apk",
-      "sha256": "60d27cb8f43ad27d4b188dbaacd3bf3805000ab85e583e61568af89852179bb3",
-      "sizeBytes": 88493899
+      "url": "https://github.com/ferdausfs/Mobile-Harness/releases/download/v1.0.29/mobile-harness-online-v1.0.29.apk",
+      "sha256": "c638c6b18873a760d5e4833287a8b91b22ca6f288d35ad2d51a69dfe88d79eda",
+      "sizeBytes": 88525963
     }
   }
 }

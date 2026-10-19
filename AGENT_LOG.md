@@ -4,6 +4,35 @@ Newest entries prepended. Never delete entries.
 
 ---
 
+## 2026-10-19 — v1.0.30 release: "Make the Z.ai agent tab look and work like the Antigravity tab" — shared card pieces (no forks), site-driven model tile + Sync, ONLY-real thinking controls, live task card (versionCode 31)
+
+- **Agent/tool**: Z.ai (GLM) agent session, direct repo work on `ferdausfs/Mobile-Harness` branch `main`. One concern per user order. NOTE: the user's message re-listed the roadmap (tokens vault, foreground service, RUN loop) — tokens vault and the foreground service were ALREADY shipped earlier in this session as v1.0.28 and v1.0.29; this release covers the tab-parity concern, and the remaining roadmap item (autonomous RUN loop) follows as v1.0.31.
+
+### Live-site evidence (2026-10-19, headless Chromium 412×915 + prod bundle prod-fe-1.1.107)
+- **Model system — previously verified (v1.0.27) and unchanged**: `button.modelSelectorButton` label, dropdown rows (GLM-5.3-Flash / GLM-5.3 / GLM-5.2 live-read), drive + label-read-back.
+- **Thinking controls — strings bundle-verified, DOM shape GUESSED (defensively)**: the prod bundle contains a real "Deep Think" menu (props `autoThink` boolean, `reasoningEffort` default "max", `effortLevels` low/high/max per-model via `capabilities.reasoning_effort`, plus a "Reasoning Effort" switch). The guest DOM renders NO such control (live probe: zero matches for Deep Think/Thinking/Reasoning/Search anywhere signed-out) — the control exists only signed-in on capable models. Therefore: the read script probes defensively over bits-ui menu containers, and the UI renders the section ONLY when a read actually returned rows. Signed-out → hidden. This is the no-fake-controls rule working as designed; the DOM shape gets its first real verification on the user's signed-in phone.
+- **Account info**: the session probe payload now carries `account:{name,email}` (the signed-in user's own fields, what the site renders in its UI). Purpose-scoped: UI state only; the Diagnostics summary and every log path remain presence-only.
+
+### What changed (each commit separately revertable)
+| Concern | Commit | What |
+|------|--------|------|
+| config + pure | `0eb64ff` | selectors.json **v4** (thinkMenuButton/thinkMenuContent/thinkMenuItem, all optional; old configs still parse — test-pinned). `ZaiProbeScripts` +3 builders (click trigger / read rows with aria-checked+data-state / click row by JSON-escaped label) — synchronous IIFEs, never a Promise. Pure `ZaiThinkControls`: menu rows → `Controls(autoThink, effort, effortOptions)`, glyph-tolerant effort parsing, caption strings in the Antigravity style, verify-by-reread, empty/garbage → null (hide). 9 tests. |
+| engine | `5085d0d` | Auth probe payload + `account:{name,email}` (classifier carries to verdict; UI-state only). Engine: publishes accountEmail/accountName on sign-in (disconnect clears); `refreshThinkControls()` (open menu → read rows → dismiss; not-found is valid); `driveThinkControls(autoThink, effort)` (tap toggle/effort row → VERIFY by re-reading → human message on mismatch, read-only fallback). ViewModel: `zaiSyncSiteState` (one Sync = model list + controls), `zaiSetAutoThink`, `zaiSetEffort`. |
+| UI | `bd8bb65` | **AgentCardPieces.kt**: the Antigravity card's building blocks extracted (AgentAccountRow with Disconnect TEXT button, AgentSyncLabel, AgentModelTile, AgentSegmentedCapsule, AgentTestConnectionButton, AgentFooterNote) and **AgentAntigravityCard refactored to render through them** — byte-identical visuals, one implementation. **AgentZaiCard restructured** to the Antigravity order: account card → Active Intelligence Model + Sync → model tile (opens the picker; drive+verify+persist from v1.0.27) → Thinking section (only when the site offers it: Deep Think switch + segmented effort) → full-width Test connection → notices → Project chat engine switch → New task box (progress row now the live card: collapsible Thinking + partial answer + step + phase/elapsed + Stop) → reply area → footer ("…cannot run commands itself unless the autonomous RUN mode is enabled") → Diagnostics. Header subtitle "Z.ai Web · <model>". Engine picker lists the site's models (4 rows + all-models) like Antigravity's; tab auto-syncs once after first sign-in. |
+| version | (this commit) | v1.0.30 / versionCode 31; changelog `31.txt`; manifest sha256 `6e289372…9622`, 88,590,711 bytes. |
+
+### Verification
+- `:app:testOnlineDebugUnitTest` → **453 tests, 0 failures, 0 skipped** (442 + 11 new: think-controls mapping 9, config v4 1, think scripts contract 1).
+- `:app:assembleOnlineRelease` → BUILD SUCCESSFUL; aapt: versionCode '31' versionName '1.0.30'; APK 88,590,711 bytes, sha256 `6e28937267958efe67aeb9a336461e405dbbd8bae49c2c0219aa6ec0afa69622`; apksigner cert `d07ba804…dccfe` — identical release line, NOT rotated.
+- **Honesty ledger — verified here**: the Antigravity refactor is visual-identical-by-construction (same parameters, extracted), all pure mapping verified on the JVM, release + cert equality, model-side selectors previously live-verified. **NOT verifiable here (no device/account)**: the Deep Think menu DOM on a signed-in page (bundle strings only — the read script is defensive and a not-found is a valid, section-hiding outcome), the account email display (needs a real session), the tab's live card against a real signed-in generation (same engine path as the already-shipped chat card).
+
+### User test script (on the phone, after installing v1.0.30)
+1. Open the Z.ai tab — the header must read "Z.ai Web · <model>" once the connection check completes.
+2. The account card: your email/name once signed in, "Connected with chat.z.ai", and a "Disconnect" TEXT button (no more logout icon).
+3. "Active Intelligence Model" + Sync: tap Sync → the site's model list is read; the tile shows the current model with the same dropdown-card look; tap it → the model sheet lists the site's options; pick one → toast "verified on chat.z.ai" and the tile + header update. Restart the app: the pick is remembered.
+4. Thinking section: appears ONLY if the site actually shows its Deep Think controls for your model (signed-in). If shown: toggle Deep Think and pick an effort — each change is verified by re-reading the site's menu (a failure keeps the read state and explains itself in a toast). If the site shows none, the section is simply absent — that is correct, not a bug.
+5. Send a task from the tab's "New task" box: the progress row must show the live Thinking (collapsible) + partial answer + phase/elapsed + Stop, like the project chat.
+6. The engine picker in the project chat header now lists the site's models directly.
 ## 2026-10-19 — v1.0.29 release: Phase 3 of the autonomous Z.ai agent — dataSync foreground service (screen-off execution, 6h-limit checkpoint) + persisted task queue with clean kill reporting/resume (versionCode 30)
 
 - **Agent/tool**: Z.ai (GLM) agent session, direct repo work on `ferdausfs/Mobile-Harness` branch `main`. PHASE 3 of the four-phase plan; Phases 1–2 (v1.0.27/28) shipped earlier in this session. Phase 4 (autonomous RUN loop) follows.

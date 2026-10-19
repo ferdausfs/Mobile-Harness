@@ -76,6 +76,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Android
@@ -376,6 +377,7 @@ fun PocketDevApp(viewModel: MainViewModel = viewModel()) {
             onZaiKeepBothFile = viewModel::zaiKeepBothFile,
             onZaiRereadReply = viewModel::zaiReattachReply,
             onZaiSyncFilesNow = viewModel::zaiSyncFilesNow,
+            onZaiPasteImportReply = viewModel::zaiImportPastedReply,
             onZaiOpenSyncedFile = viewModel::zaiOpenSyncedFile,
             onZaiOpenPreview = viewModel::zaiOpenPreview,
             onDismissZaiSyncReport = viewModel::zaiDismissSyncReport,
@@ -3936,6 +3938,7 @@ private fun WorkspaceScreen(
     onZaiKeepBothFile: (String) -> Unit,
     onZaiRereadReply: () -> Unit,
     onZaiSyncFilesNow: () -> Unit,
+    onZaiPasteImportReply: (String) -> Unit,
     onZaiOpenSyncedFile: (String) -> Unit,
     onZaiOpenPreview: () -> Unit,
     onDismissZaiSyncReport: () -> Unit,
@@ -4237,6 +4240,7 @@ private fun WorkspaceScreen(
                     onZaiSignIn = onZaiSignIn,
                     onRereadReply = onZaiRereadReply,
                     onSyncFilesNow = onZaiSyncFilesNow,
+                    onPasteImportReply = onZaiPasteImportReply,
                     onOpenSyncedFile = onZaiOpenSyncedFile,
                     onOpenPreview = {
                         onZaiOpenPreview()
@@ -4539,6 +4543,9 @@ private fun FilesTab(
                 }
             }
         }
+        if (loading) {
+            item(key = "files-skeleton") { FilesSkeletonRows() }
+        }
         if (!loading && files.isEmpty()) {
             item { EmptyState(Icons.Default.Folder, "No files yet", "Ask your coding agent to create something in this project.") }
         }
@@ -4648,6 +4655,7 @@ private fun ChatTab(
     onZaiSignIn: () -> Unit = {},
     onRereadReply: () -> Unit = {},
     onSyncFilesNow: () -> Unit = {},
+    onPasteImportReply: (String) -> Unit = {},
     onOpenSyncedFile: (String) -> Unit = {},
     onOpenPreview: () -> Unit = {},
     onDismissZaiSyncReport: () -> Unit = {},
@@ -4860,7 +4868,19 @@ private fun ChatTab(
             ) {
                 // v1.0.33: manual file sync — pull the files Z.ai wrote on the
                 // site into this project, any time (also right after a timeout).
+                // v1.0.35: manual fallback — paste Z.ai's reply text and import
+                // its FILE: blocks through the standard review pipeline.
                 if (engineTitle == ZaiChatPromptBuilder.ZAI_ENGINE_TITLE) {
+                    var showPasteImport by rememberSaveable { mutableStateOf(false) }
+                    if (showPasteImport) {
+                        ZaiPasteImportDialog(
+                            onDismiss = { showPasteImport = false },
+                            onImport = { text ->
+                                showPasteImport = false
+                                onPasteImportReply(text)
+                            },
+                        )
+                    }
                     Row(
                         modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp),
                         horizontalArrangement = Arrangement.End,
@@ -4888,6 +4908,24 @@ private fun ChatTab(
                                 Spacer(Modifier.width(6.dp))
                                 Text("Sync files from Z.ai", fontSize = 12.sp)
                             }
+                        }
+                        // v1.0.35: never fully blocked by a capture failure —
+                        // paste Z.ai's reply text and import its files.
+                        TextButton(
+                            onClick = {
+                                haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                showPasteImport = true
+                            },
+                            enabled = !isRunning,
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                        ) {
+                            Icon(
+                                Icons.Default.ContentPaste,
+                                contentDescription = null,
+                                modifier = Modifier.size(15.dp),
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text("Paste reply", fontSize = 12.sp)
                         }
                     }
                 }
@@ -5470,6 +5508,9 @@ private fun FilesTab(files: List<WorkspaceEntry>, loading: Boolean, onRefresh: (
             }
             Spacer(Modifier.height(8.dp))
         }
+        if (loading) {
+            item(key = "files-skeleton") { FilesSkeletonRows() }
+        }
         if (!loading && files.isEmpty()) {
             item { EmptyState(Icons.Default.Folder, "No files yet", "Ask your coding agent to create something in this project.") }
         }
@@ -5769,6 +5810,50 @@ private fun Uri.isLoopbackPreviewUrl(): Boolean =
 
 private fun blockedPreviewResponse(): WebResourceResponse =
     WebResourceResponse("text/plain", "UTF-8", 403, "Blocked", emptyMap(), ByteArrayInputStream(ByteArray(0)))
+
+
+/**
+ * v1.0.35 polish: skeleton rows for the Files tab while the workspace is
+ * being read. Deliberately STATIC shapes (alpha only, no infinite shimmer):
+ * bounded height, dark-mode aware via theme colors, nothing heavy anywhere
+ * near the startup path — the files list loads off the main thread already.
+ */
+@Composable
+private fun FilesSkeletonRows(rows: Int = 5) {
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        repeat(rows) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    Modifier
+                        .size(20.dp)
+                        .background(
+                            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+                            RoundedCornerShape(6.dp),
+                        ),
+                )
+                Spacer(Modifier.width(11.dp))
+                Box(
+                    Modifier
+                        .weight(1f)
+                        .heightIn(min = 13.dp)
+                        .background(
+                            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                            RoundedCornerShape(6.dp),
+                        ),
+                )
+                Spacer(Modifier.width(10.dp))
+                Box(
+                    Modifier
+                        .size(width = 30.dp, height = 11.dp)
+                        .background(
+                            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+                            RoundedCornerShape(5.dp),
+                        ),
+                )
+            }
+        }
+    }
+}
 
 @Composable
 private fun EmptyState(icon: ImageVector, title: String, body: String) {

@@ -68,6 +68,8 @@ import com.jarves.mh.update.AppUpdater
 import com.jarves.mh.zweb.ZaiWebController
 import com.jarves.mh.zweb.ZaiWebUiState
 import com.jarves.mh.zweb.ZaiChatPromptBuilder
+import com.jarves.mh.zweb.ZaiChatId
+import com.jarves.mh.zweb.ZaiChatIdStore
 import com.jarves.mh.zweb.ZaiChatTurnPolicy
 import com.jarves.mh.zweb.ZaiChatTurnPresenter
 import com.jarves.mh.zweb.ZaiFileSync
@@ -4251,6 +4253,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      */
     private var zaiPageConversationChatId: String? = null
 
+    /**
+     * v1.0.35: per-project Z.ai conversation memory (appChatId → zaiChatId),
+     * persisted at filesDir/zweb/chat-ids.json. Captured the moment the id
+     * appears (live poll / finish extraction / probe), reused for every sync
+     * and continue-turn so sync NEVER depends on the current URL.
+     * Lazy + IO-constructed: nothing on the startup path touches it.
+     */
+    private val zaiChatIdStore: ZaiChatIdStore by lazy {
+        ZaiChatIdStore(getApplication<Application>().applicationContext)
+    }
+
     /** Whether the pending changes in the Changes tab came from a Z.ai apply. */
     private var lastZaiApplyActive = false
 
@@ -4792,7 +4805,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             )
         }
         startZaiForeground("Resuming queued task: ${entry.title}")
-        zaiWebController.runChatTurn(entry.prompt, continueChat = entry.continueChat)
+        viewModelScope.launch(backgroundGuard) {
+            zaiWebController.runChatTurn(
+                entry.prompt,
+                continueChat = entry.continueChat,
+                storedChatId = withContext(Dispatchers.IO) { zaiChatIdStore.get(entry.chatId) },
+            )
+        }
     }
 
     private fun markZaiQueueRunning(prompt: String, continueChat: Boolean, projectId: String, chatId: String, title: String) {
@@ -4958,7 +4977,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 startZaiForeground("Sending: ${requestText.take(60)}")
             }
-            zaiWebController.runChatTurn(safePrompt, continueChat = !decision.freshConversation)
+            zaiWebController.runChatTurn(
+                safePrompt,
+                continueChat = !decision.freshConversation,
+                storedChatId = withContext(Dispatchers.IO) { zaiChatIdStore.get(chatId) },
+            )
         }
     }
 
@@ -5341,8 +5364,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _state.update {
             it.copy(liveProcess = listOf(ActivityItem("Z.ai is working", logLine, false)))
         }
-        zaiWebController.runChatTurn(safeMessage, continueChat = true)
+        // v1.0.35: loop rounds continue the SAME Z.ai conversation — the id the
+        // engine captured during this session is the correct reopen/sync target.
+        zaiWebController.runChatTurn(
+            safeMessage,
+            continueChat = true,
+            storedChatId = zaiWebControllerStatePageChatId(),
+        )
     }
+
+    /** v1.0.35: the engine's last captured conversation id (same conversation). */
+    private fun zaiWebControllerStatePageChatId(): String? = _state.value.zaiWeb.pageChatId
 
     /** Appends one redacted outcome row to the live activity log. */
     private fun appendRunLog(turn: ZaiActiveTurn, iteration: Int, outcome: ZaiRunExecutor.RunOutcome) {
@@ -5452,7 +5484,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 persistMessages()
                 reportZaiBudget(built.report)
-                zaiWebController.runChatTurn(safePrompt, continueChat = true)
+                zaiWebController.runChatTurn(
+                    safePrompt,
+                    continueChat = true,
+                    storedChatId = zaiWebControllerStatePageChatId(),
+                )
             }
         }
     }
@@ -5463,6 +5499,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         zaiTurnContext = null
         zaiPageConversationChatId = turn.chatId
         zaiTimedOutTurn = null
+        // v1.0.35: persist the conversation id captured during this turn so the
+        // project keeps ONE Z.ai conversation and every later sync targets it —
+        // never the (unreliable) current URL.
+        current.pageChatId?.takeIf { ZaiChatId.isValid(it) }?.let { captured ->
+            viewModelScope.launch(backgroundGuard) {
+                zaiChatIdStore.upsert(turn.chatId, captured, System.currentTimeMillis(), "turn-finish")
+            }
+        }
         // Phase 3: queue entry DONE + the "answer ready" notification.
         markZaiQueueTerminal(ZaiRunPhase.DONE)
         stopZaiForeground(
@@ -5616,17 +5660,107 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         if (_state.value.isRunning) return
         _state.update { it.copy(zaiSyncRunning = true) }
-        zaiWebController.syncFilesFromSite { report ->
-            _state.update { it.copy(zaiSyncRunning = false, zaiSyncReport = report) }
-            if (report.readablePaths.isEmpty()) {
-                val note = when {
-                    !report.probeOk -> "Z.ai's file data could not be read right now. Try again once the site finishes."
-                    else -> "Z.ai wrote ${report.wroteCount} file(s) but none could be read just now. Try again shortly."
+        viewModelScope.launch(backgroundGuard) {
+            // v1.0.35: the project's PERSISTED conversation id goes with the
+            // sync — it no longer matters what the hidden page's URL shows.
+            val stored = withContext(Dispatchers.IO) { zaiChatIdStore.get(chatId) }
+            zaiWebController.syncFilesFromSite(stored) { report ->
+                _state.update { it.copy(zaiSyncRunning = false, zaiSyncReport = report) }
+                // The probe is a capture chance too — persist what it found.
+                _state.value.zaiWeb.pageChatId?.takeIf { ZaiChatId.isValid(it) }?.let { captured ->
+                    viewModelScope.launch(backgroundGuard) {
+                        zaiChatIdStore.upsert(chatId, captured, System.currentTimeMillis(), "manual-sync")
+                    }
                 }
-                _state.update { it.copy(toastMessage = note) }
-                return@syncFilesFromSite
+                if (report.readablePaths.isEmpty()) {
+                    // v1.0.35 honesty: surface the EXACT reason, never a vague
+                    // "try again" — the failure reason is redacted by design.
+                    val note = report.failureReason
+                        ?: when {
+                            !report.probeOk -> "Z.ai's file data could not be read right now. Try again once the site finishes."
+                            else -> "Z.ai wrote ${report.wroteCount} file(s) but none could be read just now. Try again shortly."
+                        }
+                    _state.update { it.copy(toastMessage = note) }
+                    return@syncFilesFromSite
+                }
+                buildPendingApplyFromSiteFiles(project, chatId, "Files synced from chat.z.ai — review before applying.")
             }
-            buildPendingApplyFromSiteFiles(project, chatId, "Files synced from chat.z.ai — review before applying.")
+        }
+    }
+
+    /**
+     * v1.0.35 manual fallback — “Paste reply / import files”: parses FILE:
+     * blocks out of reply text the USER pasted (copied from the website when
+     * the app could not read it) and feeds the standard review pipeline.
+     * Sanitizer, conflict choices, undo and size caps are exactly the same as
+     * for automatic sync — the paste only replaces the SOURCE of the text.
+     */
+    fun zaiImportPastedReply(text: String) {
+        val project = _state.value.activeProject
+        val chatId = _state.value.activeChatId
+        if (project == null || chatId == null) {
+            _state.update { it.copy(toastMessage = "Open a project chat first — importing needs a project to write into.") }
+            return
+        }
+        if (_state.value.isRunning) return
+        if (text.isBlank()) {
+            _state.update { it.copy(toastMessage = "Paste Z.ai's reply text first.") }
+            return
+        }
+        viewModelScope.launch(backgroundGuard) {
+            val parse = ZaiFileExtractor.parseCaptured(text, emptyList())
+            if (parse.files.isEmpty()) {
+                withContext(Dispatchers.Main) {
+                    _state.update {
+                        it.copy(
+                            toastMessage = "No files found in the pasted text — " +
+                                "${parse.unmatchedMarkers.size} FILE: marker(s) without usable content, " +
+                                "${parse.invalidPaths.size} unsafe path(s). Ask Z.ai to answer with “FILE: <path>” blocks.",
+                        )
+                    }
+                }
+                return@launch
+            }
+            // Keep the pasted text as the captured reply of record so Re-read /
+            // manual Sync keep working from it (bounded like every capture).
+            withContext(Dispatchers.Main) {
+                _state.update { current ->
+                    current.copy(zaiWeb = current.zaiWeb.copy(lastReply = text.take(200_000)))
+                }
+            }
+            val workspace = projectWorkspaceRoot(project)
+            val plan = withContext(Dispatchers.IO) {
+                ZaiWorkspaceApply.plan(parse.files, workspace) { before, after ->
+                    zaiCheckpoints.buildDiffLines(before, after)
+                }
+            }
+            withContext(Dispatchers.Main) {
+                if (!plan.hasWork && plan.rejected.isEmpty()) {
+                    _state.update {
+                        it.copy(
+                            toastMessage = "Everything in the pasted reply is already identical in the project — nothing to apply.",
+                            zaiAppliedPaths = plan.unchanged,
+                        )
+                    }
+                    return@withContext
+                }
+                val marker = ChatMessage(fromUser = false, text = "Files imported from your pasted reply — review before applying.")
+                _state.update { current ->
+                    current.copy(
+                        zaiWeb = current.zaiWeb.copy(lastFiles = parse.files),
+                        messages = current.messages + marker,
+                        zaiPendingApply = ZaiPendingApply(
+                            projectId = project.id,
+                            chatId = chatId,
+                            messageId = marker.id,
+                            files = plan.files,
+                            rejected = plan.rejected,
+                            unchanged = plan.unchanged,
+                        ),
+                    )
+                }
+                persistMessages()
+            }
         }
     }
 

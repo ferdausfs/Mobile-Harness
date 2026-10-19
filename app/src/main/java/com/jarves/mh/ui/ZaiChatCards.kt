@@ -34,9 +34,11 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -306,8 +308,13 @@ fun ZaiFileReviewCard(
                             modifier = Modifier.fillMaxWidth(),
                         ) {
                             Column(
+                                // v1.0.35: bounded before scroll (the review card
+                                // lives in a chat LazyColumn item — unbounded height;
+                                // an unbound verticalScroll here is the same crash
+                                // class as the v1.0.34 thinking-block crash).
                                 Modifier
                                     .fillMaxWidth()
+                                    .heightIn(max = 260.dp)
                                     .verticalScroll(rememberScrollState())
                                     .padding(vertical = 4.dp),
                             ) {
@@ -476,6 +483,32 @@ fun ZaiFileSyncReportCard(
                         Modifier.padding(9.dp),
                         fontSize = 11.sp,
                         color = amberDark,
+                    )
+                }
+            }
+
+            // v1.0.35 honesty: the EXACT reason nothing could be read —
+            // redacted by construction (no reply content ever enters it).
+            // Fades in (static under reduced motion); the AnimatedVisibility
+            // wraps a plain Text, so it is safe inside the LazyColumn item —
+            // no scrollable, no unbounded measurement (the v1.0.34 crash class).
+            androidx.compose.animation.AnimatedVisibility(
+                visible = report.failureReason != null && report.readablePaths.isEmpty() && !syncRunning,
+                enter = if (reducedMotion) androidx.compose.animation.EnterTransition.None else
+                    androidx.compose.animation.fadeIn() + androidx.compose.animation.expandVertically(),
+                exit = if (reducedMotion) androidx.compose.animation.ExitTransition.None else
+                    androidx.compose.animation.fadeOut(),
+            ) {
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(
+                        "Why: ${report.failureReason.orEmpty()}",
+                        Modifier.padding(9.dp),
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
             }
@@ -693,10 +726,16 @@ fun ZaiLiveProcessCard(
                 ) {
                     Text(
                         thinking,
+                        // v1.0.35: heightIn MUST precede verticalScroll — the card
+                        // renders inside LazyColumn items (infinite max height), and
+                        // a scroll modifier measured with unbounded height throws
+                        // IllegalStateException (the v1.0.34 crash). The bound must
+                        // sit BEFORE the scroll in the chain so the scroll node
+                        // itself receives bounded constraints.
                         modifier = Modifier
                             .fillMaxWidth()
-                            .verticalScroll(rememberScrollState())
                             .heightIn(max = 180.dp)
+                            .verticalScroll(rememberScrollState())
                             .padding(8.dp),
                         fontSize = 11.sp,
                         lineHeight = 15.sp,
@@ -1289,4 +1328,45 @@ fun ZaiRunReportCard(
             }
         }
     }
+}
+
+/**
+ * v1.0.35 manual fallback — "Paste reply / import files". When the hidden
+ * page's reply could not be captured (site re-render, navigation, timeout),
+ * the user pastes Z.ai's reply text here and the app parses its FILE: blocks
+ * through the SAME parser + sanitizer + conflict pipeline as automatic sync.
+ * Never a blocker: a reply with no FILE: blocks explains itself honestly.
+ */
+@Composable
+fun ZaiPasteImportDialog(
+    onDismiss: () -> Unit,
+    onImport: (String) -> Unit,
+) {
+    var text by androidx.compose.runtime.saveable.rememberSaveable { androidx.compose.runtime.mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Paste Z.ai's reply", fontWeight = FontWeight.SemiBold, fontSize = 16.sp) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    "Copy the reply from chat.z.ai and paste it below. The app reads its FILE: <path> blocks and offers the files for review — the same safety rules apply.",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                OutlinedTextField(
+                    value = text,
+                    onValueChange = { text = it.take(200_000) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 140.dp, max = 320.dp),
+                    placeholder = { Text("FILE: test/hello.txt …", fontSize = 12.sp) },
+                    textStyle = LocalTextStyle.current.copy(fontFamily = FontFamily.Monospace, fontSize = 12.sp),
+                )
+            }
+        },
+        confirmButton = {
+            Button(onClick = { onImport(text) }, enabled = text.isNotBlank()) { Text("Import files") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
 }

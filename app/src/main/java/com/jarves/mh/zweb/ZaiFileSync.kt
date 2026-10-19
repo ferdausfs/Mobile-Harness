@@ -257,6 +257,19 @@ object ZaiFileSync {
         else -> String.format(java.util.Locale.US, "%.1f MB", bytes / (1024.0 * 1024.0))
     }
 
+    /**
+     * Merges every file source into one plan.
+     *
+     * v1.0.35 priority (the user's explicit order — reply first, site second):
+     *  1. FILE: blocks parsed from the CAPTURED REPLY text (the model's own
+     *     announcement of its deliverables; the parser already resolved code
+     *     blocks through the fenced/pairing/plain tiers),
+     *  2. the site's own versions storage for that chat id,
+     *  3. inline Write tool calls,
+     *  4. DOM-visible code blocks ride inside tier 1 (parseCaptured).
+     * A path already claimed by a higher source is never overwritten — the
+     * site data only FILLS the gaps.
+     */
     fun merge(payload: ProbePayload, textMarkers: List<ZaiExtractedFile>): Merged {
         // path -> (source, content); insertion order = discovery order.
         val files = LinkedHashMap<String, Pair<Source, String>>()
@@ -279,7 +292,15 @@ object ZaiFileSync {
             files[path] = source to content
         }
 
-        // 1. The site's own version storage is the FINAL sandbox state — wins.
+        // 1. FILE: blocks from the CAPTURED REPLY text — the model's own
+        //    deliberate announcement of its deliverables — win (v1.0.35, the
+        //    user's explicit source order: reply text > site data > DOM).
+        textMarkers.forEach { marker ->
+            put(marker.path, Source.TEXT_MARKER, marker.content)
+        }
+
+        // 2. The site's own version storage is the FINAL sandbox state — fills
+        //    every path the reply text did not already carry.
         payload.versionFiles.forEach { vf ->
             val path = projectRelativePath(vf.rawKey, stripDeliverablesDir = true)
             if (path == null) {
@@ -294,7 +315,7 @@ object ZaiFileSync {
             }
         }
 
-        // 2. Write tool calls carry the full content inline.
+        // 3. Write tool calls carry the full content inline.
         payload.writes.forEach { w ->
             val path = projectRelativePath(w.rawPath, stripDeliverablesDir = true)
             if (path == null) {
@@ -309,19 +330,11 @@ object ZaiFileSync {
             }
         }
 
-        // 3. Edits change files without carrying the full content: if the
-        //    versions store did not hand us the file, it is honestly unreadable.
+        // 4. Edits change files without carrying the full content: if nothing
+        //    above handed us the file, it is honestly unreadable.
         payload.edits.forEach { e ->
             val path = projectRelativePath(e.rawPath, stripDeliverablesDir = true) ?: return@forEach
             if (!files.containsKey(path)) unreadable += path
-        }
-
-        // 4. FILE: text markers stay the lowest-priority source (still fully
-        //    supported — the model may paste files it did NOT sandbox).
-        textMarkers.forEach { marker ->
-            if (!files.containsKey(marker.path)) {
-                put(marker.path, Source.TEXT_MARKER, marker.content)
-            }
         }
 
         val wrote = LinkedHashSet<String>()

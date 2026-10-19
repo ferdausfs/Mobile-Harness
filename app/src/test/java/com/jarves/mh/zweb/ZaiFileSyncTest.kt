@@ -145,14 +145,29 @@ class ZaiFileSyncTest {
     }
 
     @Test
-    fun `text markers are the lowest priority and never override site files`() {
+    fun `reply text FILE markers win over site files and the site fills the gaps`() {
+        // v1.0.35 source order (user DO): 1) captured reply text, 2) site data.
         val merged = ZaiFileSync.merge(
             payload(writes = listOf(SiteWrite("a.txt", "site version"))),
             listOf(ZaiExtractedFile("a.txt", "", "text version"), ZaiExtractedFile("b.txt", "", "only in text")),
         )
         assertEquals(2, merged.files.size)
-        assertEquals("site version", merged.files.first { it.path == "a.txt" }.content)
+        assertEquals("text version", merged.files.first { it.path == "a.txt" }.content)
         assertEquals("only in text", merged.files.first { it.path == "b.txt" }.content)
+    }
+
+    @Test
+    fun `site data still fills paths the reply text never mentioned`() {
+        val merged = ZaiFileSync.merge(
+            payload(
+                writes = listOf(SiteWrite("download/a.txt", "from tool")),
+                versionFiles = listOf(SiteVersionFile("download/a.txt", "")),
+                versionContents = mapOf("download/a.txt" to "from versions"),
+            ),
+            listOf(ZaiExtractedFile("other.txt", "", "from reply")),
+        )
+        assertEquals("from reply", merged.files.first { it.path == "other.txt" }.content)
+        assertEquals("from versions", merged.files.first { it.path == "a.txt" }.content)
     }
 
     @Test

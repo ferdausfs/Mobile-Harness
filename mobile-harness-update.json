@@ -1,12 +1,12 @@
 {
-  "versionCode": 33,
-  "versionName": "1.0.32",
-  "notes": "Phase 4: the Z.ai chat engine is now a fully autonomous agent. New Autonomy control on the Z.ai tab (Off / Ask each / Safe auto / Full auto - Full auto is the default): RUN: commands from the model execute in your project's private Linux workspace and the results flow back into the same conversation until DONE. Live in the chat: a collapsible Commands-run activity log, an approval card when commands wait for you (Ask each / Safe auto), and a final report card (rounds, commands, refusals, stop reason, summary). Safety: hard rails refuse destructive commands without asking (rm -rf outside the workspace, force pushes, history rewrites, remote deletions, system commands, fork bombs, curl|sh, env/token printing) with bypass hardening; token values travel only as environment variables (git uses a process-scoped credential helper - never .git/config or remote URLs); command output is redacted and tail-bounded before returning to chat.z.ai; an untrusted-data rule is taught to the model; budgets cap the loop (40 rounds, 120s per command, total-output cap, no-progress detection). The loop never touches startup and is fully crash-safe.",
+  "versionCode": 34,
+  "versionName": "1.0.33",
+  "notes": "Files Z.ai writes on chat.z.ai now land in your project. Z.ai works in its own sandbox on the website; v1.0.33 reads those files back (the site's tool-call records and its per-message versions storage) and syncs them into the project with a review card: per-file diff, Apply / Apply all / Reject, a new Keep both choice for conflicting files (saves the Z.ai copy as name-zai-1.ext, never overwrites silently), and an honest result card - Files synced to project: N with Open buttons, Files Z.ai wrote but could NOT be read: N, binary files skipped with a message, and an amber warning (never a green finish) when Z.ai wrote files but none could be read. A manual Sync files from Z.ai button sits in the project chat above the composer, so you can pull files after the site finished. The reply protocol now teaches Z.ai to write WHOLE files with their relative paths and to list every file it changed; commands (RUN) stay optional and a reply without them is never a failure. Timeout rework: the app keeps waiting while the site is still generating (stop indicator, streaming text, or tool activity all count as progress); it times out only after 300s of NO page change, with a 30-minute absolute cap, and a timeout now shows Still running on the website with Re-read reply / Sync files now buttons instead of a dead failure. Nothing new runs at startup.",
   "artifacts": {
     "online": {
-      "url": "https://github.com/ferdausfs/Mobile-Harness/releases/download/v1.0.32/mobile-harness-online-v1.0.32.apk",
-      "sha256": "175e11247de3887b1c006ec39c28a5857130d61638d395ff55263f22e5844cb7",
-      "sizeBytes": 88780019
+      "url": "https://github.com/ferdausfs/Mobile-Harness/releases/download/v1.0.33/mobile-harness-online-v1.0.33.apk",
+      "sha256": "8eb9abd2ce23cad74af5999b52d4a3acb9d33e200bcc14150f4ed540d1671d19",
+      "sizeBytes": 88893275
     }
   }
 }

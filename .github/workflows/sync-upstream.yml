@@ -1,0 +1,117 @@
+name: Upstream Sync
+
+# Keeps this fork in sync with the real developer (techjarves/Mobile-Harness):
+#   main   := upstream/main   (always byte-exact with the developer)
+#   custom := custom + merge of upstream/main  (your updates stay on top)
+# If the merge conflicts, an issue is opened with resolution steps and the
+# job fails so it is visible. Nothing is force-pushed into custom.
+
+on:
+  schedule:
+    - cron: "0 3 * * *" # daily 03:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout custom (full history)
+        uses: actions/checkout@v4
+        with:
+          ref: custom
+          fetch-depth: 0
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Configure git
+        run: |
+          git config user.name "ferdausfs-sync-bot"
+          git config user.email "ferdausfs@users.noreply.github.com"
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream https://github.com/techjarves/Mobile-Harness.git
+          git fetch upstream main
+
+      - name: Detect upstream changes
+        id: detect
+        run: |
+          UP_SHA="$(git rev-parse upstream/main)"
+          MAIN_SHA="$(git rev-parse origin/main)"
+          echo "upstream=$UP_SHA"
+          echo "main=$MAIN_SHA"
+          if [ "$UP_SHA" = "$MAIN_SHA" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Upstream unchanged - nothing to do."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "UPSTREAM_SHA=$UP_SHA" >> "$GITHUB_ENV"
+          fi
+
+      - name: Fast-forward main to upstream (exact copy)
+        if: steps.detect.outputs.changed == 'true'
+        run: |
+          git push origin "+${UPSTREAM_SHA}:refs/heads/main"
+          echo "main is now exactly upstream/main (${UPSTREAM_SHA})"
+
+      - name: Merge upstream into custom
+        id: merge
+        if: steps.detect.outputs.changed == 'true'
+        run: |
+          if git merge --no-edit "${UPSTREAM_SHA}"; then
+            echo "result=merged" >> "$GITHUB_OUTPUT"
+            git log --oneline -3
+          else
+            git merge --abort
+            echo "result=conflict" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Push merged custom (triggers release build)
+        if: steps.merge.outputs.result == 'merged'
+        run: |
+          git push origin HEAD:refs/heads/custom
+          echo "custom updated with upstream - release build will start automatically."
+
+      - name: Open issue on conflict
+        if: steps.merge.outputs.result == 'conflict'
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          UP_SHA: ${{ env.UPSTREAM_SHA }}
+        run: |
+          TITLE="Upstream sync conflict - manual merge needed"
+          EXISTING="$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --search "${TITLE} in:title" --json number --jq '.[0].number' || true)"
+          BODY="$(cat <<EOF
+          Upstream \`techjarves/Mobile-Harness\` has new commits (\`${UP_SHA}\`) that conflict with the \`custom\` branch.
+
+          **Your custom code is safe** - nothing was changed. Resolve like this on your PC (or ask your assistant):
+
+          \`\`\`bash
+          git clone https://github.com/ferdausfs/Mobile-Harness.git
+          cd Mobile-Harness
+          git checkout custom
+          git remote add upstream https://github.com/techjarves/Mobile-Harness.git
+          git fetch upstream
+          git merge ${UP_SHA}
+          # open the conflicted files, fix the <<<<<<< blocks, then:
+          git add -A
+          git commit
+          git push origin custom
+          \`\`\`
+
+          After pushing, the release APK builds automatically.
+          EOF
+          )"
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --repo "${GITHUB_REPOSITORY}" --body "$BODY"
+          else
+            gh issue create --repo "${GITHUB_REPOSITORY}" --title "$TITLE" --body "$BODY" || true
+          fi
+          exit 1

@@ -28,6 +28,7 @@ jobs:
         with:
           ref: custom
           fetch-depth: 0
+          submodules: recursive
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4

@@ -36,13 +36,12 @@ jobs:
           java-version: "17"
           cache: gradle
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install NDK / CMake / platforms, accept licenses
+      - name: Verify Android SDK and install NDK / CMake
         run: |
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          sdkmanager --version || true
           yes | sdkmanager --licenses > /dev/null || true
-          sdkmanager --install "ndk;28.2.13676358" "cmake;3.22.1" "platforms;android-28" > /dev/null
+          sdkmanager --install "ndk;28.2.13676358" "cmake;3.22.1" "platforms;android-36" "platforms;android-28"
 
       - name: Restore release keystore
         env:

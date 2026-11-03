@@ -41,6 +41,15 @@ enum class ProviderKind(
         fixedBaseUrl = true,
         fixedProtocol = true,
     ),
+    OLLAMA_CLOUD(
+        "Ollama Cloud",
+        "OpenAI-compatible models on Ollama's cloud GPUs",
+        ProviderProtocol.OPENAI_CHAT,
+        "https://ollama.com/api",
+        "gpt-oss:120b",
+        fixedBaseUrl = true,
+        fixedProtocol = true,
+    ),
     CUSTOM("Custom API", "Anthropic-compatible endpoint", ProviderProtocol.ANTHROPIC_GATEWAY, "", "", true),
 }
 
@@ -88,6 +97,7 @@ val DEEPSEEK_HARNESS_PROVIDERS: Set<ProviderKind> = setOf(
     ProviderKind.LLM_ROUTER,
     ProviderKind.KIMI,
     ProviderKind.NVIDIA_NIM,
+    ProviderKind.OLLAMA_CLOUD,
     ProviderKind.CUSTOM,
 )
 
@@ -100,7 +110,7 @@ val DSH_PROTOCOL_PROVIDERS: Set<ProviderKind> = setOf(
 
 fun defaultDshApiForProvider(kind: ProviderKind): String = when (kind) {
     ProviderKind.OPENCODE_ZEN -> "openai-responses"
-    ProviderKind.NVIDIA_NIM -> "openai-completions"
+    ProviderKind.NVIDIA_NIM, ProviderKind.OLLAMA_CLOUD -> "openai-completions"
     else -> "anthropic-messages"
 }
 
@@ -110,10 +120,12 @@ fun defaultDshApiForProvider(kind: ProviderKind): String = when (kind) {
  */
 fun inferredDshApiForUrl(baseUrl: String): String {
     val normalized = baseUrl.trim().trimEnd('/').lowercase(Locale.ROOT)
+    val host = runCatching { java.net.URI(normalized).host.orEmpty() }.getOrDefault("")
     return when {
         normalized.endsWith("/responses") -> "openai-responses"
         "/anthropic" in normalized || "api.anthropic.com" in normalized -> "anthropic-messages"
         normalized.endsWith("/v1") -> "openai-completions"
+        host.equals("ollama.com", ignoreCase = true) -> "openai-completions"
         else -> "anthropic-messages"
     }
 }

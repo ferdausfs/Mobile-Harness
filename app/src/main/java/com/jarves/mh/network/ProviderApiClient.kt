@@ -14,6 +14,12 @@ import kotlinx.coroutines.withContext
 
 data class DiscoveredModel(val id: String, val displayName: String = id, val isFree: Boolean = false)
 
+/**
+ * Identifies the app on every provider request. Android's default Dalvik User-Agent is
+ * blocked by some provider edges (ollama.com answers 403 before the key is ever checked).
+ */
+internal const val PROVIDER_USER_AGENT = "MobileHarness/1.0.10"
+
 sealed interface ModelDiscoveryResult {
     data class Success(val models: List<DiscoveredModel>, val endpoint: String) : ModelDiscoveryResult
     data class Failure(val message: String, val providerMessage: String? = null) : ModelDiscoveryResult
@@ -60,7 +66,13 @@ class ProviderApiClient(private val context: Context? = null) {
             val response = request(endpoint, "GET", discoveryKey, protocol = protocol)
             when {
                 response.code == 401 || response.code == 403 -> {
-                    authError = true
+                    if (response.code == 403 && isEdgeBlock(response.code, response.body)) {
+                        val who = runCatching { URL(baseUrl).host }.getOrDefault("").ifBlank { "The provider" }
+                        lastMessage = "$who refused the app's connection before checking the key (HTTP 403). " +
+                            "This is a connection block, not a key problem."
+                    } else {
+                        authError = true
+                    }
                     lastProviderMessage = providerErrorMessage(response.body)
                 }
                 response.code in 200..299 -> {
@@ -113,19 +125,35 @@ class ProviderApiClient(private val context: Context? = null) {
         if (baseUrl.isBlank() || model.isBlank()) {
             return@withContext ConnectionValidation.Failure(text(R.string.rt_api_required_fields, "Base URL, model, and API key are required."))
         }
-        val endpoint = messagesEndpoint(baseUrl, protocol)
         val body = validationBody(model, protocol, openRouterProviderOrder, openRouterAllowFallbacks)
         // Gateways may need to cold-start a model before returning the first token.
         // A ten-second validation timeout produced false "network" failures even
         // though discovery and the endpoint itself were healthy.
-        val response = request(endpoint, "POST", apiKey, body, protocol, connectTimeoutMs = 12_000, readTimeoutMs = 45_000)
+        val candidates = validationEndpoints(baseUrl, protocol)
+        var response = HttpResult(0, "", null)
+        for ((index, endpoint) in candidates.withIndex()) {
+            response = request(endpoint, "POST", apiKey, body, protocol, connectTimeoutMs = 12_000, readTimeoutMs = 45_000)
+            if (response.code in 200..299) break
+            // Try the next wire format only on a clean 404; every other failure is final.
+            if (response.code != 404 || index == candidates.lastIndex) break
+        }
         when {
             response.code in 200..299 -> ConnectionValidation.Success(text(R.string.rt_api_connection_verified, "Connection verified."))
-            response.code == 401 || response.code == 403 -> ConnectionValidation.Failure(
-                text(R.string.rt_api_check_key, "Check this API key or select another saved key."),
-                providerErrorMessage(response.body),
-                text(R.string.rt_api_label_rejected, "Rejected"),
-            )
+            response.code == 401 || response.code == 403 -> {
+                val message = if (isEdgeBlock(response.code, response.body)) {
+                    val who = runCatching { URL(baseUrl).host }.getOrDefault("").ifBlank { "The provider" }
+                    "$who refused the app's connection before checking the key (HTTP 403). " +
+                        "This is a connection block, not a key problem."
+                } else {
+                    val hint = if (isOllamaHost(baseUrl)) " Get a Cloud key at ollama.com/keys." else ""
+                    text(R.string.rt_api_check_key, "Check this API key or select another saved key.") + hint
+                }
+                ConnectionValidation.Failure(
+                    message,
+                    providerErrorMessage(response.body),
+                    text(R.string.rt_api_label_rejected, "Rejected"),
+                )
+            }
             response.code == 404 -> ConnectionValidation.Failure(
                 text(R.string.rt_api_check_base_url, "Check the Base URL and selected gateway protocol."),
                 providerErrorMessage(response.body),
@@ -186,6 +214,7 @@ class ProviderApiClient(private val context: Context? = null) {
                 readTimeout = readTimeoutMs
                 setRequestProperty("Accept", "application/json")
                 setRequestProperty("Content-Type", "application/json")
+                setRequestProperty("User-Agent", PROVIDER_USER_AGENT)
                 if (apiKey.isNotBlank()) {
                     setRequestProperty("Authorization", "Bearer $apiKey")
                 }
@@ -220,6 +249,12 @@ class ProviderApiClient(private val context: Context? = null) {
 
     private fun modelEndpoints(baseUrl: String, protocol: ProviderProtocol): List<String> {
         val base = baseUrl.trim().trimEnd('/')
+        if (isOllamaHost(base)) {
+            // Ollama Cloud: the native /api/tags catalog is public and complete; the
+            // OpenAI /v1/models list can come back empty for account-scoped keys.
+            val root = ollamaRoot(base)
+            return listOf("$root/api/tags", "$root/v1/models")
+        }
         val withoutAnthropic = base.removeSuffix("/anthropic")
         val candidates = when (protocol) {
             ProviderProtocol.OPENROUTER -> listOf("$base/v1/models")
@@ -236,6 +271,44 @@ class ProviderApiClient(private val context: Context? = null) {
             ProviderProtocol.OPENAI_CHAT -> "$base/chat/completions"
             ProviderProtocol.OPENAI_RESPONSES -> "$base/responses"
             else -> if (base.endsWith("/v1")) "$base/messages" else "$base/v1/messages"
+        }
+    }
+
+    /**
+     * Wire endpoints tried in order during validation. Ollama Cloud: the documented
+     * native /api/chat is primary (it accepts the same body shape and ignores
+     * max_tokens), the OpenAI-compatible /v1 shim follows as fallback — a 2xx on
+     * /api/chat verifies the key even when /v1 answers 401.
+     */
+    private fun validationEndpoints(baseUrl: String, protocol: ProviderProtocol): List<String> {
+        if (isOllamaHost(baseUrl)) {
+            val root = ollamaRoot(baseUrl)
+            return listOf("$root/api/chat", "$root/v1/chat/completions")
+        }
+        return listOf(messagesEndpoint(baseUrl, protocol))
+    }
+
+    /**
+     * A 403 whose body is not JSON is an edge/CDN client block: the request was refused
+     * BEFORE the key was evaluated (ollama.com's Google Frontend does this to unknown
+     * User-Agents), so it must not be reported as a key problem.
+     */
+    private fun isEdgeBlock(code: Int, body: String): Boolean {
+        val trimmed = body.trim()
+        return code == 403 && !trimmed.startsWith("{") && !trimmed.startsWith("[")
+    }
+
+    private fun isOllamaHost(baseUrl: String): Boolean = runCatching {
+        java.net.URI(baseUrl.trim()).host.orEmpty().equals("ollama.com", ignoreCase = true)
+    }.getOrDefault(false)
+
+    /** Ollama Cloud host root: accepts https://ollama.com, .../api or .../v1 and returns the bare host. */
+    private fun ollamaRoot(baseUrl: String): String {
+        val base = baseUrl.trim().trimEnd('/')
+        return when {
+            base.endsWith("/api") -> base.removeSuffix("/api")
+            base.endsWith("/v1") -> base.removeSuffix("/v1")
+            else -> base
         }
     }
 

@@ -764,6 +764,14 @@ internal object DshRouteMapper {
                 defaultModel = model,
                 custom = DshCustomRoute("openai-completions", profile.resolvedBaseUrl),
             )
+            ProviderKind.OLLAMA_CLOUD -> DshRoute(
+                name = "mh-ollama",
+                keyEnv = DshRuntimeBridge.FALLBACK_KEY_ENV,
+                defaultModel = model,
+                // DSH speaks the OpenAI wire; Ollama serves it at /v1, not at the
+                // native /api root our own gateway prefers.
+                custom = DshCustomRoute("openai-completions", ollamaOpenAiCompatibleUrl(profile.resolvedBaseUrl)),
+            )
             ProviderKind.CUSTOM -> DshRoute(
                 name = "mh-custom",
                 keyEnv = DshRuntimeBridge.FALLBACK_KEY_ENV,
@@ -772,6 +780,19 @@ internal object DshRouteMapper {
             )
             ProviderKind.CLAUDE -> throw IllegalArgumentException("Claude subscription login is not supported by DeepSeek Harness")
         }
+    }
+
+    /**
+     * DSH speaks the OpenAI/Anthropic wires, so an Ollama host must resolve to its
+     * OpenAI-compatible /v1 tree. Accepts https://ollama.com, .../api or .../v1 and
+     * returns the canonical /v1 base; non-Ollama URLs pass through unchanged.
+     */
+    private fun ollamaOpenAiCompatibleUrl(baseUrl: String): String {
+        val base = baseUrl.trim().trimEnd('/')
+        val host = runCatching { java.net.URI(base).host.orEmpty() }.getOrDefault("")
+        if (!host.equals("ollama.com", ignoreCase = true)) return base
+        val root = base.removeSuffix("/api").removeSuffix("/v1")
+        return "$root/v1"
     }
 }
 

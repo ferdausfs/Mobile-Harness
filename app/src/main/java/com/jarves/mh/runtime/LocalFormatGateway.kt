@@ -175,7 +175,7 @@ internal class LocalFormatGateway(
     }
 
     private fun callProvider(body: JSONObject): Pair<Int, String> {
-        val endpoint = profile.baseUrl.trimEnd('/') + "/chat/completions"
+        val endpoint = ollamaAwareUrl(profile.baseUrl.trimEnd('/')) + "/chat/completions"
         if (!com.jarves.mh.network.LocalNetwork.isPlainHttpAllowed(endpoint)) {
             return 400 to errorJson("invalid_request_error", "Plain http:// is only allowed for local network addresses")
         }
@@ -186,6 +186,9 @@ internal class LocalFormatGateway(
             connection.readTimeout = 180_000
             connection.doOutput = true
             connection.setRequestProperty("Content-Type", "application/json")
+            // Never send Android's default Dalvik User-Agent: ollama.com's edge blocks it
+            // with 403 before the key is checked.
+            connection.setRequestProperty("User-Agent", com.jarves.mh.network.PROVIDER_USER_AGENT)
             connection.setRequestProperty("Authorization", "Bearer $apiKey")
             connection.outputStream.use { it.write(body.toString().toByteArray()) }
             val code = connection.responseCode
@@ -272,6 +275,16 @@ internal class LocalFormatGateway(
         .removePrefix("anthropic/")
         .substringBefore('[')
         .trim()
+
+    /**
+     * The OpenAI wire lives at https://ollama.com/v1, not at the native /api root this
+     * provider kind stores, so resolve the base up front. Non-Ollama URLs pass through.
+     */
+    private fun ollamaAwareUrl(base: String): String {
+        val host = runCatching { java.net.URI(base).host.orEmpty() }.getOrDefault("")
+        if (!host.equals("ollama.com", ignoreCase = true)) return base
+        return base.removeSuffix("/api").removeSuffix("/v1") + "/v1"
+    }
 
     private fun errorJson(type: String, message: String) = JSONObject().put("type", "error").put("error", JSONObject().put("type", type).put("message", message)).toString()
 

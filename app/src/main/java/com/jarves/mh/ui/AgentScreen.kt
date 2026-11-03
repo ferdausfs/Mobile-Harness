@@ -278,6 +278,7 @@ fun AgentScreen(
         val effectiveKey = apiKey.trim().ifBlank { newApiKey.trim() }
         val supportsPublicDiscovery = selectedKind == ProviderKind.LLM_ROUTER ||
             selectedKind == ProviderKind.OPENCODE_ZEN ||
+            selectedKind == ProviderKind.OLLAMA_CLOUD || // native /api/tags catalog is public
             selectedKind == ProviderKind.CUSTOM // self-hosted servers often need no key
         if (effectiveKey.isBlank() && !supportsPublicDiscovery) {
             status = context.getString(R.string.st_discover_need_key)
@@ -2171,6 +2172,10 @@ private fun defaultModelsForProvider(kind: ProviderKind, context: android.conten
     )
     ProviderKind.NVIDIA_NIM -> listOf(
         DiscoveredModel(ProviderKind.NVIDIA_NIM.defaultModel, "Qwen 2.5 Coder 32B"),
+    )
+    ProviderKind.OLLAMA_CLOUD -> listOf(
+        DiscoveredModel(ProviderKind.OLLAMA_CLOUD.defaultModel, "GPT-OSS 120B"),
+        DiscoveredModel("gemma4:31b", "Gemma 4 31B"),
     )
     ProviderKind.ANTHROPIC -> listOf(
         DiscoveredModel("claude-3-7-sonnet-20250219", "Claude 3.7 Sonnet (Hybrid)"),

@@ -68,6 +68,34 @@ jobs:
           echo "base=$BASE" >> "$GITHUB_OUTPUT"
           echo "Base version: $BASE, run number: ${{ github.run_number }}"
 
+      # Antigravity CLI installs ONLY from the bundle embedded inside the APK
+      # (RuntimeInstaller.ensureAgyInstalled uses forceEmbedded=true and the app
+      # rejects a missing asset). dist/runtime-bundles/*.tar.zst is gitignored,
+      # so pull the exact pinned bundle the upstream developer publishes and
+      # stage it where prepareBundledAgentAssets (app/build.gradle.kts) copies
+      # it into the APK. Name/tag/sha are parsed from source so upstream version
+      # bumps are picked up automatically; a mismatch fails the build loudly
+      # instead of shipping an APK where Antigravity cannot install.
+      - name: Fetch embedded Antigravity runtime bundle
+        run: |
+          set -e
+          FILE="$(grep -oP 'pocketdev-agy-arm64-[0-9.]+\.tar\.zst' app/build.gradle.kts | head -1)"
+          TAG="$(grep -oP 'releases/download/\Kruntime-[0-9.]+' app/build.gradle.kts | head -1)"
+          EXPECTED="$(grep -A4 'AGY_BUNDLE = RuntimeBundle' app/src/main/java/com/jarves/mh/runtime/RuntimeInstaller.kt | grep -oP 'sha256 = "\K[0-9a-f]{64}' | head -1)"
+          if [ -z "$FILE" ] || [ -z "$TAG" ] || [ -z "$EXPECTED" ]; then
+            echo "Could not parse agy bundle name/tag/sha from source (FILE=$FILE TAG=$TAG)"
+            exit 1
+          fi
+          URL="https://github.com/techjarves/Mobile-Harness/releases/download/${TAG}/${FILE}"
+          echo "Fetching $URL"
+          curl -fL --retry 3 --retry-delay 5 -o "dist/runtime-bundles/${FILE}" "$URL"
+          ACTUAL="$(sha256sum "dist/runtime-bundles/${FILE}" | cut -d' ' -f1)"
+          echo "bundle: $FILE ($(wc -c < "dist/runtime-bundles/${FILE}") bytes)"
+          echo "sha256 expected=$EXPECTED"
+          echo "sha256 actual  =$ACTUAL"
+          [ "$ACTUAL" = "$EXPECTED" ] || { echo "FATAL: Antigravity bundle checksum mismatch"; exit 1; }
+          echo "agy_file=$FILE" >> "$GITHUB_ENV"
+
       - name: Build signed Online release APK
         env:
           MH_UPLOAD_STORE_FILE: ${{ runner.temp }}/mh-release.jks
@@ -80,6 +108,19 @@ jobs:
             -PappVersionCode=$((1000 + ${{ github.run_number }})) \
             -PappVersionName="${{ steps.ver.outputs.base }}-c${{ github.run_number }}" \
             --stacktrace
+
+      # Fail loudly if the agy bundle ever stops being embedded again.
+      - name: Verify Antigravity bundle is inside the APK
+        run: |
+          set -e
+          APK="$(ls app/build/outputs/apk/online/release/*release*.apk | head -1)"
+          FILE="${{ env.agy_file }}"
+          if ! unzip -l "$APK" | grep -q "assets/runtime/${FILE}"; then
+            echo "FATAL: assets/runtime/${FILE} missing from APK — Antigravity would fail to install"
+            unzip -l "$APK" | grep "assets/" || true
+            exit 1
+          fi
+          echo "Antigravity bundle embedded OK ($(unzip -l "$APK" | grep -o "assets/runtime/${FILE}" | head -1))"
 
       - name: Rename APK
         id: apk
@@ -99,6 +140,8 @@ jobs:
             Signed release APK from the `custom` branch (upstream ${{ steps.ver.outputs.base }} + your updates).
             - Build: ${{ github.run_number }}
             - Commit: ${{ github.sha }}
+            - Antigravity CLI runtime bundle embedded (version-pinned)
+            - Ollama Cloud provider included
             Install directly over the previous custom build (same signature).
           files: ${{ steps.apk.outputs.file }}
           fail_on_unmatched_files: true

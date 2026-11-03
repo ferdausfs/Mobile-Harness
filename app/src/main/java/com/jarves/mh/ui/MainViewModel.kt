@@ -2968,7 +2968,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         return when {
             value.contains("not installed", true) -> str(R.string.vm_antigravity_cli_missing)
             value.contains("sign-in", true) || value.contains("not signed in", true) ||
-                value.contains("authentication", true) -> str(R.string.vm_antigravity_reconnect)
+                value.contains("authentication", true) -> {
+                // Surface the raw agy words (after the bridge's [agy] marker)
+                // so a failed probe shows the real cause, not just the label.
+                val rawTail = value.substringAfter("[agy]", "").trim().take(240)
+                if (rawTail.isBlank()) str(R.string.vm_antigravity_reconnect)
+                else str(R.string.vm_antigravity_reconnect) + " · " + rawTail
+            }
             value.contains("did not answer", true) -> str(R.string.vm_antigravity_no_answer)
             value.isBlank() -> str(R.string.vm_antigravity_no_answer)
             else -> value.take(200)

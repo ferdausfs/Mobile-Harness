@@ -1625,6 +1625,13 @@ class RuntimeInstaller(private val context: Context) {
                 // run, moving users to an untested release behind the installed
                 // version marker. Only "true" is honoured; "1" is ignored.
                 put("AGY_CLI_DISABLE_AUTO_UPDATE", "true")
+                // Google endpoints can drop Go's post-quantum (ML-KEM) TLS
+                // handshake on some mobile networks — the CLI then reports
+                // loadCodeAssist EOF / authentication errors even when the
+                // OAuth flow itself succeeded. ML-KEM is optional; forcing a
+                // classical key exchange restores the connection. Go binaries
+                // honour this; Node, Python, and Git ignore the variable.
+                put("GODEBUG", "tlsmlkem=0")
                 putAll(environment)
             },
             cwd = context.filesDir.absolutePath,

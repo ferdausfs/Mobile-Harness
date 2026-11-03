@@ -175,10 +175,12 @@ class AntigravityBridgeTest {
 
     @Test
     fun `genuine missing authentication still asks for Google sign in`() {
-        assertEquals(
-            "Antigravity needs Google sign-in. Open Settings → Coding agent.",
-            antigravityFriendlyError("You are not logged into Antigravity"),
+        val message = antigravityFriendlyError("You are not logged into Antigravity")
+        assertTrue(
+            "Antigravity needs Google sign-in. Open Settings → Coding agent." in message,
         )
+        // The raw agy words must survive so a failed probe can be diagnosed.
+        assertTrue("[agy] You are not logged into Antigravity" in message)
     }
 
     @Test

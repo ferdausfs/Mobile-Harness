@@ -654,7 +654,11 @@ internal fun antigravityFriendlyError(raw: String, diagnostic: String = ""): Str
             value.contains("authentication failed", true) ||
             value.contains("not signed in", true) ||
             value.contains("not logged in", true) ->
-            "Antigravity needs Google sign-in. Open Settings → Coding agent."
+            // Keep a short raw tail: sign-in state lives in agy's own token
+            // store, and the real cause (stale token format, loadCodeAssist
+            // EOF, expired refresh token) is only visible in agy's own words.
+            "Antigravity needs Google sign-in. Open Settings → Coding agent. [agy] " +
+                value.take(280)
         isStaleAntigravityConversation(value) ->
             "The previous Antigravity conversation is no longer available. Send your message again to start a new one."
         value.contains("out of credits", true) || value.contains("quota", true) ->
